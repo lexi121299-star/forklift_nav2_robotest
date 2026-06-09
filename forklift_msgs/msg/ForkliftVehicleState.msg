@@ -1,0 +1,20 @@
+std_msgs/Header header
+
+bool enabled
+bool auto_mode
+bool emergency_stopped
+bool soft_emergency_stop
+bool parking_brake
+bool interlock
+
+float64 velocity_mps
+float64 left_drive_rpm
+float64 right_drive_rpm
+float64 steering_angle_rad
+float64 steering_angle_deg
+
+float64 battery_percent
+float64 drive_controller_temperature_c
+float64 lift_controller_temperature_c
+
+string mode

@@ -1,0 +1,18 @@
+<library path="forklift_nav2_plugins">
+  <class
+    name="forklift_nav2_plugins/OruGlobalPlanner"
+    type="forklift_nav2_plugins::OruGlobalPlanner"
+    base_class_type="nav2_core::GlobalPlanner">
+    <description>
+      Costmap-aware A* global planner scaffold for adding ORU-style motion primitives later.
+    </description>
+  </class>
+  <class
+    name="forklift_nav2_plugins/ForkliftMpcController"
+    type="forklift_nav2_plugins::ForkliftMpcController"
+    base_class_type="nav2_core::Controller">
+    <description>
+      Predictive forklift controller scaffold using sampled velocity and steering commands.
+    </description>
+  </class>
+</library>

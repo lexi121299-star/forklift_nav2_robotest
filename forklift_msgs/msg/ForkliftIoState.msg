@@ -1,0 +1,18 @@
+std_msgs/Header header
+
+bool lower_valve_output
+bool lift_valve_output
+bool retract_valve_output
+bool extend_valve_output
+bool side_shift_left_output
+bool side_shift_right_output
+bool tilt_forward_output
+bool tilt_backward_output
+
+bool brake_relay
+bool reverse_relay
+bool main_contactor
+bool auto_mode_input
+bool soft_emergency_stop_input
+bool parking_brake_input
+bool slowdown_switch_input

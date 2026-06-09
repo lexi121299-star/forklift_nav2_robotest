@@ -1,0 +1,35 @@
+# ROS 2 build products
+/build/
+/install/
+/log/
+
+# Runtime logs and local simulator state
+/ros_logs/
+/gazebo_home/
+*.log
+
+# Python cache/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local agent/editor state
+/.agents/
+/.codex/
+.vscode/
+.idea/
+
+# Large or separately managed third-party source trees
+/ACADOtoolkit/
+/iliad/
+/navigation_oru-release/
+
+# Early local experiments kept out of the main Nav2/Gazebo baseline
+/forklift_sim/
+/forklift_warehouse_sim/
+
+# Temporary/scratch files
+/test
+/tmp/
+*.bag
+*.db3

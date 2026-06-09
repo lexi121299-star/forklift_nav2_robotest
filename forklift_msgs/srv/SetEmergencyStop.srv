@@ -1,0 +1,4 @@
+bool emergency_stop
+---
+bool success
+string message
