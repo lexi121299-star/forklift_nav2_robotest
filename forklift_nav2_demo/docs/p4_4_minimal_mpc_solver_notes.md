@@ -185,12 +185,18 @@ log/p4_4_smoke/nav2_bridge_launch.log
 log/p4_4_smoke/follow_path_direct_client.log
 ```
 
-## 8. 下一步
+## 8. 后续
 
-继续增强 P4.4：
+P4.5 已继续验证 Nav2 Controller API 接入，详见：
 
 ```text
-让 solver 完全替代旧 path candidate scorer
+forklift_nav2_demo/docs/p4_5_nav2_controller_api_notes.md
+```
+
+后续可以在 P5/P6 再增强：
+
+```text
+trajectory smoothing / path preprocessing
 增加沿 preview window 的 footprint collision check
 逐步评估是否移植 ORU qpProblem / qpConstraints / qpOASES
 ```

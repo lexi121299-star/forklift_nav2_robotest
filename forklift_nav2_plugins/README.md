@@ -8,13 +8,15 @@ global costmap and avoids lethal cells, but it is not yet a full ORU lattice or
 motion-primitive planner.
 
 The first controller plugin is `forklift_nav2_plugins/ForkliftMpcController`.
-It is a sampled predictive controller scaffold for the forklift. It samples
-linear velocity and steering angle commands over a short horizon, scores the
-simulated trajectories against the local costmap and global path, and publishes
-the best command as `cmd_vel`. It is the bridge point for integrating the ORU
-QP/MPC controller later. It can also publish
-`forklift_msgs/msg/ForkliftControlCommand` when `publish_control_cmd` is enabled,
-while still returning the Nav2-required `TwistStamped`.
+It keeps the Nav2 controller API while building an internal MPC data flow:
+`nav_msgs/Path` is converted to an MPC trajectory, a rolling preview window is
+cut from the current state, and a minimal constrained solver selects velocity
+and steering-rate commands. The selected command is converted back to the
+Nav2-required `TwistStamped`. It can also publish
+`forklift_msgs/msg/ForkliftControlCommand` when `publish_control_cmd` is enabled.
+In bridge-mode simulation, that shared command drives `sim_command_bridge`,
+which publishes the Gazebo command velocity while Gazebo remains the `/odom` and
+TF source.
 
 ## Planner Server Example
 
@@ -63,6 +65,8 @@ controller_server:
       lookahead_distance: 1.4
       velocity_samples: 6
       steering_samples: 9
+      preview_window_points: 10
+      use_mpc_solver: true
       use_collision_check: true
       collision_cost_threshold: 253
       publish_control_cmd: false

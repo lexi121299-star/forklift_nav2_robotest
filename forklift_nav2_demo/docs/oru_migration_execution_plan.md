@@ -690,15 +690,16 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 ```text
 [x] P0.1 修到 2D Pose Estimate、/odom、TF 稳定
 [x] P0.2 让手画 FollowPath 能走完整短路径
-[ ] P1.1 创建 forklift_msgs
-[ ] P1.2 定义 ForkliftControlCommand / ForkliftVehicleState
-[ ] P2.1 创建 forklift_vehicle_interface
-[ ] P2.2 写仿真 bridge: ForkliftControlCommand -> cmd_vel
-[ ] P3.1 写 forklift_vehicle_model
-[ ] P4.1 把 ORU State / Control 概念移入 ForkliftMpcController
-[ ] P4.2 把 Path 转成内部 Trajectory
-[ ] P4.3 加 preview window
-[ ] P4.4 接最小 QP/MPC 求解
+[x] P1.1 创建 forklift_msgs
+[x] P1.2 定义 ForkliftControlCommand / ForkliftVehicleState
+[x] P2.1 创建 forklift_vehicle_interface
+[x] P2.2 写仿真 bridge: ForkliftControlCommand -> cmd_vel
+[x] P3.1 写 forklift_vehicle_model
+[x] P4.1 把 ORU State / Control 概念移入 ForkliftMpcController
+[x] P4.2 把 Path 转成内部 Trajectory
+[x] P4.3 加 preview window
+[x] P4.4 接最小 QP/MPC 求解
+[x] P4.5 接 Nav2 Controller API，并通过 FollowPath / NavigateToPose 验收
 ```
 
 建议我们下一步先做：
@@ -717,6 +718,7 @@ P0.1 + P0.2
 - 2026-06-09：P0.1 通过。headless Gazebo/Nav2 启动后 readiness gate 等到 `/clock`、`/odom`、`odom -> base_link`；发布 `/initialpose` 后 AMCL 响应，`map -> odom` 连续可查，`/controller_server` 和 `/planner_server` 均为 `active [3]`。
 - 2026-06-09：P0.2 通过。使用 `/follow_path` 发送 `map` 坐标短直线路径 `(-2.0,-0.5) -> (-1.3,-0.5)`，`FollowPath` action 返回 `SUCCEEDED`，controller 日志显示 `Reached the goal!`。末态 `/odom` 约为 `x=-1.488, y=-0.500`，车辆速度接近 0。
 - 备注：实测 `general_goal_checker.xy_goal_tolerance=0.08` 会被 AMCL/map 估计误差放大并触发 `Failed to make progress`，当前保留 Nav2 goal checker 基线 `0.25`；controller 内部 `FollowPath.xy_goal_tolerance` 仍为 `0.08`，并增加 terminal slowdown 以减少末端抢停/早停。
+- 2026-06-10：P4.5 通过。`ForkliftMpcController` 保持 Nav2 `setPlan()`、`computeVelocityCommands()`、`setSpeedLimit()` 接口；bridge 模式下短直线 `/follow_path` 返回 `SUCCEEDED`，`NavigateToPose` 也返回 `SUCCEEDED`。`/forklift/control_cmd` 和 `/forklift/sim_cmd_vel` 均有连续输出并在末端停车。详见 `forklift_nav2_demo/docs/p4_5_nav2_controller_api_notes.md` 和 `log/p4_5_smoke/`。
 
 ## 14. ORU 包迁移优先级
 
