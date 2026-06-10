@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "forklift_msgs/msg/forklift_control_command.hpp"
+#include "forklift_nav2_plugins/forklift_mpc_types.hpp"
 #include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
@@ -49,17 +50,12 @@ public:
   void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
 
 private:
-  struct State2D
-  {
-    double x;
-    double y;
-    double yaw;
-  };
-
   struct Candidate
   {
     double velocity;
-    double steering;
+    double target_steering;
+    double steering_angle;
+    double steering_rate;
     double angular_velocity;
     double score;
     bool valid;
@@ -73,7 +69,7 @@ private:
 
   std::size_t nearestPathIndex(
     const nav_msgs::msg::Path & path,
-    const State2D & state,
+    const MpcState & state,
     std::size_t start_index = 0) const;
   std::size_t lookaheadPathIndex(
     const nav_msgs::msg::Path & path,
@@ -83,20 +79,22 @@ private:
   Candidate scoreCandidate(
     double velocity,
     double steering,
-    const State2D & start_state,
+    const MpcState & start_state,
     const geometry_msgs::msg::Twist & current_velocity,
     const nav_msgs::msg::Path & transformed_plan,
     std::size_t nearest_index,
     std::size_t lookahead_index) const;
 
-  bool isCollisionFree(const State2D & state, double & normalized_cost) const;
+  bool isCollisionFree(const MpcState & state, double & normalized_cost) const;
   geometry_msgs::msg::TwistStamped zeroCommand(
     const geometry_msgs::msg::PoseStamped & pose) const;
   void publishControlCommand(double velocity, double steering, const std::string & frame_id) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
-  double distanceToPose(const State2D & state, const geometry_msgs::msg::PoseStamped & pose) const;
-  double headingErrorToPose(const State2D & state, const geometry_msgs::msg::PoseStamped & pose) const;
+  double distanceToPose(const MpcState & state, const geometry_msgs::msg::PoseStamped & pose) const;
+  double headingErrorToPose(
+    const MpcState & state,
+    const geometry_msgs::msg::PoseStamped & pose) const;
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   rclcpp::Logger logger_{rclcpp::get_logger("forklift_nav2_plugins")};
@@ -148,6 +146,7 @@ private:
   double velocity_reward_weight_{0.6};
 
   double speed_limit_{0.0};
+  double last_steering_angle_{0.0};
 
   bool publish_control_cmd_{false};
   std::string control_cmd_topic_{"/forklift/control_cmd"};

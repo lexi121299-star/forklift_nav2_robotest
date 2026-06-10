@@ -228,19 +228,17 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
   const auto & goal_pose = transformed_plan.poses.back();
   if (goal_checker && goal_checker->isGoalReached(pose.pose, goal_pose.pose, velocity)) {
-    publishControlCommand(0.0, 0.0, pose.header.frame_id);
+    publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
     return zeroCommand(pose);
   }
 
-  const State2D current_state{
-    pose.pose.position.x,
-    pose.pose.position.y,
-    poseYaw(pose)};
+  const auto current_state = makeMpcStateFromPose(
+    pose.pose, last_steering_angle_, vehicle_model_);
 
   const double goal_distance = distanceToPose(current_state, goal_pose);
   const double goal_heading_error = std::abs(headingErrorToPose(current_state, goal_pose));
   if (goal_distance <= xy_goal_tolerance_ && goal_heading_error <= yaw_goal_tolerance_) {
-    publishControlCommand(0.0, 0.0, pose.header.frame_id);
+    publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
     return zeroCommand(pose);
   }
 
@@ -254,7 +252,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const double min_forward =
     allow_terminal_stop ? 0.0 : std::min(min_velocity_, active_max_velocity);
 
-  Candidate best{0.0, 0.0, 0.0, std::numeric_limits<double>::infinity(), false};
+  Candidate best{
+    0.0, 0.0, current_state.phi, 0.0, 0.0, std::numeric_limits<double>::infinity(), false};
 
   const int forward_samples = std::max(2, velocity_samples_);
   for (int i = 0; i < forward_samples; ++i) {
@@ -303,9 +302,10 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   geometry_msgs::msg::TwistStamped cmd;
   cmd.header.stamp = clock_->now();
   cmd.header.frame_id = pose.header.frame_id;
-  cmd.twist = vehicle_model_.twistFromCommand({best.velocity, best.steering});
+  last_steering_angle_ = best.steering_angle;
+  cmd.twist = vehicle_model_.twistFromCommand({best.velocity, best.steering_angle});
   cmd.twist.linear.y = 0.0;
-  publishControlCommand(best.velocity, best.steering, pose.header.frame_id);
+  publishControlCommand(best.velocity, best.steering_angle, pose.header.frame_id);
   return cmd;
 }
 
@@ -362,7 +362,7 @@ bool ForkliftMpcController::transformPose(
 
 std::size_t ForkliftMpcController::nearestPathIndex(
   const nav_msgs::msg::Path & path,
-  const State2D & state,
+  const MpcState & state,
   std::size_t start_index) const
 {
   double best_distance = std::numeric_limits<double>::infinity();
@@ -408,29 +408,32 @@ std::size_t ForkliftMpcController::lookaheadPathIndex(
 ForkliftMpcController::Candidate ForkliftMpcController::scoreCandidate(
   double velocity,
   double steering,
-  const State2D & start_state,
+  const MpcState & start_state,
   const geometry_msgs::msg::Twist & current_velocity,
   const nav_msgs::msg::Path & transformed_plan,
   std::size_t nearest_index,
   std::size_t lookahead_index) const
 {
-  const ForkliftVehicleCommand command{velocity, steering};
-  const double angular_velocity = vehicle_model_.angularVelocity(command);
-  State2D state = start_state;
+  const auto first_control = makeMpcControlToSteeringTarget(
+    velocity, start_state.phi, steering, time_step_, vehicle_model_);
+  const auto first_command = commandFromMpcControl(
+    start_state, first_control, time_step_, vehicle_model_);
+  const double angular_velocity = vehicle_model_.angularVelocity(first_command);
+  MpcState state = start_state;
   double score = 0.0;
   std::size_t search_index = nearest_index;
   const int steps = std::max(1, static_cast<int>(std::ceil(horizon_time_ / time_step_)));
 
   for (int step = 0; step < steps; ++step) {
-    const auto next_state = vehicle_model_.predict(
-      {state.x, state.y, state.yaw, steering}, command, time_step_);
-    state.x = next_state.x;
-    state.y = next_state.y;
-    state.yaw = next_state.theta;
+    const auto control = makeMpcControlToSteeringTarget(
+      velocity, state.phi, steering, time_step_, vehicle_model_);
+    state = predictMpcState(state, control, time_step_, vehicle_model_);
 
     double normalized_obstacle_cost = 0.0;
     if (!isCollisionFree(state, normalized_obstacle_cost)) {
-      return {velocity, steering, angular_velocity, score, false};
+      return {
+        velocity, steering, first_command.steering_angle, first_control.w, angular_velocity, score,
+        false};
     }
 
     search_index = nearestPathIndex(transformed_plan, state, search_index);
@@ -450,7 +453,9 @@ ForkliftMpcController::Candidate ForkliftMpcController::scoreCandidate(
   const double final_heading_error = headingErrorToPose(state, local_goal);
 
   if (std::abs(velocity) < 1e-4 && global_goal_distance > xy_goal_tolerance_) {
-    return {velocity, steering, angular_velocity, score, false};
+    return {
+      velocity, steering, first_command.steering_angle, first_control.w, angular_velocity, score,
+      false};
   }
 
   score += local_goal_weight_ * local_goal_distance * local_goal_distance;
@@ -462,10 +467,12 @@ ForkliftMpcController::Candidate ForkliftMpcController::scoreCandidate(
   score += smoothness_weight_ * (dv * dv + dw * dw);
   score -= velocity_reward_weight_ * std::abs(velocity);
 
-  return {velocity, steering, angular_velocity, score, true};
+  return {
+    velocity, steering, first_command.steering_angle, first_control.w, angular_velocity, score,
+    true};
 }
 
-bool ForkliftMpcController::isCollisionFree(const State2D & state, double & normalized_cost) const
+bool ForkliftMpcController::isCollisionFree(const MpcState & state, double & normalized_cost) const
 {
   normalized_cost = 0.0;
   if (!use_collision_check_ || !footprint_collision_checker_ || footprint_.size() < 3) {
@@ -473,7 +480,7 @@ bool ForkliftMpcController::isCollisionFree(const State2D & state, double & norm
   }
 
   const double footprint_cost =
-    footprint_collision_checker_->footprintCostAtPose(state.x, state.y, state.yaw, footprint_);
+    footprint_collision_checker_->footprintCostAtPose(state.x, state.y, state.theta, footprint_);
 
   if (footprint_cost < 0.0) {
     return false;
@@ -537,7 +544,7 @@ double ForkliftMpcController::poseYaw(const geometry_msgs::msg::PoseStamped & po
 }
 
 double ForkliftMpcController::distanceToPose(
-  const State2D & state,
+  const MpcState & state,
   const geometry_msgs::msg::PoseStamped & pose) const
 {
   return std::hypot(
@@ -546,10 +553,10 @@ double ForkliftMpcController::distanceToPose(
 }
 
 double ForkliftMpcController::headingErrorToPose(
-  const State2D & state,
+  const MpcState & state,
   const geometry_msgs::msg::PoseStamped & pose) const
 {
-  return normalizeAngle(poseYaw(pose) - state.yaw);
+  return normalizeAngle(poseYaw(pose) - state.theta);
 }
 
 }  // namespace forklift_nav2_plugins
