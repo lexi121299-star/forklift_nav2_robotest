@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(forklift_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav2_core REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
@@ -19,6 +20,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 set(dependencies
+  forklift_msgs
   geometry_msgs
   nav2_core
   nav2_costmap_2d
@@ -34,6 +36,7 @@ set(dependencies
 
 add_library(${PROJECT_NAME} SHARED
   src/forklift_mpc_controller.cpp
+  src/forklift_vehicle_model.cpp
   src/oru_global_planner.cpp
 )
 

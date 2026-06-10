@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "forklift_msgs/msg/forklift_control_command.hpp"
+#include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav2_core/controller.hpp"
@@ -14,6 +16,7 @@
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "tf2_ros/buffer.h"
 
@@ -89,7 +92,7 @@ private:
   bool isCollisionFree(const State2D & state, double & normalized_cost) const;
   geometry_msgs::msg::TwistStamped zeroCommand(
     const geometry_msgs::msg::PoseStamped & pose) const;
-  double angularVelocityFromSteering(double velocity, double steering) const;
+  void publishControlCommand(double velocity, double steering, const std::string & frame_id) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
   double distanceToPose(const State2D & state, const geometry_msgs::msg::PoseStamped & pose) const;
@@ -105,6 +108,7 @@ private:
     nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>>
   footprint_collision_checker_;
   nav2_costmap_2d::Footprint footprint_;
+  ForkliftVehicleModel vehicle_model_;
 
   std::string name_;
   std::string costmap_frame_;
@@ -115,6 +119,8 @@ private:
   double min_velocity_{0.0};
   double max_reverse_velocity_{0.0};
   double max_steering_angle_{0.55};
+  double max_steering_angle_velocity_{0.7};
+  double max_acceleration_{0.5};
   double max_angular_velocity_{0.8};
   double horizon_time_{1.8};
   double time_step_{0.2};
@@ -142,6 +148,13 @@ private:
   double velocity_reward_weight_{0.6};
 
   double speed_limit_{0.0};
+
+  bool publish_control_cmd_{false};
+  std::string control_cmd_topic_{"/forklift/control_cmd"};
+  double control_cmd_accel_time_{0.3};
+  double control_cmd_decel_time_{0.3};
+  rclcpp_lifecycle::LifecyclePublisher<forklift_msgs::msg::ForkliftControlCommand>::SharedPtr
+  control_cmd_pub_;
 };
 
 }  // namespace forklift_nav2_plugins

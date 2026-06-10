@@ -52,6 +52,11 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".max_steering_angle", rclcpp::ParameterValue(max_steering_angle_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".max_steering_angle_velocity",
+    rclcpp::ParameterValue(max_steering_angle_velocity_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".max_acceleration", rclcpp::ParameterValue(max_acceleration_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".max_angular_velocity", rclcpp::ParameterValue(max_angular_velocity_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".horizon_time", rclcpp::ParameterValue(horizon_time_));
@@ -94,12 +99,22 @@ void ForkliftMpcController::configure(
     node, name_ + ".smoothness_weight", rclcpp::ParameterValue(smoothness_weight_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".velocity_reward_weight", rclcpp::ParameterValue(velocity_reward_weight_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".publish_control_cmd", rclcpp::ParameterValue(publish_control_cmd_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".control_cmd_topic", rclcpp::ParameterValue(control_cmd_topic_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".control_cmd_accel_time", rclcpp::ParameterValue(control_cmd_accel_time_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".control_cmd_decel_time", rclcpp::ParameterValue(control_cmd_decel_time_));
 
   node->get_parameter(name_ + ".wheel_base", wheel_base_);
   node->get_parameter(name_ + ".max_velocity", max_velocity_);
   node->get_parameter(name_ + ".min_velocity", min_velocity_);
   node->get_parameter(name_ + ".max_reverse_velocity", max_reverse_velocity_);
   node->get_parameter(name_ + ".max_steering_angle", max_steering_angle_);
+  node->get_parameter(name_ + ".max_steering_angle_velocity", max_steering_angle_velocity_);
+  node->get_parameter(name_ + ".max_acceleration", max_acceleration_);
   node->get_parameter(name_ + ".max_angular_velocity", max_angular_velocity_);
   node->get_parameter(name_ + ".horizon_time", horizon_time_);
   node->get_parameter(name_ + ".time_step", time_step_);
@@ -121,13 +136,27 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".obstacle_weight", obstacle_weight_);
   node->get_parameter(name_ + ".smoothness_weight", smoothness_weight_);
   node->get_parameter(name_ + ".velocity_reward_weight", velocity_reward_weight_);
+  node->get_parameter(name_ + ".publish_control_cmd", publish_control_cmd_);
+  node->get_parameter(name_ + ".control_cmd_topic", control_cmd_topic_);
+  node->get_parameter(name_ + ".control_cmd_accel_time", control_cmd_accel_time_);
+  node->get_parameter(name_ + ".control_cmd_decel_time", control_cmd_decel_time_);
 
-  wheel_base_ = std::max(0.05, wheel_base_);
-  max_velocity_ = std::max(0.0, max_velocity_);
-  min_velocity_ = std::clamp(min_velocity_, 0.0, max_velocity_);
   max_reverse_velocity_ = std::max(0.0, max_reverse_velocity_);
-  max_steering_angle_ = std::clamp(max_steering_angle_, 0.01, 1.4);
-  max_angular_velocity_ = std::max(0.01, max_angular_velocity_);
+  vehicle_model_.setParameters({
+    wheel_base_,
+    max_steering_angle_,
+    max_steering_angle_velocity_,
+    max_velocity_,
+    max_acceleration_,
+    max_angular_velocity_});
+  const auto & vehicle_parameters = vehicle_model_.parameters();
+  wheel_base_ = vehicle_parameters.wheel_base;
+  max_velocity_ = vehicle_parameters.max_velocity;
+  min_velocity_ = std::clamp(min_velocity_, 0.0, max_velocity_);
+  max_steering_angle_ = vehicle_parameters.max_steering_angle;
+  max_steering_angle_velocity_ = vehicle_parameters.max_steering_angle_velocity;
+  max_acceleration_ = vehicle_parameters.max_acceleration;
+  max_angular_velocity_ = vehicle_parameters.max_angular_velocity;
   horizon_time_ = std::max(0.2, horizon_time_);
   time_step_ = std::clamp(time_step_, 0.02, horizon_time_);
   lookahead_distance_ = std::max(0.1, lookahead_distance_);
@@ -138,17 +167,27 @@ void ForkliftMpcController::configure(
   velocity_samples_ = std::max(2, velocity_samples_);
   steering_samples_ = std::max(3, steering_samples_);
   collision_cost_threshold_ = std::clamp(collision_cost_threshold_, 1, 255);
+  control_cmd_accel_time_ = std::max(0.0, control_cmd_accel_time_);
+  control_cmd_decel_time_ = std::max(0.0, control_cmd_decel_time_);
+
+  if (publish_control_cmd_) {
+    control_cmd_pub_ = node->create_publisher<forklift_msgs::msg::ForkliftControlCommand>(
+      control_cmd_topic_, rclcpp::QoS(10));
+  }
 
   RCLCPP_INFO(
     logger_,
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
-    "max_steer=%.3f horizon=%.3f dt=%.3f footprint_points=%zu",
+    "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
+    "footprint_points=%zu publish_control_cmd=%s",
     name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
-    horizon_time_, time_step_, footprint_.size());
+    max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
+    footprint_.size(), publish_control_cmd_ ? "true" : "false");
 }
 
 void ForkliftMpcController::cleanup()
 {
+  control_cmd_pub_.reset();
   footprint_collision_checker_.reset();
   global_plan_.poses.clear();
   costmap_ = nullptr;
@@ -156,10 +195,16 @@ void ForkliftMpcController::cleanup()
 
 void ForkliftMpcController::activate()
 {
+  if (control_cmd_pub_) {
+    control_cmd_pub_->on_activate();
+  }
 }
 
 void ForkliftMpcController::deactivate()
 {
+  if (control_cmd_pub_) {
+    control_cmd_pub_->on_deactivate();
+  }
 }
 
 void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
@@ -183,6 +228,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
   const auto & goal_pose = transformed_plan.poses.back();
   if (goal_checker && goal_checker->isGoalReached(pose.pose, goal_pose.pose, velocity)) {
+    publishControlCommand(0.0, 0.0, pose.header.frame_id);
     return zeroCommand(pose);
   }
 
@@ -194,6 +240,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const double goal_distance = distanceToPose(current_state, goal_pose);
   const double goal_heading_error = std::abs(headingErrorToPose(current_state, goal_pose));
   if (goal_distance <= xy_goal_tolerance_ && goal_heading_error <= yaw_goal_tolerance_) {
+    publishControlCommand(0.0, 0.0, pose.header.frame_id);
     return zeroCommand(pose);
   }
 
@@ -256,9 +303,9 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   geometry_msgs::msg::TwistStamped cmd;
   cmd.header.stamp = clock_->now();
   cmd.header.frame_id = pose.header.frame_id;
-  cmd.twist.linear.x = best.velocity;
+  cmd.twist = vehicle_model_.twistFromCommand({best.velocity, best.steering});
   cmd.twist.linear.y = 0.0;
-  cmd.twist.angular.z = best.angular_velocity;
+  publishControlCommand(best.velocity, best.steering, pose.header.frame_id);
   return cmd;
 }
 
@@ -367,16 +414,19 @@ ForkliftMpcController::Candidate ForkliftMpcController::scoreCandidate(
   std::size_t nearest_index,
   std::size_t lookahead_index) const
 {
-  const double angular_velocity = angularVelocityFromSteering(velocity, steering);
+  const ForkliftVehicleCommand command{velocity, steering};
+  const double angular_velocity = vehicle_model_.angularVelocity(command);
   State2D state = start_state;
   double score = 0.0;
   std::size_t search_index = nearest_index;
   const int steps = std::max(1, static_cast<int>(std::ceil(horizon_time_ / time_step_)));
 
   for (int step = 0; step < steps; ++step) {
-    state.x += velocity * std::cos(state.yaw) * time_step_;
-    state.y += velocity * std::sin(state.yaw) * time_step_;
-    state.yaw = normalizeAngle(state.yaw + angular_velocity * time_step_);
+    const auto next_state = vehicle_model_.predict(
+      {state.x, state.y, state.yaw, steering}, command, time_step_);
+    state.x = next_state.x;
+    state.y = next_state.y;
+    state.yaw = next_state.theta;
 
     double normalized_obstacle_cost = 0.0;
     if (!isCollisionFree(state, normalized_obstacle_cost)) {
@@ -448,21 +498,37 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::zeroCommand(
   return cmd;
 }
 
-double ForkliftMpcController::angularVelocityFromSteering(double velocity, double steering) const
+void ForkliftMpcController::publishControlCommand(
+  double velocity,
+  double steering,
+  const std::string & frame_id) const
 {
-  const double angular_velocity = velocity * std::tan(steering) / wheel_base_;
-  return std::clamp(angular_velocity, -max_angular_velocity_, max_angular_velocity_);
+  if (!publish_control_cmd_ || !control_cmd_pub_ || !control_cmd_pub_->is_activated()) {
+    return;
+  }
+
+  const auto clamped = vehicle_model_.clampCommand({velocity, steering});
+  const double speed = std::abs(clamped.velocity);
+
+  forklift_msgs::msg::ForkliftControlCommand command;
+  command.header.stamp = clock_->now();
+  command.header.frame_id = frame_id;
+  command.enable = true;
+  command.brake = speed < 1e-4;
+  command.forward = clamped.velocity > 1e-4;
+  command.reverse = clamped.velocity < -1e-4;
+  command.velocity_mps = speed;
+  command.steering_angle_rad = clamped.steering_angle;
+  command.steering_angle_deg = clamped.steering_angle * 180.0 / M_PI;
+  command.accel_time_sec = control_cmd_accel_time_;
+  command.decel_time_sec = control_cmd_decel_time_;
+
+  control_cmd_pub_->publish(command);
 }
 
 double ForkliftMpcController::normalizeAngle(double angle) const
 {
-  while (angle > M_PI) {
-    angle -= 2.0 * M_PI;
-  }
-  while (angle < -M_PI) {
-    angle += 2.0 * M_PI;
-  }
-  return angle;
+  return ForkliftVehicleModel::normalizeAngle(angle);
 }
 
 double ForkliftMpcController::poseYaw(const geometry_msgs::msg::PoseStamped & pose) const

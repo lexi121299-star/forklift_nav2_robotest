@@ -255,6 +255,12 @@ forklift_nav2_plugins/include/forklift_nav2_plugins/forklift_vehicle_model.hpp
 forklift_nav2_plugins/src/forklift_vehicle_model.cpp
 ```
 
+当前落地方式：
+
+- `forklift_vehicle_model` 统一保存 `wheel_base`、最大转角、最大转角速度、最大速度、最大加速度等车辆参数。
+- `ForkliftMpcController` 内部继续返回 Nav2 必须的 `TwistStamped`，但可通过 `publish_control_cmd` 参数同步发布 `/forklift/control_cmd`。
+- 仿真阶段可以用 `sim_command_bridge` 把 `/forklift/control_cmd` 转成 Gazebo 的 `/cmd_vel`；默认不开，避免和 Nav2 默认 `/cmd_vel` 链路抢同一 topic。
+
 验收标准：
 
 - 同一条 path 下，仿真 controller 和真实车接口使用同一个车辆参数：

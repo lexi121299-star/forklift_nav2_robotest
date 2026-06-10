@@ -12,7 +12,9 @@ It is a sampled predictive controller scaffold for the forklift. It samples
 linear velocity and steering angle commands over a short horizon, scores the
 simulated trajectories against the local costmap and global path, and publishes
 the best command as `cmd_vel`. It is the bridge point for integrating the ORU
-QP/MPC controller later.
+QP/MPC controller later. It can also publish
+`forklift_msgs/msg/ForkliftControlCommand` when `publish_control_cmd` is enabled,
+while still returning the Nav2-required `TwistStamped`.
 
 ## Planner Server Example
 
@@ -53,6 +55,8 @@ controller_server:
       min_velocity: 0.03
       max_reverse_velocity: 0.0
       max_steering_angle: 0.55
+      max_steering_angle_velocity: 0.7
+      max_acceleration: 0.5
       max_angular_velocity: 0.8
       horizon_time: 1.8
       time_step: 0.2
@@ -61,6 +65,8 @@ controller_server:
       steering_samples: 9
       use_collision_check: true
       collision_cost_threshold: 253
+      publish_control_cmd: false
+      control_cmd_topic: "/forklift/control_cmd"
 ```
 
 ## Roadmap

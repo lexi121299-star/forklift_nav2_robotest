@@ -128,6 +128,8 @@ controller_server:
       min_velocity: 0.06
       max_reverse_velocity: 0.0
       max_steering_angle: 0.55
+      max_steering_angle_velocity: 0.7
+      max_acceleration: 0.5
       max_angular_velocity: 0.8
       horizon_time: 1.8
       time_step: 0.2
@@ -149,6 +151,10 @@ controller_server:
       obstacle_weight: 12.0
       smoothness_weight: 1.0
       velocity_reward_weight: 1.2
+      publish_control_cmd: true
+      control_cmd_topic: "/forklift/control_cmd"
+      control_cmd_accel_time: 0.3
+      control_cmd_decel_time: 0.3
 
 controller_server_rclcpp_node:
   ros__parameters:

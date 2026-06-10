@@ -27,6 +27,13 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     nav2_start_delay = LaunchConfiguration('nav2_start_delay')
     gazebo_gui = LaunchConfiguration('gazebo_gui')
+    use_sim_command_bridge = LaunchConfiguration('use_sim_command_bridge')
+    bridge_wheel_base = LaunchConfiguration('bridge_wheel_base')
+    bridge_max_velocity_mps = LaunchConfiguration('bridge_max_velocity_mps')
+    bridge_max_steering_angle_rad = LaunchConfiguration('bridge_max_steering_angle_rad')
+    bridge_command_timeout_sec = LaunchConfiguration('bridge_command_timeout_sec')
+    bridge_control_rate_hz = LaunchConfiguration('bridge_control_rate_hz')
+    bridge_cmd_vel_topic = LaunchConfiguration('bridge_cmd_vel_topic')
     sim_ready_timeout = LaunchConfiguration('sim_ready_timeout')
     rmw_implementation = LaunchConfiguration('rmw_implementation')
     use_composition = LaunchConfiguration('use_composition')
@@ -36,6 +43,13 @@ def generate_launch_description():
             os.path.join(package_share, 'launch', 'forklift_gazebo.launch.py')),
         launch_arguments={
             'gui': gazebo_gui,
+            'use_sim_command_bridge': use_sim_command_bridge,
+            'bridge_wheel_base': bridge_wheel_base,
+            'bridge_max_velocity_mps': bridge_max_velocity_mps,
+            'bridge_max_steering_angle_rad': bridge_max_steering_angle_rad,
+            'bridge_command_timeout_sec': bridge_command_timeout_sec,
+            'bridge_control_rate_hz': bridge_control_rate_hz,
+            'bridge_cmd_vel_topic': bridge_cmd_vel_topic,
         }.items(),
     )
 
@@ -95,6 +109,19 @@ def generate_launch_description():
             'gazebo_gui',
             default_value='true',
             description='Whether to start the Gazebo client GUI.'),
+        DeclareLaunchArgument(
+            'use_sim_command_bridge',
+            default_value='false',
+            description='Start the /forklift/control_cmd to /cmd_vel bridge with Gazebo.'),
+        DeclareLaunchArgument('bridge_wheel_base', default_value='1.2'),
+        DeclareLaunchArgument('bridge_max_velocity_mps', default_value='0.45'),
+        DeclareLaunchArgument('bridge_max_steering_angle_rad', default_value='0.55'),
+        DeclareLaunchArgument('bridge_command_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument('bridge_control_rate_hz', default_value='20.0'),
+        DeclareLaunchArgument(
+            'bridge_cmd_vel_topic',
+            default_value='/forklift/sim_cmd_vel',
+            description='Gazebo command topic used by sim_command_bridge mode.'),
         DeclareLaunchArgument(
             'sim_ready_timeout',
             default_value='0.0',

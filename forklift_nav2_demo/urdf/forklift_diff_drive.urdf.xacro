@@ -1,5 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="forklift_diff_drive">
+  <xacro:arg name="gazebo_cmd_vel_topic" default="cmd_vel"/>
+
   <xacro:property name="wheel_radius" value="0.16"/>
   <xacro:property name="wheel_width" value="0.08"/>
   <xacro:property name="wheel_separation" value="0.76"/>
@@ -269,6 +271,9 @@
 
   <gazebo>
     <plugin name="forklift_diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <remapping>cmd_vel:=$(arg gazebo_cmd_vel_topic)</remapping>
+      </ros>
       <update_rate>50</update_rate>
       <left_joint>left_wheel_joint</left_joint>
       <right_joint>right_wheel_joint</right_joint>
@@ -276,7 +281,6 @@
       <wheel_diameter>${2.0 * wheel_radius}</wheel_diameter>
       <max_wheel_torque>80</max_wheel_torque>
       <max_wheel_acceleration>1.0</max_wheel_acceleration>
-      <command_topic>cmd_vel</command_topic>
       <publish_odom>true</publish_odom>
       <publish_odom_tf>true</publish_odom_tf>
       <publish_wheel_tf>false</publish_wheel_tf>

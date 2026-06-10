@@ -25,12 +25,14 @@ class SimCommandBridge(Node):
         self.declare_parameter('max_steering_angle_rad', 0.55)
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('control_rate_hz', 20.0)
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('publish_tf', False)
 
         self._wheel_base = self._positive_param('wheel_base', 1.2)
         self._max_velocity_mps = self._positive_param('max_velocity_mps', 0.4)
         self._max_steering_angle_rad = self._positive_param('max_steering_angle_rad', 0.55)
         self._command_timeout_sec = self._positive_param('command_timeout_sec', 0.5)
+        self._cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
         control_rate_hz = self._positive_param('control_rate_hz', 20.0)
 
         if self.get_parameter('publish_tf').value:
@@ -44,7 +46,7 @@ class SimCommandBridge(Node):
         self._last_command_time = self.get_clock().now()
         self._last_stop_reason = ''
 
-        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self._cmd_vel_pub = self.create_publisher(Twist, self._cmd_vel_topic, 10)
         self._vehicle_state_pub = self.create_publisher(
             ForkliftVehicleState, '/forklift/vehicle_state', 10
         )
@@ -70,7 +72,9 @@ class SimCommandBridge(Node):
         )
 
         self.create_timer(1.0 / control_rate_hz, self._on_timer)
-        self.get_logger().info('sim_command_bridge ready: /forklift/control_cmd -> /cmd_vel')
+        self.get_logger().info(
+            f'sim_command_bridge ready: /forklift/control_cmd -> {self._cmd_vel_topic}'
+        )
 
     def _positive_param(self, name: str, fallback: float) -> float:
         value = float(self.get_parameter(name).value)
