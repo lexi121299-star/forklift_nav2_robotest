@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "forklift_msgs/msg/forklift_control_command.hpp"
+#include "forklift_nav2_plugins/forklift_mpc_preview_window.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_types.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_trajectory.hpp"
 #include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
@@ -113,6 +114,7 @@ private:
   std::string costmap_frame_;
   nav_msgs::msg::Path global_plan_;
   MpcTrajectory global_trajectory_;
+  MpcPreviewWindow last_preview_window_;
 
   double wheel_base_{1.2};
   double max_velocity_{0.45};
@@ -132,6 +134,7 @@ private:
 
   int velocity_samples_{6};
   int steering_samples_{9};
+  int preview_window_points_{10};
 
   bool allow_reverse_{false};
   bool use_collision_check_{true};

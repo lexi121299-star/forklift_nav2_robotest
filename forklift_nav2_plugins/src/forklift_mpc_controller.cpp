@@ -78,6 +78,8 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".steering_samples", rclcpp::ParameterValue(steering_samples_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".preview_window_points", rclcpp::ParameterValue(preview_window_points_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_reverse", rclcpp::ParameterValue(allow_reverse_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".use_collision_check", rclcpp::ParameterValue(use_collision_check_));
@@ -125,6 +127,7 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".terminal_slowdown_distance", terminal_slowdown_distance_);
   node->get_parameter(name_ + ".velocity_samples", velocity_samples_);
   node->get_parameter(name_ + ".steering_samples", steering_samples_);
+  node->get_parameter(name_ + ".preview_window_points", preview_window_points_);
   node->get_parameter(name_ + ".allow_reverse", allow_reverse_);
   node->get_parameter(name_ + ".use_collision_check", use_collision_check_);
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
@@ -166,6 +169,7 @@ void ForkliftMpcController::configure(
   terminal_slowdown_distance_ = std::max(xy_goal_tolerance_, terminal_slowdown_distance_);
   velocity_samples_ = std::max(2, velocity_samples_);
   steering_samples_ = std::max(3, steering_samples_);
+  preview_window_points_ = std::max(1, preview_window_points_);
   collision_cost_threshold_ = std::clamp(collision_cost_threshold_, 1, 255);
   control_cmd_accel_time_ = std::max(0.0, control_cmd_accel_time_);
   control_cmd_decel_time_ = std::max(0.0, control_cmd_decel_time_);
@@ -179,10 +183,10 @@ void ForkliftMpcController::configure(
     logger_,
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
     "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
-    "footprint_points=%zu publish_control_cmd=%s",
+    "preview_points=%d footprint_points=%zu publish_control_cmd=%s",
     name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
     max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
-    footprint_.size(), publish_control_cmd_ ? "true" : "false");
+    preview_window_points_, footprint_.size(), publish_control_cmd_ ? "true" : "false");
 }
 
 void ForkliftMpcController::cleanup()
@@ -191,6 +195,7 @@ void ForkliftMpcController::cleanup()
   footprint_collision_checker_.reset();
   global_plan_.poses.clear();
   global_trajectory_.clear();
+  last_preview_window_ = {};
   costmap_ = nullptr;
 }
 
@@ -243,6 +248,20 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
   const auto current_state = makeMpcStateFromPose(
     pose.pose, last_steering_angle_, vehicle_model_);
+  last_preview_window_ = makeMpcPreviewWindow(
+    transformed_trajectory,
+    current_state,
+    {static_cast<std::size_t>(preview_window_points_)});
+  if (!last_preview_window_.valid) {
+    throw std::runtime_error("ForkliftMpcController could not build an MPC preview window");
+  }
+  RCLCPP_INFO_THROTTLE(
+    logger_, *clock_, 2000,
+    "MPC preview window: start=%zu end=%zu points=%zu length=%.3f",
+    last_preview_window_.start_index,
+    last_preview_window_.end_index,
+    last_preview_window_.points.size(),
+    last_preview_window_.length);
 
   const double goal_distance = distanceToPose(current_state, goal_pose);
   const double goal_heading_error = std::abs(headingErrorToPose(current_state, goal_pose));

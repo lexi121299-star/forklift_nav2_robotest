@@ -140,6 +140,7 @@ controller_server:
       terminal_slowdown_distance: 0.6
       velocity_samples: 8
       steering_samples: 11
+      preview_window_points: 10
       allow_reverse: false
       use_collision_check: true
       allow_unknown: false
