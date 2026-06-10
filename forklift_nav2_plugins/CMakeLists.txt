@@ -37,6 +37,7 @@ set(dependencies
 add_library(${PROJECT_NAME} SHARED
   src/forklift_mpc_controller.cpp
   src/forklift_mpc_preview_window.cpp
+  src/forklift_mpc_solver.cpp
   src/forklift_mpc_types.cpp
   src/forklift_mpc_trajectory.cpp
   src/forklift_vehicle_model.cpp
@@ -114,6 +115,18 @@ if(BUILD_TESTING)
     ament_target_dependencies(test_forklift_mpc_preview_window
       geometry_msgs
       nav_msgs
+    )
+  endif()
+
+  ament_add_gtest(test_forklift_mpc_solver
+    test/test_forklift_mpc_solver.cpp
+  )
+  if(TARGET test_forklift_mpc_solver)
+    target_link_libraries(test_forklift_mpc_solver
+      ${PROJECT_NAME}
+    )
+    ament_target_dependencies(test_forklift_mpc_solver
+      geometry_msgs
     )
   endif()
 endif()

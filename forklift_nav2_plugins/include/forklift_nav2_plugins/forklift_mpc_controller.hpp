@@ -7,6 +7,7 @@
 
 #include "forklift_msgs/msg/forklift_control_command.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_preview_window.hpp"
+#include "forklift_nav2_plugins/forklift_mpc_solver.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_types.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_trajectory.hpp"
 #include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
@@ -137,6 +138,7 @@ private:
   int preview_window_points_{10};
 
   bool allow_reverse_{false};
+  bool use_mpc_solver_{true};
   bool use_collision_check_{true};
   bool allow_unknown_{false};
 

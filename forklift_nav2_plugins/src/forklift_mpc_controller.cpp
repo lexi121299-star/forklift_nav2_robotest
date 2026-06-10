@@ -82,6 +82,8 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_reverse", rclcpp::ParameterValue(allow_reverse_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".use_mpc_solver", rclcpp::ParameterValue(use_mpc_solver_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".use_collision_check", rclcpp::ParameterValue(use_collision_check_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_unknown", rclcpp::ParameterValue(allow_unknown_));
@@ -129,6 +131,7 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".steering_samples", steering_samples_);
   node->get_parameter(name_ + ".preview_window_points", preview_window_points_);
   node->get_parameter(name_ + ".allow_reverse", allow_reverse_);
+  node->get_parameter(name_ + ".use_mpc_solver", use_mpc_solver_);
   node->get_parameter(name_ + ".use_collision_check", use_collision_check_);
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".collision_cost_threshold", collision_cost_threshold_);
@@ -183,10 +186,11 @@ void ForkliftMpcController::configure(
     logger_,
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
     "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
-    "preview_points=%d footprint_points=%zu publish_control_cmd=%s",
+    "preview_points=%d use_mpc_solver=%s footprint_points=%zu publish_control_cmd=%s",
     name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
     max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
-    preview_window_points_, footprint_.size(), publish_control_cmd_ ? "true" : "false");
+    preview_window_points_, use_mpc_solver_ ? "true" : "false", footprint_.size(),
+    publish_control_cmd_ ? "true" : "false");
 }
 
 void ForkliftMpcController::cleanup()
@@ -282,6 +286,53 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
   Candidate best{
     0.0, 0.0, current_state.phi, 0.0, 0.0, std::numeric_limits<double>::infinity(), false};
+
+  if (use_mpc_solver_) {
+    const auto solver_result = solveMpcCommand(
+      last_preview_window_,
+      current_state,
+      velocity,
+      vehicle_model_,
+      {active_max_velocity,
+        min_forward,
+        max_reverse_velocity_,
+        time_step_,
+        terminal_slowdown_distance_,
+        xy_goal_tolerance_,
+        velocity_samples_,
+        steering_samples_,
+        allow_reverse_,
+        path_distance_weight_,
+        heading_weight_,
+        1.0,
+        local_goal_weight_,
+        smoothness_weight_,
+        velocity_reward_weight_});
+    if (solver_result.valid) {
+      const auto solver_candidate = scoreCandidate(
+        solver_result.command.velocity,
+        solver_result.command.steering_angle,
+        current_state,
+        velocity,
+        transformed_plan,
+        nearest_index,
+        lookahead_index);
+      if (solver_candidate.valid) {
+        best = solver_candidate;
+        RCLCPP_INFO_THROTTLE(
+          logger_, *clock_, 2000,
+          "MPC solver seed accepted: v=%.3f w=%.3f steer=%.3f solver_score=%.3f",
+          solver_result.control.v,
+          solver_result.control.w,
+          solver_result.command.steering_angle,
+          solver_result.score);
+      } else {
+        RCLCPP_WARN_THROTTLE(
+          logger_, *clock_, 2000,
+          "MPC solver candidate failed collision/path scoring; falling back to sampled search");
+      }
+    }
+  }
 
   const int forward_samples = std::max(2, velocity_samples_);
   for (int i = 0; i < forward_samples; ++i) {
