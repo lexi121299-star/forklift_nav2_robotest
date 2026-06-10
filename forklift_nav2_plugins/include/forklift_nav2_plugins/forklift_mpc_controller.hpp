@@ -7,6 +7,7 @@
 
 #include "forklift_msgs/msg/forklift_control_command.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_types.hpp"
+#include "forklift_nav2_plugins/forklift_mpc_trajectory.hpp"
 #include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
@@ -111,6 +112,7 @@ private:
   std::string name_;
   std::string costmap_frame_;
   nav_msgs::msg::Path global_plan_;
+  MpcTrajectory global_trajectory_;
 
   double wheel_base_{1.2};
   double max_velocity_{0.45};

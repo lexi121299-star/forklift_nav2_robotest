@@ -190,6 +190,7 @@ void ForkliftMpcController::cleanup()
   control_cmd_pub_.reset();
   footprint_collision_checker_.reset();
   global_plan_.poses.clear();
+  global_trajectory_.clear();
   costmap_ = nullptr;
 }
 
@@ -210,6 +211,10 @@ void ForkliftMpcController::deactivate()
 void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
+  global_trajectory_ = pathToMpcTrajectory(global_plan_, vehicle_model_);
+  RCLCPP_DEBUG(
+    logger_, "ForkliftMpcController received plan: poses=%zu trajectory_points=%zu",
+    global_plan_.poses.size(), global_trajectory_.size());
 }
 
 geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
@@ -224,6 +229,10 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const auto transformed_plan = transformPlan(pose.header.frame_id);
   if (transformed_plan.poses.empty()) {
     throw std::runtime_error("ForkliftMpcController could not transform the global plan");
+  }
+  const auto transformed_trajectory = pathToMpcTrajectory(transformed_plan, vehicle_model_);
+  if (transformed_trajectory.empty()) {
+    throw std::runtime_error("ForkliftMpcController could not build an MPC trajectory");
   }
 
   const auto & goal_pose = transformed_plan.poses.back();

@@ -37,6 +37,7 @@ set(dependencies
 add_library(${PROJECT_NAME} SHARED
   src/forklift_mpc_controller.cpp
   src/forklift_mpc_types.cpp
+  src/forklift_mpc_trajectory.cpp
   src/forklift_vehicle_model.cpp
   src/oru_global_planner.cpp
 )
@@ -82,6 +83,21 @@ if(BUILD_TESTING)
     )
     ament_target_dependencies(test_forklift_mpc_types
       geometry_msgs
+      tf2
+      tf2_geometry_msgs
+    )
+  endif()
+
+  ament_add_gtest(test_forklift_mpc_trajectory
+    test/test_forklift_mpc_trajectory.cpp
+  )
+  if(TARGET test_forklift_mpc_trajectory)
+    target_link_libraries(test_forklift_mpc_trajectory
+      ${PROJECT_NAME}
+    )
+    ament_target_dependencies(test_forklift_mpc_trajectory
+      geometry_msgs
+      nav_msgs
       tf2
       tf2_geometry_msgs
     )
