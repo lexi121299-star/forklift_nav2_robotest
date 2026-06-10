@@ -92,6 +92,8 @@ private:
   geometry_msgs::msg::TwistStamped zeroCommand(
     const geometry_msgs::msg::PoseStamped & pose) const;
   void publishControlCommand(double velocity, double steering, const std::string & frame_id) const;
+  MpcTrajectoryOptions trajectoryOptions(double max_velocity) const;
+  double previewSpeedLimit(const MpcPreviewWindow & preview_window, double fallback) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
   double distanceToPose(const MpcState & state, const geometry_msgs::msg::PoseStamped & pose) const;
@@ -141,6 +143,8 @@ private:
   bool use_mpc_solver_{true};
   bool use_collision_check_{true};
   bool allow_unknown_{false};
+  bool preprocess_path_{true};
+  bool curvature_slowdown_enabled_{true};
 
   int collision_cost_threshold_{nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE};
 
@@ -151,6 +155,13 @@ private:
   double obstacle_weight_{12.0};
   double smoothness_weight_{1.0};
   double velocity_reward_weight_{0.6};
+  double trajectory_resample_spacing_{0.10};
+  int trajectory_smoothing_iterations_{1};
+  double trajectory_smoothing_corner_cut_ratio_{0.25};
+  double sharp_turn_warning_angle_{0.7853981633974483};
+  double minimum_turning_radius_{0.0};
+  double curvature_slowdown_lateral_accel_{0.12};
+  double min_curvature_speed_{0.08};
 
   double speed_limit_{0.0};
   double last_steering_angle_{0.0};

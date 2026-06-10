@@ -700,18 +700,20 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P4.3 加 preview window
 [x] P4.4 接最小 QP/MPC 求解
 [x] P4.5 接 Nav2 Controller API，并通过 FollowPath / NavigateToPose 验收
+[x] P5 接入轨迹处理和平滑
 ```
 
 建议我们下一步先做：
 
 ```text
-P0.1 + P0.2
+P6
 ```
 
 原因：
 
-- 如果仿真里的 `/odom`、TF、FollowPath 还不稳定，继续移植 ORU MPC 会把问题混在一起。
-- 先保证“手画 path 能完整走完”，再把 controller 内部从 sampled predictive controller 换成 ORU MPC。
+- P5 已经能把稀疏 path 变成密集、连续、带曲率诊断和限速的 trajectory。
+- 过急曲线现在会被提示并限速，但是否真的可通行还需要 P6 继续做 footprint/path feasibility。
+- ORU qpOASES 求解器仍建议放到路径处理、约束和 footprint 检查稳定之后再接。
 
 执行记录：
 
@@ -719,6 +721,7 @@ P0.1 + P0.2
 - 2026-06-09：P0.2 通过。使用 `/follow_path` 发送 `map` 坐标短直线路径 `(-2.0,-0.5) -> (-1.3,-0.5)`，`FollowPath` action 返回 `SUCCEEDED`，controller 日志显示 `Reached the goal!`。末态 `/odom` 约为 `x=-1.488, y=-0.500`，车辆速度接近 0。
 - 备注：实测 `general_goal_checker.xy_goal_tolerance=0.08` 会被 AMCL/map 估计误差放大并触发 `Failed to make progress`，当前保留 Nav2 goal checker 基线 `0.25`；controller 内部 `FollowPath.xy_goal_tolerance` 仍为 `0.08`，并增加 terminal slowdown 以减少末端抢停/早停。
 - 2026-06-10：P4.5 通过。`ForkliftMpcController` 保持 Nav2 `setPlan()`、`computeVelocityCommands()`、`setSpeedLimit()` 接口；bridge 模式下短直线 `/follow_path` 返回 `SUCCEEDED`，`NavigateToPose` 也返回 `SUCCEEDED`。`/forklift/control_cmd` 和 `/forklift/sim_cmd_vel` 均有连续输出并在末端停车。详见 `forklift_nav2_demo/docs/p4_5_nav2_controller_api_notes.md` 和 `log/p4_5_smoke/`。
+- 2026-06-10：P5 通过。`ForkliftMpcController` 内部增加 path preprocessing：重复点过滤、0.10 m 插密、轻量 corner-cut smoothing、方向/曲率估计、最小转弯半径诊断和曲率限速。headless bridge 下短直线 `/follow_path`、温和大圆弧 `/follow_path`、稀疏 90 度 `/follow_path` 均返回 `SUCCEEDED`；90 度路径日志显示 `sharp_turns=1`，3 个输入点被处理成 15 个 trajectory 点。过急圆弧会打印曲率超限并限速，随后 progress checker abort，可作为后续 P6 feasibility 参考。详见 `forklift_nav2_demo/docs/p5_trajectory_preprocessing_notes.md` 和 `log/p5_smoke/`。
 
 ## 14. ORU 包迁移优先级
 

@@ -9,10 +9,12 @@ motion-primitive planner.
 
 The first controller plugin is `forklift_nav2_plugins/ForkliftMpcController`.
 It keeps the Nav2 controller API while building an internal MPC data flow:
-`nav_msgs/Path` is converted to an MPC trajectory, a rolling preview window is
-cut from the current state, and a minimal constrained solver selects velocity
-and steering-rate commands. The selected command is converted back to the
-Nav2-required `TwistStamped`. It can also publish
+`nav_msgs/Path` is preprocessed into a denser, smoother MPC trajectory, a
+rolling preview window is cut from the current state, and a minimal constrained
+solver selects velocity and steering-rate commands. Curvature diagnostics check
+the minimum turning radius and can reduce speed through tight bends. The
+selected command is converted back to the Nav2-required `TwistStamped`. It can
+also publish
 `forklift_msgs/msg/ForkliftControlCommand` when `publish_control_cmd` is enabled.
 In bridge-mode simulation, that shared command drives `sim_command_bridge`,
 which publishes the Gazebo command velocity while Gazebo remains the `/odom` and
@@ -68,6 +70,13 @@ controller_server:
       preview_window_points: 10
       use_mpc_solver: true
       use_collision_check: true
+      preprocess_path: true
+      trajectory_resample_spacing: 0.10
+      trajectory_smoothing_iterations: 1
+      trajectory_smoothing_corner_cut_ratio: 0.25
+      curvature_slowdown_enabled: true
+      curvature_slowdown_lateral_accel: 0.12
+      min_curvature_speed: 0.08
       collision_cost_threshold: 253
       publish_control_cmd: false
       control_cmd_topic: "/forklift/control_cmd"
@@ -79,7 +88,8 @@ controller_server:
 2. Build this package and verify pluginlib can load `OruGlobalPlanner`.
 3. Switch only `planner_server` to this planner for simulation tests.
 4. Replace the neighbor expansion with forklift-specific motion primitives.
-5. Add footprint-aware collision checks and ORU-style constraint extraction.
-6. Replace DWB with `ForkliftMpcController` for simulation tests.
-7. Move ORU QP/MPC internals into the controller once the vehicle protocol and
+5. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
+6. Add footprint-aware collision checks and ORU-style constraint extraction.
+7. Replace DWB with `ForkliftMpcController` for simulation tests.
+8. Move ORU QP/MPC internals into the controller once the vehicle protocol and
    real kinematic model are fixed.

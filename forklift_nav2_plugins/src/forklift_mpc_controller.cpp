@@ -88,6 +88,30 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_unknown", rclcpp::ParameterValue(allow_unknown_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".preprocess_path", rclcpp::ParameterValue(preprocess_path_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".trajectory_resample_spacing",
+    rclcpp::ParameterValue(trajectory_resample_spacing_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".trajectory_smoothing_iterations",
+    rclcpp::ParameterValue(trajectory_smoothing_iterations_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".trajectory_smoothing_corner_cut_ratio",
+    rclcpp::ParameterValue(trajectory_smoothing_corner_cut_ratio_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".sharp_turn_warning_angle",
+    rclcpp::ParameterValue(sharp_turn_warning_angle_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".minimum_turning_radius", rclcpp::ParameterValue(minimum_turning_radius_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".curvature_slowdown_enabled",
+    rclcpp::ParameterValue(curvature_slowdown_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".curvature_slowdown_lateral_accel",
+    rclcpp::ParameterValue(curvature_slowdown_lateral_accel_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".min_curvature_speed", rclcpp::ParameterValue(min_curvature_speed_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".collision_cost_threshold", rclcpp::ParameterValue(collision_cost_threshold_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".path_distance_weight", rclcpp::ParameterValue(path_distance_weight_));
@@ -134,6 +158,17 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".use_mpc_solver", use_mpc_solver_);
   node->get_parameter(name_ + ".use_collision_check", use_collision_check_);
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
+  node->get_parameter(name_ + ".preprocess_path", preprocess_path_);
+  node->get_parameter(name_ + ".trajectory_resample_spacing", trajectory_resample_spacing_);
+  node->get_parameter(name_ + ".trajectory_smoothing_iterations", trajectory_smoothing_iterations_);
+  node->get_parameter(
+    name_ + ".trajectory_smoothing_corner_cut_ratio", trajectory_smoothing_corner_cut_ratio_);
+  node->get_parameter(name_ + ".sharp_turn_warning_angle", sharp_turn_warning_angle_);
+  node->get_parameter(name_ + ".minimum_turning_radius", minimum_turning_radius_);
+  node->get_parameter(name_ + ".curvature_slowdown_enabled", curvature_slowdown_enabled_);
+  node->get_parameter(
+    name_ + ".curvature_slowdown_lateral_accel", curvature_slowdown_lateral_accel_);
+  node->get_parameter(name_ + ".min_curvature_speed", min_curvature_speed_);
   node->get_parameter(name_ + ".collision_cost_threshold", collision_cost_threshold_);
   node->get_parameter(name_ + ".path_distance_weight", path_distance_weight_);
   node->get_parameter(name_ + ".local_goal_weight", local_goal_weight_);
@@ -173,6 +208,14 @@ void ForkliftMpcController::configure(
   velocity_samples_ = std::max(2, velocity_samples_);
   steering_samples_ = std::max(3, steering_samples_);
   preview_window_points_ = std::max(1, preview_window_points_);
+  trajectory_resample_spacing_ = std::max(0.0, trajectory_resample_spacing_);
+  trajectory_smoothing_iterations_ = std::clamp(trajectory_smoothing_iterations_, 0, 6);
+  trajectory_smoothing_corner_cut_ratio_ =
+    std::clamp(trajectory_smoothing_corner_cut_ratio_, 0.02, 0.45);
+  sharp_turn_warning_angle_ = std::clamp(sharp_turn_warning_angle_, 0.0, M_PI);
+  minimum_turning_radius_ = std::max(0.0, minimum_turning_radius_);
+  curvature_slowdown_lateral_accel_ = std::max(0.0, curvature_slowdown_lateral_accel_);
+  min_curvature_speed_ = std::clamp(min_curvature_speed_, 0.0, max_velocity_);
   collision_cost_threshold_ = std::clamp(collision_cost_threshold_, 1, 255);
   control_cmd_accel_time_ = std::max(0.0, control_cmd_accel_time_);
   control_cmd_decel_time_ = std::max(0.0, control_cmd_decel_time_);
@@ -186,10 +229,13 @@ void ForkliftMpcController::configure(
     logger_,
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
     "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
-    "preview_points=%d use_mpc_solver=%s footprint_points=%zu publish_control_cmd=%s",
+    "preview_points=%d use_mpc_solver=%s preprocess_path=%s resample=%.3f "
+    "smooth_iter=%d footprint_points=%zu publish_control_cmd=%s",
     name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
     max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
-    preview_window_points_, use_mpc_solver_ ? "true" : "false", footprint_.size(),
+    preview_window_points_, use_mpc_solver_ ? "true" : "false",
+    preprocess_path_ ? "true" : "false", trajectory_resample_spacing_,
+    trajectory_smoothing_iterations_, footprint_.size(),
     publish_control_cmd_ ? "true" : "false");
 }
 
@@ -220,10 +266,40 @@ void ForkliftMpcController::deactivate()
 void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
-  global_trajectory_ = pathToMpcTrajectory(global_plan_, vehicle_model_);
-  RCLCPP_DEBUG(
-    logger_, "ForkliftMpcController received plan: poses=%zu trajectory_points=%zu",
-    global_plan_.poses.size(), global_trajectory_.size());
+  const auto result =
+    processPathToMpcTrajectory(global_plan_, vehicle_model_, trajectoryOptions(max_velocity_));
+  global_trajectory_ = result.trajectory;
+
+  RCLCPP_INFO(
+    logger_,
+    "P5 path preprocessing: input=%zu filtered=%zu smoothed=%zu resampled=%zu "
+    "trajectory=%zu sharp_turns=%zu max_curvature=%.3f allowed=%.3f min_speed=%.3f",
+    result.diagnostics.input_points,
+    result.diagnostics.filtered_points,
+    result.diagnostics.smoothed_points,
+    result.diagnostics.resampled_points,
+    global_trajectory_.size(),
+    result.diagnostics.sharp_turn_count,
+    result.diagnostics.max_curvature,
+    result.diagnostics.max_allowed_curvature,
+    result.diagnostics.min_speed_limit);
+
+  if (result.diagnostics.sharp_turn_count > 0) {
+    RCLCPP_WARN(
+      logger_,
+      "P5 detected %zu sharp path turn(s), max heading change %.3f rad; smoothing/resampling is %s",
+      result.diagnostics.sharp_turn_count,
+      result.diagnostics.max_heading_change,
+      preprocess_path_ ? "enabled" : "disabled");
+  }
+  if (result.diagnostics.curvature_exceeds_limit) {
+    RCLCPP_WARN(
+      logger_,
+      "P5 trajectory curvature %.3f exceeds allowed %.3f from min turning radius %.3f m",
+      result.diagnostics.max_curvature,
+      result.diagnostics.max_allowed_curvature,
+      result.diagnostics.min_turning_radius);
+  }
 }
 
 geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
@@ -239,9 +315,15 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   if (transformed_plan.poses.empty()) {
     throw std::runtime_error("ForkliftMpcController could not transform the global plan");
   }
-  const auto transformed_trajectory = pathToMpcTrajectory(transformed_plan, vehicle_model_);
+  const auto trajectory_result =
+    processPathToMpcTrajectory(transformed_plan, vehicle_model_, trajectoryOptions(max_velocity_));
+  const auto & transformed_trajectory = trajectory_result.trajectory;
+  const auto & tracking_plan = trajectory_result.processed_path;
   if (transformed_trajectory.empty()) {
     throw std::runtime_error("ForkliftMpcController could not build an MPC trajectory");
+  }
+  if (tracking_plan.poses.empty()) {
+    throw std::runtime_error("ForkliftMpcController could not build a processed tracking path");
   }
 
   const auto & goal_pose = transformed_plan.poses.back();
@@ -266,6 +348,13 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     last_preview_window_.end_index,
     last_preview_window_.points.size(),
     last_preview_window_.length);
+  if (trajectory_result.diagnostics.curvature_exceeds_limit) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 2000,
+      "P5 trajectory curvature %.3f exceeds allowed %.3f; controller will clamp steering and slow down",
+      trajectory_result.diagnostics.max_curvature,
+      trajectory_result.diagnostics.max_allowed_curvature);
+  }
 
   const double goal_distance = distanceToPose(current_state, goal_pose);
   const double goal_heading_error = std::abs(headingErrorToPose(current_state, goal_pose));
@@ -274,12 +363,21 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     return zeroCommand(pose);
   }
 
-  const auto nearest_index = nearestPathIndex(transformed_plan, current_state);
+  const auto nearest_index = nearestPathIndex(tracking_plan, current_state);
   const auto lookahead_index =
-    lookaheadPathIndex(transformed_plan, nearest_index, lookahead_distance_);
+    lookaheadPathIndex(tracking_plan, nearest_index, lookahead_distance_);
 
-  const double active_max_velocity =
+  const double requested_max_velocity =
     speed_limit_ > 0.0 ? std::min(max_velocity_, speed_limit_) : max_velocity_;
+  double active_max_velocity = requested_max_velocity;
+  active_max_velocity = previewSpeedLimit(last_preview_window_, active_max_velocity);
+  if (active_max_velocity + 1e-6 < requested_max_velocity) {
+    RCLCPP_INFO_THROTTLE(
+      logger_, *clock_, 2000,
+      "P5 curvature speed limit active: max_v %.3f -> %.3f",
+      requested_max_velocity,
+      active_max_velocity);
+  }
   const bool allow_terminal_stop = goal_distance <= terminal_slowdown_distance_;
   const double min_forward =
     allow_terminal_stop ? 0.0 : std::min(min_velocity_, active_max_velocity);
@@ -314,7 +412,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
         solver_result.command.steering_angle,
         current_state,
         velocity,
-        transformed_plan,
+        tracking_plan,
         nearest_index,
         lookahead_index);
       if (solver_candidate.valid) {
@@ -347,7 +445,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       const double candidate_steering = steering_ratio * max_steering_angle_;
       const auto candidate = scoreCandidate(
         candidate_velocity, candidate_steering, current_state, velocity,
-        transformed_plan, nearest_index, lookahead_index);
+        tracking_plan, nearest_index, lookahead_index);
       if (candidate.valid && candidate.score < best.score) {
         best = candidate;
       }
@@ -366,7 +464,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
         const double candidate_steering = steering_ratio * max_steering_angle_;
         const auto candidate = scoreCandidate(
           candidate_velocity, candidate_steering, current_state, velocity,
-          transformed_plan, nearest_index, lookahead_index);
+          tracking_plan, nearest_index, lookahead_index);
         if (candidate.valid && candidate.score < best.score) {
           best = candidate;
         }
@@ -610,6 +708,42 @@ void ForkliftMpcController::publishControlCommand(
   command.decel_time_sec = control_cmd_decel_time_;
 
   control_cmd_pub_->publish(command);
+}
+
+MpcTrajectoryOptions ForkliftMpcController::trajectoryOptions(double max_velocity) const
+{
+  MpcTrajectoryOptions options;
+  options.min_point_spacing = 1e-4;
+  options.enable_resampling = preprocess_path_ && trajectory_resample_spacing_ > 0.0;
+  options.resample_spacing = trajectory_resample_spacing_;
+  options.enable_smoothing = preprocess_path_ && trajectory_smoothing_iterations_ > 0;
+  options.smoothing_iterations = trajectory_smoothing_iterations_;
+  options.smoothing_corner_cut_ratio = trajectory_smoothing_corner_cut_ratio_;
+  options.sharp_turn_warning_angle = sharp_turn_warning_angle_;
+  options.min_turning_radius = minimum_turning_radius_;
+  options.enable_curvature_slowdown = curvature_slowdown_enabled_;
+  options.curvature_slowdown_lateral_accel = curvature_slowdown_lateral_accel_;
+  options.min_curvature_speed = min_curvature_speed_;
+  options.max_velocity = max_velocity;
+  return options;
+}
+
+double ForkliftMpcController::previewSpeedLimit(
+  const MpcPreviewWindow & preview_window,
+  double fallback) const
+{
+  double speed_limit = std::max(0.0, fallback);
+  if (!preview_window.valid || preview_window.points.empty() || speed_limit <= 0.0) {
+    return speed_limit;
+  }
+
+  for (const auto & point : preview_window.points) {
+    if (point.speed_limit > 0.0) {
+      speed_limit = std::min(speed_limit, point.speed_limit);
+    }
+  }
+
+  return speed_limit;
 }
 
 double ForkliftMpcController::normalizeAngle(double angle) const
