@@ -2,6 +2,10 @@
 /build/
 /install/
 /log/
+/build_foxy/
+/install_foxy/
+/log_foxy/
+/.foxy_home/
 
 # Runtime logs and local simulator state
 /ros_logs/

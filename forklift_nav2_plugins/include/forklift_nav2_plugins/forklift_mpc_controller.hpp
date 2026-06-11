@@ -34,10 +34,10 @@ public:
   ~ForkliftMpcController() override = default;
 
   void configure(
-    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & parent,
     std::string name,
-    std::shared_ptr<tf2_ros::Buffer> tf,
-    std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+    const std::shared_ptr<tf2_ros::Buffer> & tf,
+    const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros) override;
 
   void cleanup() override;
   void activate() override;
@@ -47,10 +47,9 @@ public:
 
   geometry_msgs::msg::TwistStamped computeVelocityCommands(
     const geometry_msgs::msg::PoseStamped & pose,
-    const geometry_msgs::msg::Twist & velocity,
-    nav2_core::GoalChecker * goal_checker) override;
+    const geometry_msgs::msg::Twist & velocity) override;
 
-  void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
+  void setSpeedLimit(const double & speed_limit, const bool & percentage);
 
 private:
   struct Candidate

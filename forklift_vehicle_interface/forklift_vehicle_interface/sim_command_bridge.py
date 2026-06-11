@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import rclpy
 from forklift_msgs.msg import (
@@ -122,7 +122,7 @@ class SimCommandBridge(Node):
         self._publish_debug_state(twist, stop_reason)
         self._log_stop_reason(stop_reason)
 
-    def _twist_from_latest_command(self) -> tuple[Twist, str]:
+    def _twist_from_latest_command(self) -> Tuple[Twist, str]:
         twist = Twist()
         command = self._last_command
         if command is None:
@@ -205,7 +205,7 @@ class SimCommandBridge(Node):
             self.get_logger().info(f'Stopping: {stop_reason}.')
 
 
-def main(args: Optional[list[str]] = None) -> None:
+def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = SimCommandBridge()
     try:

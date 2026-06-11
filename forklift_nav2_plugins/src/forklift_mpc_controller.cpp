@@ -8,25 +8,25 @@
 #include "nav2_util/node_utils.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "tf2/utils.h"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 
 namespace forklift_nav2_plugins
 {
 
 void ForkliftMpcController::configure(
-  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & parent,
   std::string name,
-  std::shared_ptr<tf2_ros::Buffer> tf,
-  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
+  const std::shared_ptr<tf2_ros::Buffer> & tf,
+  const std::shared_ptr<nav2_costmap_2d::Costmap2DROS> & costmap_ros)
 {
   node_ = parent;
   name_ = name;
   tf_ = tf;
   costmap_ros_ = costmap_ros;
 
-  auto node = parent.lock();
+  auto node = parent;
   if (!node) {
-    throw std::runtime_error("Unable to lock lifecycle node for ForkliftMpcController");
+    throw std::runtime_error("ForkliftMpcController received a null lifecycle node");
   }
   if (!costmap_ros_) {
     throw std::runtime_error("ForkliftMpcController received a null Costmap2DROS");
@@ -304,8 +304,7 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 
 geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
-  const geometry_msgs::msg::Twist & velocity,
-  nav2_core::GoalChecker * goal_checker)
+  const geometry_msgs::msg::Twist & velocity)
 {
   if (global_plan_.poses.empty()) {
     throw std::runtime_error("ForkliftMpcController has no global plan");
@@ -327,11 +326,6 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   }
 
   const auto & goal_pose = transformed_plan.poses.back();
-  if (goal_checker && goal_checker->isGoalReached(pose.pose, goal_pose.pose, velocity)) {
-    publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
-    return zeroCommand(pose);
-  }
-
   const auto current_state = makeMpcStateFromPose(
     pose.pose, last_steering_angle_, vehicle_model_);
   last_preview_window_ = makeMpcPreviewWindow(

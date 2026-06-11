@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import rclpy
 from forklift_msgs.msg import ForkliftControlCommand
@@ -49,7 +49,7 @@ class CurtisVehicleInterface(Node):
         )
 
 
-def main(args: Optional[list[str]] = None) -> None:
+def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = CurtisVehicleInterface()
     try:

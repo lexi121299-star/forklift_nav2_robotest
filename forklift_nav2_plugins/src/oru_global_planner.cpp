@@ -21,6 +21,8 @@ namespace
 {
 
 constexpr unsigned int kNoParent = std::numeric_limits<unsigned int>::max();
+constexpr double kMaxNonObstacleCost =
+  static_cast<double>(nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE - 1);
 
 struct QueueNode
 {
@@ -39,14 +41,14 @@ struct QueueGreater
 }  // namespace
 
 void OruGlobalPlanner::configure(
-  const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+  rclcpp_lifecycle::LifecycleNode::SharedPtr parent,
   std::string name,
   std::shared_ptr<tf2_ros::Buffer> tf,
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros)
 {
-  auto node = parent.lock();
+  auto node = parent;
   if (!node) {
-    throw nav2_core::PlannerException("Unable to lock lifecycle node for OruGlobalPlanner");
+    throw nav2_core::PlannerException("OruGlobalPlanner received a null lifecycle node");
   }
 
   node_ = parent;
@@ -496,8 +498,7 @@ double OruGlobalPlanner::traversalCost(unsigned int x, unsigned int y, int dx, i
     return distance_cost * (1.0 + unknown_cost_penalty_);
   }
 
-  const double normalized_cost =
-    static_cast<double>(cell_cost) / static_cast<double>(nav2_costmap_2d::MAX_NON_OBSTACLE);
+  const double normalized_cost = static_cast<double>(cell_cost) / kMaxNonObstacleCost;
   return distance_cost * (1.0 + cost_travel_multiplier_ * normalized_cost);
 }
 

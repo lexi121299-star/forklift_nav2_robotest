@@ -5,7 +5,7 @@
 #include "gtest/gtest.h"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2/utils.h"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 
 namespace forklift_nav2_plugins
 {

@@ -303,7 +303,8 @@ class ManualPathFollower:
         goal = FollowPath.Goal()
         goal.path = self.make_path(include_robot_pose=self.prepend_robot_pose)
         goal.controller_id = self.controller_id
-        goal.goal_checker_id = self.goal_checker_id
+        if hasattr(goal, "goal_checker_id"):
+            goal.goal_checker_id = self.goal_checker_id
 
         self.node.get_logger().info(
             f"Sending manual path with {len(self.points)} clicked points, "

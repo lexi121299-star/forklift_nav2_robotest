@@ -27,6 +27,12 @@ install(
 )
 
 install(
+  PROGRAMS scripts/forklift_follow_path_acceptance.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME forklift_follow_path_acceptance
+)
+
+install(
   PROGRAMS scripts/wait_for_sim_ready.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME wait_for_sim_ready
