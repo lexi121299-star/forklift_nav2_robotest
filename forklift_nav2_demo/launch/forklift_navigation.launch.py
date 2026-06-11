@@ -31,6 +31,12 @@ def generate_launch_description():
     bridge_wheel_base = LaunchConfiguration('bridge_wheel_base')
     bridge_max_velocity_mps = LaunchConfiguration('bridge_max_velocity_mps')
     bridge_max_steering_angle_rad = LaunchConfiguration('bridge_max_steering_angle_rad')
+    bridge_max_angular_velocity_radps = LaunchConfiguration('bridge_max_angular_velocity_radps')
+    bridge_allow_pivot_turn = LaunchConfiguration('bridge_allow_pivot_turn')
+    bridge_pivot_steering_angle_rad = LaunchConfiguration('bridge_pivot_steering_angle_rad')
+    bridge_pivot_steering_tolerance_rad = LaunchConfiguration(
+        'bridge_pivot_steering_tolerance_rad')
+    bridge_pivot_turn_radius = LaunchConfiguration('bridge_pivot_turn_radius')
     bridge_command_timeout_sec = LaunchConfiguration('bridge_command_timeout_sec')
     bridge_control_rate_hz = LaunchConfiguration('bridge_control_rate_hz')
     bridge_cmd_vel_topic = LaunchConfiguration('bridge_cmd_vel_topic')
@@ -47,6 +53,11 @@ def generate_launch_description():
             'bridge_wheel_base': bridge_wheel_base,
             'bridge_max_velocity_mps': bridge_max_velocity_mps,
             'bridge_max_steering_angle_rad': bridge_max_steering_angle_rad,
+            'bridge_max_angular_velocity_radps': bridge_max_angular_velocity_radps,
+            'bridge_allow_pivot_turn': bridge_allow_pivot_turn,
+            'bridge_pivot_steering_angle_rad': bridge_pivot_steering_angle_rad,
+            'bridge_pivot_steering_tolerance_rad': bridge_pivot_steering_tolerance_rad,
+            'bridge_pivot_turn_radius': bridge_pivot_turn_radius,
             'bridge_command_timeout_sec': bridge_command_timeout_sec,
             'bridge_control_rate_hz': bridge_control_rate_hz,
             'bridge_cmd_vel_topic': bridge_cmd_vel_topic,
@@ -115,7 +126,16 @@ def generate_launch_description():
             description='Start the /forklift/control_cmd to /cmd_vel bridge with Gazebo.'),
         DeclareLaunchArgument('bridge_wheel_base', default_value='1.2'),
         DeclareLaunchArgument('bridge_max_velocity_mps', default_value='0.45'),
-        DeclareLaunchArgument('bridge_max_steering_angle_rad', default_value='0.55'),
+        DeclareLaunchArgument(
+            'bridge_max_steering_angle_rad',
+            default_value='1.5707963267948966'),
+        DeclareLaunchArgument('bridge_max_angular_velocity_radps', default_value='0.8'),
+        DeclareLaunchArgument('bridge_allow_pivot_turn', default_value='true'),
+        DeclareLaunchArgument(
+            'bridge_pivot_steering_angle_rad',
+            default_value='1.5707963267948966'),
+        DeclareLaunchArgument('bridge_pivot_steering_tolerance_rad', default_value='0.03'),
+        DeclareLaunchArgument('bridge_pivot_turn_radius', default_value='0.6'),
         DeclareLaunchArgument('bridge_command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('bridge_control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument(

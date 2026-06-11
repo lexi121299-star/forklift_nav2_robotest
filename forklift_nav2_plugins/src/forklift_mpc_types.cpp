@@ -110,14 +110,18 @@ MpcState predictMpcState(
   const double safe_dt = std::max(0.0, dt);
   const auto current_state = makeMpcState(state.x, state.y, state.theta, state.phi, vehicle_model);
   const auto command = commandFromMpcControl(current_state, control, safe_dt, vehicle_model);
-  const double angular_velocity = vehicle_model.angularVelocity(command);
+  const ForkliftVehicleState vehicle_state{
+    current_state.x,
+    current_state.y,
+    current_state.theta,
+    current_state.phi};
+  const auto predicted = vehicle_model.predict(vehicle_state, command, safe_dt);
 
   MpcState next = current_state;
-  next.x += command.velocity * std::cos(current_state.theta) * safe_dt;
-  next.y += command.velocity * std::sin(current_state.theta) * safe_dt;
-  next.theta = ForkliftVehicleModel::normalizeAngle(
-    current_state.theta + angular_velocity * safe_dt);
-  next.phi = command.steering_angle;
+  next.x = predicted.x;
+  next.y = predicted.y;
+  next.theta = predicted.theta;
+  next.phi = predicted.steering_angle;
   return next;
 }
 

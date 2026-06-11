@@ -59,6 +59,16 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".max_angular_velocity", rclcpp::ParameterValue(max_angular_velocity_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".allow_pivot_turn", rclcpp::ParameterValue(allow_pivot_turn_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_steering_angle", rclcpp::ParameterValue(pivot_steering_angle_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_steering_tolerance", rclcpp::ParameterValue(pivot_steering_tolerance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_turn_radius", rclcpp::ParameterValue(pivot_turn_radius_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".rear_axle_x_offset", rclcpp::ParameterValue(rear_axle_x_offset_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".horizon_time", rclcpp::ParameterValue(horizon_time_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".time_step", rclcpp::ParameterValue(time_step_));
@@ -144,6 +154,11 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".max_steering_angle_velocity", max_steering_angle_velocity_);
   node->get_parameter(name_ + ".max_acceleration", max_acceleration_);
   node->get_parameter(name_ + ".max_angular_velocity", max_angular_velocity_);
+  node->get_parameter(name_ + ".allow_pivot_turn", allow_pivot_turn_);
+  node->get_parameter(name_ + ".pivot_steering_angle", pivot_steering_angle_);
+  node->get_parameter(name_ + ".pivot_steering_tolerance", pivot_steering_tolerance_);
+  node->get_parameter(name_ + ".pivot_turn_radius", pivot_turn_radius_);
+  node->get_parameter(name_ + ".rear_axle_x_offset", rear_axle_x_offset_);
   node->get_parameter(name_ + ".horizon_time", horizon_time_);
   node->get_parameter(name_ + ".time_step", time_step_);
   node->get_parameter(name_ + ".lookahead_distance", lookahead_distance_);
@@ -189,7 +204,12 @@ void ForkliftMpcController::configure(
     max_steering_angle_velocity_,
     max_velocity_,
     max_acceleration_,
-    max_angular_velocity_});
+    max_angular_velocity_,
+    allow_pivot_turn_,
+    pivot_steering_angle_,
+    pivot_steering_tolerance_,
+    pivot_turn_radius_,
+    rear_axle_x_offset_});
   const auto & vehicle_parameters = vehicle_model_.parameters();
   wheel_base_ = vehicle_parameters.wheel_base;
   max_velocity_ = vehicle_parameters.max_velocity;
@@ -198,6 +218,11 @@ void ForkliftMpcController::configure(
   max_steering_angle_velocity_ = vehicle_parameters.max_steering_angle_velocity;
   max_acceleration_ = vehicle_parameters.max_acceleration;
   max_angular_velocity_ = vehicle_parameters.max_angular_velocity;
+  allow_pivot_turn_ = vehicle_parameters.allow_pivot_turn;
+  pivot_steering_angle_ = vehicle_parameters.pivot_steering_angle;
+  pivot_steering_tolerance_ = vehicle_parameters.pivot_steering_tolerance;
+  pivot_turn_radius_ = vehicle_parameters.pivot_turn_radius;
+  rear_axle_x_offset_ = vehicle_parameters.rear_axle_x_offset;
   horizon_time_ = std::max(0.2, horizon_time_);
   time_step_ = std::clamp(time_step_, 0.02, horizon_time_);
   lookahead_distance_ = std::max(0.1, lookahead_distance_);
@@ -230,13 +255,18 @@ void ForkliftMpcController::configure(
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
     "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
     "preview_points=%d use_mpc_solver=%s preprocess_path=%s resample=%.3f "
-    "smooth_iter=%d footprint_points=%zu publish_control_cmd=%s",
+    "smooth_iter=%d footprint_points=%zu publish_control_cmd=%s allow_pivot_turn=%s "
+    "pivot_steer=%.3f pivot_radius=%.3f rear_axle_x_offset=%.3f",
     name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
     max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
     preview_window_points_, use_mpc_solver_ ? "true" : "false",
     preprocess_path_ ? "true" : "false", trajectory_resample_spacing_,
     trajectory_smoothing_iterations_, footprint_.size(),
-    publish_control_cmd_ ? "true" : "false");
+    publish_control_cmd_ ? "true" : "false",
+    allow_pivot_turn_ ? "true" : "false",
+    pivot_steering_angle_,
+    pivot_turn_radius_,
+    rear_axle_x_offset_);
 }
 
 void ForkliftMpcController::cleanup()

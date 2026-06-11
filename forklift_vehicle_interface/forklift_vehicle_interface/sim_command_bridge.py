@@ -23,6 +23,11 @@ class SimCommandBridge(Node):
         self.declare_parameter('wheel_base', 1.2)
         self.declare_parameter('max_velocity_mps', 0.4)
         self.declare_parameter('max_steering_angle_rad', 0.55)
+        self.declare_parameter('max_angular_velocity_radps', 0.8)
+        self.declare_parameter('allow_pivot_turn', False)
+        self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
+        self.declare_parameter('pivot_steering_tolerance_rad', 0.03)
+        self.declare_parameter('pivot_turn_radius', 0.6)
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
@@ -31,6 +36,22 @@ class SimCommandBridge(Node):
         self._wheel_base = self._positive_param('wheel_base', 1.2)
         self._max_velocity_mps = self._positive_param('max_velocity_mps', 0.4)
         self._max_steering_angle_rad = self._positive_param('max_steering_angle_rad', 0.55)
+        self._max_angular_velocity_radps = self._positive_param(
+            'max_angular_velocity_radps', 0.8
+        )
+        self._allow_pivot_turn = self._bool_param('allow_pivot_turn', False)
+        self._pivot_steering_angle_rad = min(
+            self._positive_param('pivot_steering_angle_rad', math.pi / 2.0),
+            self._max_steering_angle_rad,
+        )
+        self._pivot_steering_tolerance_rad = max(
+            0.0,
+            min(
+                float(self.get_parameter('pivot_steering_tolerance_rad').value),
+                self._pivot_steering_angle_rad,
+            ),
+        )
+        self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
         self._command_timeout_sec = self._positive_param('command_timeout_sec', 0.5)
         self._cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
         control_rate_hz = self._positive_param('control_rate_hz', 20.0)
@@ -84,6 +105,21 @@ class SimCommandBridge(Node):
             )
             return fallback
         return value
+
+    def _bool_param(self, name: str, fallback: bool) -> bool:
+        value = self.get_parameter(name).value
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+        self.get_logger().warning(
+            f'Parameter {name} must be boolean; using fallback {fallback}.'
+        )
+        return fallback
 
     def _on_command(self, msg: ForkliftControlCommand) -> None:
         self._last_command = msg
@@ -148,8 +184,26 @@ class SimCommandBridge(Node):
             min(self._max_steering_angle_rad, command.steering_angle_rad),
         )
         twist.linear.x = direction * speed
-        twist.angular.z = math.tan(steering) * twist.linear.x / self._wheel_base
+        if self._is_pivot_turn(speed, steering):
+            twist.linear.x = 0.0
+            twist.angular.z = direction * speed / self._pivot_turn_radius
+            if steering < 0.0:
+                twist.angular.z *= -1.0
+        else:
+            twist.angular.z = math.tan(steering) * twist.linear.x / self._wheel_base
+        twist.angular.z = max(
+            -self._max_angular_velocity_radps,
+            min(self._max_angular_velocity_radps, twist.angular.z),
+        )
         return twist, ''
+
+    def _is_pivot_turn(self, speed: float, steering: float) -> bool:
+        if not self._allow_pivot_turn or speed <= 1e-6:
+            return False
+        return (
+            abs(steering)
+            >= self._pivot_steering_angle_rad - self._pivot_steering_tolerance_rad
+        )
 
     @staticmethod
     def _direction(command: ForkliftControlCommand) -> int:

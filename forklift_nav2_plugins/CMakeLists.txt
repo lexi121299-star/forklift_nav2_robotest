@@ -76,6 +76,18 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
+  ament_add_gtest(test_forklift_vehicle_model
+    test/test_forklift_vehicle_model.cpp
+  )
+  if(TARGET test_forklift_vehicle_model)
+    target_link_libraries(test_forklift_vehicle_model
+      ${PROJECT_NAME}
+    )
+    ament_target_dependencies(test_forklift_vehicle_model
+      geometry_msgs
+    )
+  endif()
+
   ament_add_gtest(test_forklift_mpc_types
     test/test_forklift_mpc_types.cpp
   )

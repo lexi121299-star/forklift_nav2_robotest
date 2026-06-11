@@ -54,6 +54,14 @@ double steeringFromCurvature(
   const ForkliftVehicleModel & vehicle_model)
 {
   const auto & parameters = vehicle_model.parameters();
+  if (parameters.allow_pivot_turn) {
+    const double pivot_curvature = 1.0 / std::max(0.05, parameters.pivot_turn_radius);
+    if (std::abs(curvature) >= pivot_curvature) {
+      return curvature >= 0.0 ?
+             parameters.pivot_steering_angle :
+             -parameters.pivot_steering_angle;
+    }
+  }
   return std::clamp(
     std::atan(parameters.wheel_base * curvature),
     -parameters.max_steering_angle,
@@ -238,6 +246,13 @@ double trajectorySpeedLimit(
     options.max_velocity > 0.0 ? std::min(options.max_velocity, parameters.max_velocity) :
     parameters.max_velocity;
   const double min_speed = std::clamp(options.min_curvature_speed, 0.0, max_speed);
+
+  if (parameters.allow_pivot_turn) {
+    const double pivot_curvature = 1.0 / std::max(0.05, parameters.pivot_turn_radius);
+    if (std::abs(curvature) >= pivot_curvature) {
+      return max_speed;
+    }
+  }
 
   if (!options.enable_curvature_slowdown ||
     options.curvature_slowdown_lateral_accel <= 0.0 ||

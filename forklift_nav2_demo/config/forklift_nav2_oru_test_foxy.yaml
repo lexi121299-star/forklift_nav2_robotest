@@ -118,10 +118,15 @@ controller_server:
       max_velocity: 0.45
       min_velocity: 0.06
       max_reverse_velocity: 0.0
-      max_steering_angle: 0.55
-      max_steering_angle_velocity: 0.7
+      max_steering_angle: 1.5707963267948966
+      max_steering_angle_velocity: 1.6
       max_acceleration: 0.5
       max_angular_velocity: 0.8
+      allow_pivot_turn: true
+      pivot_steering_angle: 1.5707963267948966
+      pivot_steering_tolerance: 0.03
+      pivot_turn_radius: 0.6
+      rear_axle_x_offset: -0.34
       horizon_time: 1.8
       time_step: 0.2
       lookahead_distance: 0.9

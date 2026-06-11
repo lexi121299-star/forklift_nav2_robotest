@@ -14,6 +14,11 @@ struct ForkliftVehicleParameters
   double max_velocity{0.45};
   double max_acceleration{0.5};
   double max_angular_velocity{0.8};
+  bool allow_pivot_turn{false};
+  double pivot_steering_angle{1.5707963267948966};
+  double pivot_steering_tolerance{0.03};
+  double pivot_turn_radius{0.6};
+  double rear_axle_x_offset{0.0};
 };
 
 struct ForkliftVehicleState
@@ -39,6 +44,8 @@ public:
   const ForkliftVehicleParameters & parameters() const;
 
   ForkliftVehicleCommand clampCommand(const ForkliftVehicleCommand & command) const;
+  bool isPivotTurnCommand(const ForkliftVehicleCommand & command) const;
+  double linearVelocity(const ForkliftVehicleCommand & command) const;
   double angularVelocity(const ForkliftVehicleCommand & command) const;
   geometry_msgs::msg::Twist twistFromCommand(const ForkliftVehicleCommand & command) const;
   ForkliftVehicleState predict(

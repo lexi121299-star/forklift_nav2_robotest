@@ -126,6 +126,11 @@ private:
   double max_steering_angle_velocity_{0.7};
   double max_acceleration_{0.5};
   double max_angular_velocity_{0.8};
+  bool allow_pivot_turn_{false};
+  double pivot_steering_angle_{1.5707963267948966};
+  double pivot_steering_tolerance_{0.03};
+  double pivot_turn_radius_{0.6};
+  double rear_axle_x_offset_{0.0};
   double horizon_time_{1.8};
   double time_step_{0.2};
   double lookahead_distance_{1.4};
