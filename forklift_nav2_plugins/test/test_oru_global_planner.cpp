@@ -35,6 +35,10 @@ public:
     planner.lattice_arc_angle_ = 0.25 * kPlannerTestPi / 2.0;
     planner.lattice_primitive_samples_ = 5;
     planner.lethal_cost_threshold_ = nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
+    planner.cost_travel_multiplier_ = 2.0;
+    planner.lattice_turn_cost_multiplier_ = 0.25;
+    planner.lattice_obstacle_cost_multiplier_ = 1.0;
+    planner.lattice_goal_heading_cost_multiplier_ = 0.25;
   }
 
   static unsigned int headingIndex(OruGlobalPlanner & planner, double yaw)
@@ -60,6 +64,49 @@ public:
   {
     const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
     return planner.primitiveTraversable(transitions.front());
+  }
+
+  static int straightPrimitiveRejectReason(OruGlobalPlanner & planner)
+  {
+    const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
+    return static_cast<int>(planner.primitiveRejectReason(transitions.front()));
+  }
+
+  static int costmapRejectReason()
+  {
+    return static_cast<int>(OruGlobalPlanner::PrimitiveRejectReason::COSTMAP);
+  }
+
+  static double straightPrimitiveBaseCost(OruGlobalPlanner & planner)
+  {
+    const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
+    return transitions.front().cost;
+  }
+
+  static double straightPrimitiveTraversalCost(OruGlobalPlanner & planner)
+  {
+    const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
+    return planner.transitionTraversalCost(transitions.front());
+  }
+
+  static double leftArcBaseCost(OruGlobalPlanner & planner)
+  {
+    const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
+    return transitions.at(1).cost;
+  }
+
+  static double leftArcTraversalCost(OruGlobalPlanner & planner)
+  {
+    const auto transitions = planner.generateForwardPrimitives({10, 10, 0});
+    return planner.transitionTraversalCost(transitions.at(1));
+  }
+
+  static double latticeHeuristic(
+    OruGlobalPlanner & planner,
+    unsigned int theta_index,
+    double goal_yaw)
+  {
+    return planner.latticeHeuristic({10, 10, theta_index}, {10, 10}, goal_yaw);
   }
 };
 
@@ -109,6 +156,47 @@ TEST(OruGlobalPlanner, PrimitiveCollisionChecksIntermediateSamples)
   costmap.setCost(12, 10, nav2_costmap_2d::LETHAL_OBSTACLE);
 
   EXPECT_FALSE(OruGlobalPlannerTestAccess::straightPrimitiveTraversable(planner));
+  EXPECT_EQ(
+    OruGlobalPlannerTestAccess::straightPrimitiveRejectReason(planner),
+    OruGlobalPlannerTestAccess::costmapRejectReason());
+}
+
+TEST(OruGlobalPlanner, TraversalCostPenalizesTurning)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  EXPECT_GT(
+    OruGlobalPlannerTestAccess::leftArcTraversalCost(planner),
+    OruGlobalPlannerTestAccess::leftArcBaseCost(planner));
+}
+
+TEST(OruGlobalPlanner, TraversalCostPenalizesIntermediateCostmapSamples)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  const double clear_cost = OruGlobalPlannerTestAccess::straightPrimitiveTraversalCost(planner);
+  EXPECT_DOUBLE_EQ(clear_cost, OruGlobalPlannerTestAccess::straightPrimitiveBaseCost(planner));
+
+  costmap.setCost(12, 10, 100);
+
+  EXPECT_GT(OruGlobalPlannerTestAccess::straightPrimitiveTraversalCost(planner), clear_cost);
+  EXPECT_TRUE(OruGlobalPlannerTestAccess::straightPrimitiveTraversable(planner));
+}
+
+TEST(OruGlobalPlanner, LatticeHeuristicPenalizesGoalHeadingError)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  EXPECT_DOUBLE_EQ(OruGlobalPlannerTestAccess::latticeHeuristic(planner, 0, 0.0), 0.0);
+  EXPECT_GT(
+    OruGlobalPlannerTestAccess::latticeHeuristic(planner, 4, 0.0),
+    OruGlobalPlannerTestAccess::latticeHeuristic(planner, 0, 0.0));
 }
 
 }  // namespace

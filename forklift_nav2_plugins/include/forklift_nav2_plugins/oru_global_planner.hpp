@@ -1,6 +1,7 @@
 #ifndef FORKLIFT_NAV2_PLUGINS__ORU_GLOBAL_PLANNER_HPP_
 #define FORKLIFT_NAV2_PLUGINS__ORU_GLOBAL_PLANNER_HPP_
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -69,6 +70,26 @@ private:
     double cost;
   };
 
+  enum class PrimitiveRejectReason
+  {
+    NONE,
+    OUT_OF_BOUNDS,
+    COSTMAP,
+    FOOTPRINT
+  };
+
+  struct LatticeSearchStats
+  {
+    unsigned int expanded{0};
+    unsigned int generated{0};
+    unsigned int accepted{0};
+    unsigned int rejected_out_of_bounds{0};
+    unsigned int rejected_costmap{0};
+    unsigned int rejected_footprint{0};
+    unsigned int improved{0};
+    double best_goal_distance{std::numeric_limits<double>::infinity()};
+  };
+
   std::vector<Cell> searchAStar(const Cell & start, const Cell & goal) const;
   std::vector<Cell> reconstructPath(
     const std::vector<unsigned int> & parent,
@@ -98,6 +119,7 @@ private:
   bool isFootprintTraversable(unsigned int x, unsigned int y, double yaw) const;
   bool isFootprintTraversableAtPose(double wx, double wy, double yaw) const;
   bool primitiveTraversable(const LatticeTransition & transition) const;
+  PrimitiveRejectReason primitiveRejectReason(const LatticeTransition & transition) const;
   bool isLatticeGoal(
     const LatticeState & state,
     const Cell & goal,
@@ -108,11 +130,16 @@ private:
 
   double traversalCost(unsigned int x, unsigned int y, int dx, int dy) const;
   double heuristic(const Cell & a, const Cell & b) const;
-  double latticeHeuristic(const LatticeState & state, const Cell & goal) const;
+  double latticeHeuristic(
+    const LatticeState & state,
+    const Cell & goal,
+    double goal_yaw) const;
   double transitionTraversalCost(const LatticeTransition & transition) const;
   unsigned int headingIndex(double yaw) const;
   double headingForIndex(unsigned int theta_index) const;
   double normalizeAngle(double angle) const;
+  double latticeGoalDistance(const LatticeState & state, const Cell & goal) const;
+  void logLatticeStats(const LatticeSearchStats & stats, const char * result) const;
 
   nav_msgs::msg::Path buildPath(
     const std::vector<Cell> & cells,
@@ -157,6 +184,10 @@ private:
   double lattice_arc_angle_{0.3926990817};
   unsigned int lattice_primitive_samples_{5};
   bool lattice_reverse_enabled_{false};
+  double lattice_goal_tolerance_{0.25};
+  double lattice_turn_cost_multiplier_{0.25};
+  double lattice_obstacle_cost_multiplier_{1.0};
+  double lattice_goal_heading_cost_multiplier_{0.25};
 };
 
 }  // namespace forklift_nav2_plugins

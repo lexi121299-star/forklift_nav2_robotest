@@ -326,6 +326,10 @@ planner_server:
       lattice_arc_angle: 0.3926990817
       lattice_primitive_samples: 5
       lattice_reverse_enabled: false
+      lattice_goal_tolerance: 0.25
+      lattice_turn_cost_multiplier: 0.25
+      lattice_obstacle_cost_multiplier: 1.0
+      lattice_goal_heading_cost_multiplier: 0.25
 
 planner_server_rclcpp_node:
   ros__parameters:

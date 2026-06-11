@@ -277,6 +277,10 @@ lattice_arc_radius: 0.60
 lattice_arc_angle: 0.3926990817   # 22.5 deg
 lattice_primitive_samples: 5
 lattice_reverse_enabled: false
+lattice_goal_tolerance: 0.25
+lattice_turn_cost_multiplier: 0.25
+lattice_obstacle_cost_multiplier: 1.0
+lattice_goal_heading_cost_multiplier: 0.25
 ```
 
 说明：
@@ -285,6 +289,10 @@ lattice_reverse_enabled: false
 - `arc_radius=0.60` 先沿用 pivot/高曲率处理里的半径尺度。
 - `step_distance=0.20` 不要太小，避免搜索爆炸；也不要太大，避免漏过窄通道。
 - `primitive_samples=5` 第一版足够发现大多数扫掠碰撞。
+- `lattice_goal_tolerance=0.25` 让 lattice 不要刚进入全局 `goal_tolerance` 边缘就收工。
+- `lattice_turn_cost_multiplier` 让同样长度下的转弯比直行略贵，减少无意义摆头。
+- `lattice_obstacle_cost_multiplier` 使用 costmap inflation 代价，让路径更倾向远离障碍。
+- `lattice_goal_heading_cost_multiplier` 让搜索更早偏向目标朝向，而不是最后一格才硬对齐。
 
 这些不是最终参数，只是 scaffold 阶段的起点。
 
@@ -350,14 +358,140 @@ P6 scaffold 第一版完成时，应该能说清楚：
 
 ```text
 forward-only scaffold
+-> primitive cost tuning / diagnostics
+-> goal approach tightening
 -> reverse primitives
--> primitive cost tuning
 -> better heuristic
 -> ORU primitive/lookup table 参考实现
 -> goal approach / docking / narrow aisle 场景
 ```
 
-## 10. 2026-06-11 实现记录
+## 10. 第二版目标和步骤
+
+第二版不急着加倒车，也不直接替换成全量 ORU planner。
+
+原因是当前 controller/config 仍然是前进为主：
+
+```text
+max_reverse_velocity: 0.0
+```
+
+如果 global planner 先生成倒车路径，而 controller 还不能稳定执行倒车，就会把问题混在一起：
+
+```text
+planner 是不是对？
+controller 是不是能倒车？
+局部避障是不是允许倒车？
+速度方向标注是不是完整？
+```
+
+所以第二版的目标是让第一版 forward-only lattice 更像一个能调试、能验收的 planner：
+
+- 保留现有 2D A* fallback。
+- 保留三种 forward primitives。
+- 增加 lattice 搜索诊断日志。
+- primitive 被拒绝时区分：
+  - 越界。
+  - costmap cell 不可通行。
+  - footprint sweep 碰撞。
+- traversal cost 不只看 primitive 终点，也看沿途 sample 的 costmap 代价。
+- 对转弯增加轻微代价，减少不必要的左右摆动。
+- heuristic 增加目标朝向误差项，让搜索更早朝向 goal yaw 收敛。
+- 收紧 lattice 自己的 goal tolerance，避免刚进入 Nav2 `goal_tolerance` 边缘就结束。
+- 增加单测覆盖这些代价和诊断基础能力。
+
+第二版完成后，planner 还不是“全量 planner”，但它应该更容易回答：
+
+```text
+为什么 lattice 回退了？
+是 primitive 越界，还是碰撞？
+为什么路径贴障碍？
+为什么快到目标时朝向没收好？
+```
+
+### 10.1 第二版验收重点
+
+- Foxy docker 构建通过。
+- `forklift_nav2_plugins` 单测通过。
+- lattice 成功时日志能看到 expanded/generated/accepted/rejected 统计。
+- lattice 失败并 fallback 时，日志能说明 search 是耗尽 open set 还是达到 max_iterations。
+- 带 inflation cost 的 sample 会提高 primitive traversal cost。
+- 转弯 primitive 会比自己的基础长度更贵。
+- 目标 heading error 会进入 lattice heuristic。
+- 简单 90 度 `ComputePathToPose` 仍能产出连续 heading path。
+
+## 11. 第三版目标和步骤
+
+第三版才建议开始把 planner 从“前进-only scaffold”推进到更接近 ORU motion planner 的形态。
+
+第三版优先做两件事：
+
+```text
+1. reverse primitives 的最小闭环
+2. primitive 元数据和路径输出语义
+```
+
+### 11.1 为什么第三版才加 reverse
+
+叉车在窄通道、货架边、取放货场景里确实需要倒车。
+
+但倒车不是只在 planner 里多三条边这么简单。它至少会影响：
+
+- global path 的方向语义。
+- controller 的速度符号。
+- 换向点的减速和停顿。
+- 局部安全策略。
+- 任务层是否允许当前动作倒车。
+
+所以第三版建议先做“最小倒车 primitive”，不要马上做全套倒车策略。
+
+### 11.2 第三版建议步骤
+
+第一步，扩展 primitive 类型：
+
+```text
+forward straight
+forward left arc
+forward right arc
+reverse straight
+reverse left arc
+reverse right arc
+```
+
+第二步，为 transition 增加元数据：
+
+```text
+direction: forward / reverse
+primitive_kind: straight / left_arc / right_arc
+heading_delta
+length
+```
+
+第三步，增加代价项：
+
+- reverse cost。
+- gear switch cost。
+- consecutive reverse preference 或限制。
+- final approach direction preference。
+
+第四步，路径输出要能保留方向信息。
+
+`nav_msgs/Path` 本身只能表达 pose，不能表达这一段是前进还是倒车。第三版可以先用内部 debug 日志和测试验证 direction，再决定是否扩展：
+
+- 用 trajectory processor 额外生成带速度符号的 trajectory。
+- 或增加 debug topic/marker。
+- 或在后续 P7/P8 引入更明确的路径段消息。
+
+第五步，再跑窄通道/取放货场景 acceptance。
+
+第三版完成后，才更适合继续靠近 ORU 的：
+
+- primitive lookup table。
+- Reeds-Shepp / Dubins 混合启发。
+- 多曲率 primitive。
+- narrow aisle / docking 专用 goal approach。
+
+## 12. 2026-06-11 实现记录
 
 本轮已完成最小可回退 lattice scaffold。
 
@@ -396,6 +530,10 @@ lattice_arc_radius: 0.60
 lattice_arc_angle: 0.3926990817
 lattice_primitive_samples: 5
 lattice_reverse_enabled: false
+lattice_goal_tolerance: 0.25
+lattice_turn_cost_multiplier: 0.25
+lattice_obstacle_cost_multiplier: 1.0
+lattice_goal_heading_cost_multiplier: 0.25
 ```
 
 保留的旧行为：
@@ -404,7 +542,37 @@ lattice_reverse_enabled: false
 - lattice 找不到路径且 `lattice_fallback_to_astar=true` 时，仍回退到原 A*。
 - reverse primitives 仍未实现；如果误开 `lattice_reverse_enabled`，planner 会打印 warning。
 
-## 11. 验证记录
+## 13. 第二版实现记录
+
+第二版在第一版基础上继续保持可回退，不改变 `use_lattice_planner` 和 `lattice_fallback_to_astar` 的语义。
+
+新增代码能力：
+
+- 新增 `LatticeSearchStats`，记录 expanded/generated/accepted/improved/rejected/best_goal_distance。
+- lattice search 成功、耗尽 open set、达到 max_iterations 时都会打印统计日志。
+- primitive collision 诊断从单一 bool 拆成 `OUT_OF_BOUNDS`、`COSTMAP`、`FOOTPRINT`。
+- `transitionTraversalCost()` 改为扫描 primitive 沿途所有 samples，使用最高 costmap 代价作为 obstacle proximity cost。
+- 转弯 primitive 根据 heading delta 增加轻微 turn cost。
+- `latticeHeuristic()` 增加 goal yaw heading error 项。
+- `isLatticeGoal()` 使用 `lattice_goal_tolerance`，默认比 Nav2 `goal_tolerance` 更紧，避免过早在 tolerance 边缘结束。
+
+新增参数：
+
+```yaml
+lattice_goal_tolerance: 0.25
+lattice_turn_cost_multiplier: 0.25
+lattice_obstacle_cost_multiplier: 1.0
+lattice_goal_heading_cost_multiplier: 0.25
+```
+
+新增/扩展单测：
+
+- primitive 中间 sample 碰到 lethal cell 时，拒绝原因是 `COSTMAP`。
+- 转弯 primitive 的 traversal cost 高于基础弧长。
+- 中间 sample 的 inflation/costmap 代价会提高 traversal cost，但不会被当作 lethal collision。
+- goal heading error 会提高 lattice heuristic。
+
+## 14. 验证记录
 
 Foxy docker 构建：
 
@@ -430,7 +598,7 @@ Foxy docker 插件测试：
 
 ```text
 100% tests passed, 0 tests failed out of 6
-Summary: 44 tests, 0 errors, 0 failures, 0 skipped
+test_oru_global_planner: 6 tests passed
 ```
 
 新增 planner 单测覆盖：
@@ -438,6 +606,10 @@ Summary: 44 tests, 0 errors, 0 failures, 0 skipped
 - heading index 正常归一化。
 - forward straight / left arc / right arc 的终点和 heading 变化正确。
 - primitive 中间 sample 碰到 lethal cell 时会被拒绝。
+- primitive 中间 sample 碰到 lethal cell 时，拒绝原因是 `COSTMAP`。
+- 转弯 primitive 的 traversal cost 高于基础弧长。
+- 中间 sample 的 inflation/costmap 代价会提高 traversal cost，但不会被当作 lethal collision。
+- goal heading error 会提高 lattice heuristic。
 
 Foxy headless runtime smoke：
 
@@ -449,12 +621,13 @@ ros2 action send_goal /compute_path_to_pose nav2_msgs/action/ComputePathToPose \
 planner 配置日志：
 
 ```text
-Configured GridBased ... use_lattice=true lattice_bins=16 lattice_step=0.20 lattice_arc_radius=0.60
+Configured GridBased ... use_lattice=true lattice_bins=16 lattice_step=0.20 lattice_arc_radius=0.60 lattice_goal_tolerance=0.25
 ```
 
 planner 成功日志：
 
 ```text
+Lattice search succeeded: expanded=7 generated=18 accepted=18 improved=18 rejected_oob=0 rejected_costmap=0 rejected_footprint=0 best_goal_distance=0.050
 Lattice planner produced 5 states
 ```
 

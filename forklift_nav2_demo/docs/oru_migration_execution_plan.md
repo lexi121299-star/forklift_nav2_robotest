@@ -702,6 +702,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P4.5 接 Nav2 Controller API，并通过 FollowPath / NavigateToPose 验收
 [x] P5 接入轨迹处理和平滑
 [x] P6.1 最小 lattice planner scaffold：`x/y/theta_index`、forward primitives、沿途 footprint collision、A* fallback
+[x] P6.2 lattice 代价/诊断第二版：turn/obstacle/goal-heading cost、拒绝原因统计、goal tolerance 收紧
 ```
 
 建议我们下一步先做：
@@ -726,6 +727,7 @@ P6
 - 2026-06-11：P3/P4/P5 车辆几何补正通过。根据真车“双驱差速，90 度绕后轴旋转”的确认信息，继续沿 pivot-turn 方向而不是回到 Ackermann；`forklift_vehicle_model` 的 pivot predict 改为保持后轴点不动，并通过 `rear_axle_x_offset: -0.34` 表达当前 base reference 到后轴的偏移。Foxy docker 构建通过，`forklift_nav2_plugins` 相关 gtest 全部通过，headless bridge 下 `sparse_90_turn` acceptance 返回 `SUCCEEDED`。因此 P6 可以开始，但第一步建议做最小 `x/y/theta_index` lattice scaffold，并保留现有 costmap-aware A* fallback。详见 `forklift_nav2_demo/docs/foxy_pivot_turn_followup.md`。
 - P6 最小 lattice scaffold 的范围说明见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
 - 2026-06-11：P6.1 最小 lattice scaffold 通过。`OruGlobalPlanner` 增加可开关 `x/y/theta_index` lattice 搜索，保留原 2D A* fallback；第一版只启用 forward straight / left arc / right arc primitives，并对 primitive 沿途采样做 costmap + footprint collision。Foxy docker 构建通过，`forklift_nav2_plugins` 6 个 gtest 全部通过；headless `ComputePathToPose` smoke 中 planner server 加载 `use_lattice=true`，日志显示 `Lattice planner produced 5 states`，action 返回 `SUCCEEDED`，path heading 从起点逐步过渡到 90 度。详见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
+- 2026-06-11：P6.2 lattice 第二版通过。保持 forward-only primitives 和 2D A* fallback，新增 lattice search 统计日志、primitive 拒绝原因分类、沿途 sample obstacle cost、turn cost、goal-heading heuristic，以及 `lattice_goal_tolerance` 收紧目标收尾。Foxy docker 构建通过；`forklift_nav2_plugins` 6 个测试目标全部通过，其中 `test_oru_global_planner` 扩展到 6 个用例；headless `ComputePathToPose` 90 度 smoke 返回 `SUCCEEDED`，planner 日志显示 `Lattice search succeeded: expanded=7 generated=18 accepted=18 improved=18 rejected_oob=0 rejected_costmap=0 rejected_footprint=0 best_goal_distance=0.050` 和 `Lattice planner produced 5 states`。第二版/第三版目标、步骤和解释见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
 
 ## 14. ORU 包迁移优先级
 
