@@ -141,6 +141,18 @@ if(BUILD_TESTING)
       geometry_msgs
     )
   endif()
+
+  ament_add_gtest(test_oru_global_planner
+    test/test_oru_global_planner.cpp
+  )
+  if(TARGET test_oru_global_planner)
+    target_link_libraries(test_oru_global_planner
+      ${PROJECT_NAME}
+    )
+    ament_target_dependencies(test_oru_global_planner
+      nav2_costmap_2d
+    )
+  endif()
 endif()
 
 ament_export_include_directories(include)

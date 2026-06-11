@@ -318,6 +318,14 @@ planner_server:
       goal_tolerance: 0.5
       max_iterations: 0
       use_final_approach_orientation: true
+      use_lattice_planner: true
+      lattice_fallback_to_astar: true
+      lattice_heading_bins: 16
+      lattice_step_distance: 0.20
+      lattice_arc_radius: 0.60
+      lattice_arc_angle: 0.3926990817
+      lattice_primitive_samples: 5
+      lattice_reverse_enabled: false
 
 planner_server_rclcpp_node:
   ros__parameters:

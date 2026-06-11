@@ -95,6 +95,26 @@ void OruGlobalPlanner::configure(
     node, name_ + ".goal_tolerance", rclcpp::ParameterValue(goal_tolerance_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".max_iterations", rclcpp::ParameterValue(static_cast<int>(max_iterations_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".use_lattice_planner", rclcpp::ParameterValue(use_lattice_planner_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_fallback_to_astar",
+    rclcpp::ParameterValue(lattice_fallback_to_astar_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_heading_bins",
+    rclcpp::ParameterValue(static_cast<int>(lattice_heading_bins_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_step_distance", rclcpp::ParameterValue(lattice_step_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_arc_radius", rclcpp::ParameterValue(lattice_arc_radius_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_arc_angle", rclcpp::ParameterValue(lattice_arc_angle_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_primitive_samples",
+    rclcpp::ParameterValue(static_cast<int>(lattice_primitive_samples_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_reverse_enabled",
+    rclcpp::ParameterValue(lattice_reverse_enabled_));
 
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".use_diagonal", use_diagonal_);
@@ -112,6 +132,20 @@ void OruGlobalPlanner::configure(
   int max_iterations = 0;
   node->get_parameter(name_ + ".max_iterations", max_iterations);
   max_iterations_ = max_iterations > 0 ? static_cast<unsigned int>(max_iterations) : 0;
+  node->get_parameter(name_ + ".use_lattice_planner", use_lattice_planner_);
+  node->get_parameter(name_ + ".lattice_fallback_to_astar", lattice_fallback_to_astar_);
+  int lattice_heading_bins = 0;
+  node->get_parameter(name_ + ".lattice_heading_bins", lattice_heading_bins);
+  lattice_heading_bins_ =
+    lattice_heading_bins > 0 ? static_cast<unsigned int>(lattice_heading_bins) : 16;
+  node->get_parameter(name_ + ".lattice_step_distance", lattice_step_distance_);
+  node->get_parameter(name_ + ".lattice_arc_radius", lattice_arc_radius_);
+  node->get_parameter(name_ + ".lattice_arc_angle", lattice_arc_angle_);
+  int lattice_primitive_samples = 0;
+  node->get_parameter(name_ + ".lattice_primitive_samples", lattice_primitive_samples);
+  lattice_primitive_samples_ =
+    lattice_primitive_samples > 0 ? static_cast<unsigned int>(lattice_primitive_samples) : 5;
+  node->get_parameter(name_ + ".lattice_reverse_enabled", lattice_reverse_enabled_);
 
   lethal_cost_threshold_ = std::clamp(lethal_cost_threshold_, 1, 255);
   footprint_collision_cost_threshold_ =
@@ -120,15 +154,29 @@ void OruGlobalPlanner::configure(
   unknown_cost_penalty_ = std::max(0.0, unknown_cost_penalty_);
   start_tolerance_ = std::max(0.0, start_tolerance_);
   goal_tolerance_ = std::max(0.0, goal_tolerance_);
+  lattice_heading_bins_ = std::clamp(lattice_heading_bins_, 4u, 72u);
+  lattice_step_distance_ = std::clamp(lattice_step_distance_, 0.05, 2.0);
+  lattice_arc_radius_ = std::clamp(lattice_arc_radius_, 0.05, 20.0);
+  lattice_arc_angle_ = std::clamp(lattice_arc_angle_, 0.01, M_PI_2);
+  lattice_primitive_samples_ = std::clamp(lattice_primitive_samples_, 2u, 50u);
 
   RCLCPP_INFO(
     logger_,
     "Configured %s in frame %s: allow_unknown=%s use_diagonal=%s "
-    "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d start_tolerance=%.2f",
+    "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d start_tolerance=%.2f "
+    "use_lattice=%s lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f",
     name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false",
-    footprint_.size(), lethal_cost_threshold_, start_tolerance_);
+    footprint_.size(), lethal_cost_threshold_, start_tolerance_,
+    use_lattice_planner_ ? "true" : "false", lattice_heading_bins_,
+    lattice_step_distance_, lattice_arc_radius_);
+
+  if (lattice_reverse_enabled_) {
+    RCLCPP_WARN(
+      logger_,
+      "lattice_reverse_enabled is set but P6 scaffold only implements forward primitives");
+  }
 }
 
 void OruGlobalPlanner::cleanup()
@@ -191,6 +239,20 @@ nav_msgs::msg::Path OruGlobalPlanner::createPlan(
     } else {
       RCLCPP_WARN(logger_, "No traversable start cell found; planning will still begin from it");
     }
+  }
+
+  if (use_lattice_planner_) {
+    const auto states = searchLattice(planning_start_cell, start_yaw, goal_cell, goal_yaw);
+    if (!states.empty()) {
+      RCLCPP_INFO(logger_, "Lattice planner produced %zu states", states.size());
+      return buildLatticePath(states, start, goal);
+    }
+
+    if (!lattice_fallback_to_astar_) {
+      throw nav2_core::PlannerException("OruGlobalPlanner lattice search could not find a path");
+    }
+
+    RCLCPP_WARN(logger_, "Lattice planner failed; falling back to 2D costmap A*");
   }
 
   const auto cells = searchAStar(planning_start_cell, goal_cell);
@@ -322,6 +384,159 @@ std::vector<OruGlobalPlanner::Cell> OruGlobalPlanner::reconstructPath(
   cells.push_back({start_index % size_x, start_index / size_x});
   std::reverse(cells.begin(), cells.end());
   return cells;
+}
+
+std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
+  const Cell & start,
+  double start_yaw,
+  const Cell & goal,
+  double goal_yaw) const
+{
+  const auto size_x = costmap_->getSizeInCellsX();
+  const auto size_y = costmap_->getSizeInCellsY();
+  const auto state_count = size_x * size_y * lattice_heading_bins_;
+
+  const LatticeState start_state{start.x, start.y, headingIndex(start_yaw)};
+  const auto start_index = toLatticeIndex(start_state);
+
+  std::vector<double> g_score(state_count, std::numeric_limits<double>::infinity());
+  std::vector<unsigned int> parent(state_count, kNoParent);
+  std::vector<bool> closed(state_count, false);
+  std::priority_queue<QueueNode, std::vector<QueueNode>, QueueGreater> open_set;
+
+  g_score[start_index] = 0.0;
+  parent[start_index] = start_index;
+  open_set.push({start_index, latticeHeuristic(start_state, goal)});
+
+  unsigned int iterations = 0;
+  while (!open_set.empty()) {
+    const auto current = open_set.top();
+    open_set.pop();
+
+    if (closed[current.index]) {
+      continue;
+    }
+
+    closed[current.index] = true;
+    const auto current_state = fromLatticeIndex(current.index);
+    if (isLatticeGoal(current_state, goal, goal_yaw)) {
+      return reconstructLatticePath(parent, start_index, current.index);
+    }
+
+    if (max_iterations_ > 0 && ++iterations > max_iterations_) {
+      RCLCPP_WARN(logger_, "Lattice search stopped after reaching max_iterations=%u", max_iterations_);
+      return {};
+    }
+
+    for (const auto & transition : generateForwardPrimitives(current_state)) {
+      if (!primitiveTraversable(transition)) {
+        continue;
+      }
+
+      const auto next_index = toLatticeIndex(transition.state);
+      if (closed[next_index]) {
+        continue;
+      }
+
+      const double tentative_g = g_score[current.index] + transitionTraversalCost(transition);
+      if (tentative_g >= g_score[next_index]) {
+        continue;
+      }
+
+      parent[next_index] = current.index;
+      g_score[next_index] = tentative_g;
+      open_set.push({next_index, tentative_g + latticeHeuristic(transition.state, goal)});
+    }
+  }
+
+  return {};
+}
+
+std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::reconstructLatticePath(
+  const std::vector<unsigned int> & parent,
+  unsigned int start_index,
+  unsigned int goal_index) const
+{
+  std::vector<LatticeState> states;
+
+  unsigned int current = goal_index;
+  while (current != start_index) {
+    if (current == kNoParent || parent[current] == kNoParent) {
+      return {};
+    }
+
+    states.push_back(fromLatticeIndex(current));
+    current = parent[current];
+  }
+
+  states.push_back(fromLatticeIndex(start_index));
+  std::reverse(states.begin(), states.end());
+  return states;
+}
+
+std::vector<OruGlobalPlanner::LatticeTransition> OruGlobalPlanner::generateForwardPrimitives(
+  const LatticeState & state) const
+{
+  double start_x = 0.0;
+  double start_y = 0.0;
+  costmap_->mapToWorld(state.x, state.y, start_x, start_y);
+
+  const double start_theta = headingForIndex(state.theta_index);
+  const unsigned int samples = std::max(2u, lattice_primitive_samples_);
+
+  auto transition_from_samples =
+    [this, samples](std::vector<LatticePose> poses, double cost) -> LatticeTransition {
+      const auto & end = poses.back();
+      unsigned int end_x = 0;
+      unsigned int end_y = 0;
+      if (!costmap_->worldToMap(end.x, end.y, end_x, end_y)) {
+        return {{0, 0, 0}, {}, cost};
+      }
+
+      return {{end_x, end_y, headingIndex(end.theta)}, std::move(poses), cost};
+    };
+
+  std::vector<LatticeTransition> transitions;
+  transitions.reserve(3);
+
+  std::vector<LatticePose> straight_samples;
+  straight_samples.reserve(samples);
+  for (unsigned int i = 0; i < samples; ++i) {
+    const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+    const double distance = lattice_step_distance_ * ratio;
+    straight_samples.push_back({
+      start_x + distance * std::cos(start_theta),
+      start_y + distance * std::sin(start_theta),
+      start_theta});
+  }
+  transitions.push_back(transition_from_samples(std::move(straight_samples), lattice_step_distance_));
+
+  for (const double direction : {1.0, -1.0}) {
+    std::vector<LatticePose> arc_samples;
+    arc_samples.reserve(samples);
+    for (unsigned int i = 0; i < samples; ++i) {
+      const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+      const double delta_theta = direction * lattice_arc_angle_ * ratio;
+      const double signed_radius = direction * lattice_arc_radius_;
+      arc_samples.push_back({
+        start_x + signed_radius *
+        (std::sin(start_theta + delta_theta) - std::sin(start_theta)),
+        start_y - signed_radius *
+        (std::cos(start_theta + delta_theta) - std::cos(start_theta)),
+        normalizeAngle(start_theta + delta_theta)});
+    }
+    transitions.push_back(
+      transition_from_samples(std::move(arc_samples), lattice_arc_radius_ * lattice_arc_angle_));
+  }
+
+  transitions.erase(
+    std::remove_if(
+      transitions.begin(), transitions.end(),
+      [](const LatticeTransition & transition) {
+        return transition.samples.empty();
+      }),
+    transitions.end());
+  return transitions;
 }
 
 bool OruGlobalPlanner::resolveGoalCell(
@@ -483,9 +698,77 @@ bool OruGlobalPlanner::isFootprintTraversable(unsigned int x, unsigned int y, do
   return footprint_cost < footprint_collision_cost_threshold_;
 }
 
+bool OruGlobalPlanner::isFootprintTraversableAtPose(double wx, double wy, double yaw) const
+{
+  if (!use_footprint_collision_check_ || footprint_.size() < 3) {
+    return true;
+  }
+
+  const double footprint_cost =
+    footprint_collision_checker_->footprintCostAtPose(wx, wy, yaw, footprint_);
+
+  if (footprint_cost == nav2_costmap_2d::NO_INFORMATION) {
+    return allow_unknown_;
+  }
+
+  return footprint_cost < footprint_collision_cost_threshold_;
+}
+
+bool OruGlobalPlanner::primitiveTraversable(const LatticeTransition & transition) const
+{
+  for (const auto & pose : transition.samples) {
+    unsigned int map_x = 0;
+    unsigned int map_y = 0;
+    if (!costmap_->worldToMap(pose.x, pose.y, map_x, map_y)) {
+      return false;
+    }
+
+    if (!isTraversable(map_x, map_y) || !isFootprintTraversableAtPose(pose.x, pose.y, pose.theta)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool OruGlobalPlanner::isLatticeGoal(
+  const LatticeState & state,
+  const Cell & goal,
+  double goal_yaw) const
+{
+  const double dx = static_cast<double>(state.x) - static_cast<double>(goal.x);
+  const double dy = static_cast<double>(state.y) - static_cast<double>(goal.y);
+  const double distance = std::hypot(dx, dy) * costmap_->getResolution();
+  if (distance > goal_tolerance_) {
+    return false;
+  }
+
+  if (!use_final_approach_orientation_) {
+    return true;
+  }
+
+  const double heading_error = std::abs(normalizeAngle(headingForIndex(state.theta_index) - goal_yaw));
+  const double heading_tolerance = M_PI / static_cast<double>(lattice_heading_bins_);
+  return heading_error <= heading_tolerance;
+}
+
 unsigned int OruGlobalPlanner::toIndex(unsigned int x, unsigned int y) const
 {
   return costmap_->getIndex(x, y);
+}
+
+unsigned int OruGlobalPlanner::toLatticeIndex(const LatticeState & state) const
+{
+  return (toIndex(state.x, state.y) * lattice_heading_bins_) +
+         (state.theta_index % lattice_heading_bins_);
+}
+
+OruGlobalPlanner::LatticeState OruGlobalPlanner::fromLatticeIndex(unsigned int index) const
+{
+  const unsigned int theta_index = index % lattice_heading_bins_;
+  const unsigned int cell_index = index / lattice_heading_bins_;
+  const auto size_x = costmap_->getSizeInCellsX();
+  return {cell_index % size_x, cell_index / size_x, theta_index};
 }
 
 double OruGlobalPlanner::traversalCost(unsigned int x, unsigned int y, int dx, int dy) const
@@ -507,6 +790,51 @@ double OruGlobalPlanner::heuristic(const Cell & a, const Cell & b) const
   const double dx = static_cast<double>(a.x) - static_cast<double>(b.x);
   const double dy = static_cast<double>(a.y) - static_cast<double>(b.y);
   return std::hypot(dx, dy);
+}
+
+double OruGlobalPlanner::latticeHeuristic(const LatticeState & state, const Cell & goal) const
+{
+  const double dx = static_cast<double>(state.x) - static_cast<double>(goal.x);
+  const double dy = static_cast<double>(state.y) - static_cast<double>(goal.y);
+  return std::hypot(dx, dy) * costmap_->getResolution();
+}
+
+double OruGlobalPlanner::transitionTraversalCost(const LatticeTransition & transition) const
+{
+  const auto cell_cost = costmap_->getCost(transition.state.x, transition.state.y);
+
+  if (cell_cost == nav2_costmap_2d::NO_INFORMATION) {
+    return transition.cost * (1.0 + unknown_cost_penalty_);
+  }
+
+  const double normalized_cost = static_cast<double>(cell_cost) / kMaxNonObstacleCost;
+  return transition.cost * (1.0 + cost_travel_multiplier_ * normalized_cost);
+}
+
+unsigned int OruGlobalPlanner::headingIndex(double yaw) const
+{
+  const double normalized = normalizeAngle(yaw);
+  const double positive = normalized < 0.0 ? normalized + 2.0 * M_PI : normalized;
+  const double bin_width = 2.0 * M_PI / static_cast<double>(lattice_heading_bins_);
+  const auto rounded = static_cast<int>(std::floor((positive / bin_width) + 0.5));
+  return static_cast<unsigned int>(rounded) % lattice_heading_bins_;
+}
+
+double OruGlobalPlanner::headingForIndex(unsigned int theta_index) const
+{
+  const double bin_width = 2.0 * M_PI / static_cast<double>(lattice_heading_bins_);
+  return normalizeAngle(static_cast<double>(theta_index % lattice_heading_bins_) * bin_width);
+}
+
+double OruGlobalPlanner::normalizeAngle(double angle) const
+{
+  while (angle > M_PI) {
+    angle -= 2.0 * M_PI;
+  }
+  while (angle <= -M_PI) {
+    angle += 2.0 * M_PI;
+  }
+  return angle;
 }
 
 nav_msgs::msg::Path OruGlobalPlanner::buildPath(
@@ -560,6 +888,50 @@ nav_msgs::msg::Path OruGlobalPlanner::buildPath(
     path.poses.back().pose.orientation = goal.pose.orientation;
   } else {
     path.poses.back().pose.orientation = path.poses[path.poses.size() - 2].pose.orientation;
+  }
+
+  return path;
+}
+
+nav_msgs::msg::Path OruGlobalPlanner::buildLatticePath(
+  const std::vector<LatticeState> & states,
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal) const
+{
+  auto node = node_.lock();
+  if (!node) {
+    throw nav2_core::PlannerException("Unable to lock lifecycle node while building lattice path");
+  }
+
+  nav_msgs::msg::Path path;
+  path.header.frame_id = global_frame_;
+  path.header.stamp = node->now();
+  path.poses.reserve(states.size());
+
+  for (const auto & state : states) {
+    double wx = 0.0;
+    double wy = 0.0;
+    costmap_->mapToWorld(state.x, state.y, wx, wy);
+
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path.header;
+    pose.pose.position.x = wx;
+    pose.pose.position.y = wy;
+    pose.pose.position.z = start.pose.position.z;
+    pose.pose.orientation =
+      nav2_util::geometry_utils::orientationAroundZAxis(headingForIndex(state.theta_index));
+    path.poses.push_back(pose);
+  }
+
+  if (path.poses.empty()) {
+    return path;
+  }
+
+  path.poses.front().pose.position = start.pose.position;
+  path.poses.front().pose.orientation = start.pose.orientation;
+  path.poses.back().pose.position = goal.pose.position;
+  if (use_final_approach_orientation_) {
+    path.poses.back().pose.orientation = goal.pose.orientation;
   }
 
   return path;

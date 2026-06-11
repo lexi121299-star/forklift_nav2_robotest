@@ -40,10 +40,33 @@ public:
     const geometry_msgs::msg::PoseStamped & goal) override;
 
 private:
+  friend class OruGlobalPlannerTestAccess;
+
   struct Cell
   {
     unsigned int x;
     unsigned int y;
+  };
+
+  struct LatticeState
+  {
+    unsigned int x;
+    unsigned int y;
+    unsigned int theta_index;
+  };
+
+  struct LatticePose
+  {
+    double x;
+    double y;
+    double theta;
+  };
+
+  struct LatticeTransition
+  {
+    LatticeState state;
+    std::vector<LatticePose> samples;
+    double cost;
   };
 
   std::vector<Cell> searchAStar(const Cell & start, const Cell & goal) const;
@@ -51,6 +74,16 @@ private:
     const std::vector<unsigned int> & parent,
     unsigned int start_index,
     unsigned int goal_index) const;
+  std::vector<LatticeState> searchLattice(
+    const Cell & start,
+    double start_yaw,
+    const Cell & goal,
+    double goal_yaw) const;
+  std::vector<LatticeState> reconstructLatticePath(
+    const std::vector<unsigned int> & parent,
+    unsigned int start_index,
+    unsigned int goal_index) const;
+  std::vector<LatticeTransition> generateForwardPrimitives(const LatticeState & state) const;
 
   bool resolveGoalCell(
     const Cell & requested_goal,
@@ -63,13 +96,30 @@ private:
   bool isInBounds(int x, int y) const;
   bool isTraversable(unsigned int x, unsigned int y) const;
   bool isFootprintTraversable(unsigned int x, unsigned int y, double yaw) const;
+  bool isFootprintTraversableAtPose(double wx, double wy, double yaw) const;
+  bool primitiveTraversable(const LatticeTransition & transition) const;
+  bool isLatticeGoal(
+    const LatticeState & state,
+    const Cell & goal,
+    double goal_yaw) const;
   unsigned int toIndex(unsigned int x, unsigned int y) const;
+  unsigned int toLatticeIndex(const LatticeState & state) const;
+  LatticeState fromLatticeIndex(unsigned int index) const;
 
   double traversalCost(unsigned int x, unsigned int y, int dx, int dy) const;
   double heuristic(const Cell & a, const Cell & b) const;
+  double latticeHeuristic(const LatticeState & state, const Cell & goal) const;
+  double transitionTraversalCost(const LatticeTransition & transition) const;
+  unsigned int headingIndex(double yaw) const;
+  double headingForIndex(unsigned int theta_index) const;
+  double normalizeAngle(double angle) const;
 
   nav_msgs::msg::Path buildPath(
     const std::vector<Cell> & cells,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal) const;
+  nav_msgs::msg::Path buildLatticePath(
+    const std::vector<LatticeState> & states,
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal) const;
 
@@ -98,6 +148,15 @@ private:
   double start_tolerance_{1.0};
   double goal_tolerance_{0.5};
   unsigned int max_iterations_{0};
+
+  bool use_lattice_planner_{false};
+  bool lattice_fallback_to_astar_{true};
+  unsigned int lattice_heading_bins_{16};
+  double lattice_step_distance_{0.20};
+  double lattice_arc_radius_{0.60};
+  double lattice_arc_angle_{0.3926990817};
+  unsigned int lattice_primitive_samples_{5};
+  bool lattice_reverse_enabled_{false};
 };
 
 }  // namespace forklift_nav2_plugins
