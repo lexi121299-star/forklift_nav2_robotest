@@ -109,7 +109,7 @@ ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
 '
 ```
 
-Run the short straight FollowPath acceptance:
+Run FollowPath acceptance scenarios:
 
 ```bash
 ./scripts/foxy_docker_run.sh bash -lc '
@@ -123,7 +123,18 @@ ros2 run forklift_nav2_demo forklift_follow_path_acceptance \
 '
 ```
 
-Observed Foxy result:
+For the additional P5 scenarios, restart the headless launch and republish
+`/initialpose` before each run so the robot starts from the scripted pose:
+
+```bash
+ros2 run forklift_nav2_demo forklift_follow_path_acceptance \
+  --ros-args -p use_sim_time:=true -p scenario:=gentle_arc -p timeout_sec:=100.0
+
+ros2 run forklift_nav2_demo forklift_follow_path_acceptance \
+  --ros-args -p use_sim_time:=true -p scenario:=sparse_90_turn -p timeout_sec:=180.0
+```
+
+Observed Foxy short straight result:
 
 ```text
 /follow_path status: 4 SUCCEEDED
@@ -131,6 +142,40 @@ control_samples=20 max_velocity_mps=0.394
 sim_cmd_samples=44 max_linear_x=0.394
 odom_final x=-1.535 y=-0.500
 ```
+
+Observed Foxy gentle arc result:
+
+```text
+/follow_path status: 4 SUCCEEDED
+control_samples=47 max_velocity_mps=0.080
+sim_cmd_samples=104 max_linear_x=0.080
+odom_final x=-1.634 y=-0.409
+```
+
+Observed Foxy sparse 90-degree turn result:
+
+```text
+/follow_path status: 6 ABORTED
+control_samples=862 max_velocity_mps=0.257
+sim_cmd_samples=1729 max_linear_x=0.257
+odom_final x=-0.888 y=3.583
+```
+
+The sparse 90-degree scenario is not accepted on Foxy yet. The controller
+detects a sharp turn and a trajectory curvature above the vehicle limit:
+
+```text
+P5 path preprocessing: input=3 filtered=3 smoothed=4 resampled=14 trajectory=14 sharp_turns=1 max_curvature=6.052 allowed=0.511 min_speed=0.080
+P5 detected 1 sharp path turn(s), max heading change 1.571 rad; smoothing/resampling is enabled
+P5 trajectory curvature 6.052 exceeds allowed 0.511 from min turning radius 1.957 m
+Action server failed while executing action callback: "ForkliftMpcController found no collision-free command"
+```
+
+This confirms the Foxy build, bridge, Nav2 lifecycle, and short/gentle
+FollowPath chain are working. It also leaves a P5/P6 follow-up: sparse,
+geometrically infeasible corners need a stronger feasibility check, turn
+insertion, or controller recovery behavior before claiming full P5 parity on
+Foxy.
 
 Foxy build and unit test result:
 
