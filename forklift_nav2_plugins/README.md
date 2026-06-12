@@ -3,9 +3,11 @@
 Custom Nav2 plugin package for the forklift project.
 
 The first plugin is `forklift_nav2_plugins/OruGlobalPlanner`. It is a
-costmap-aware 8-connected A* global planner scaffold. It already reads the Nav2
-global costmap and avoids lethal cells, but it is not yet a full ORU lattice or
-motion-primitive planner.
+costmap-aware lattice global planner scaffold with an 8-connected A* fallback.
+It already reads the Nav2 global costmap, searches over `x/y/theta_index`, and
+can generate forward primitives plus optional reverse primitives with direction
+metadata. It is not yet a full ORU motion-primitive planner with lookup tables,
+scenario-tuned reverse acceptance, or docking/narrow-aisle behavior.
 
 The first controller plugin is `forklift_nav2_plugins/ForkliftMpcController`.
 It keeps the Nav2 controller API while building an internal MPC data flow:
@@ -42,6 +44,20 @@ planner_server:
       goal_tolerance: 0.5
       max_iterations: 0
       use_final_approach_orientation: true
+      use_lattice_planner: true
+      lattice_fallback_to_astar: true
+      lattice_heading_bins: 16
+      lattice_step_distance: 0.20
+      lattice_arc_radius: 0.60
+      lattice_arc_angle: 0.3926990817
+      lattice_primitive_samples: 5
+      lattice_reverse_enabled: false
+      lattice_goal_tolerance: 0.25
+      lattice_turn_cost_multiplier: 0.25
+      lattice_obstacle_cost_multiplier: 1.0
+      lattice_goal_heading_cost_multiplier: 0.25
+      lattice_reverse_cost_multiplier: 0.5
+      lattice_gear_switch_cost: 1.0
 ```
 
 ## Controller Server Example
@@ -87,9 +103,10 @@ controller_server:
 1. Keep the current Nav2 setup running with Navfn and DWB.
 2. Build this package and verify pluginlib can load `OruGlobalPlanner`.
 3. Switch only `planner_server` to this planner for simulation tests.
-4. Replace the neighbor expansion with forklift-specific motion primitives.
-5. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
-6. Add footprint-aware collision checks and ORU-style constraint extraction.
-7. Replace DWB with `ForkliftMpcController` for simulation tests.
-8. Move ORU QP/MPC internals into the controller once the vehicle protocol and
+4. Expand the lattice primitive set with more curvatures and lengths.
+5. Validate reverse execution through the controller and vehicle interface.
+6. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
+7. Add footprint-aware collision checks and ORU-style constraint extraction.
+8. Replace DWB with `ForkliftMpcController` for simulation tests.
+9. Move ORU QP/MPC internals into the controller once the vehicle protocol and
    real kinematic model are fixed.

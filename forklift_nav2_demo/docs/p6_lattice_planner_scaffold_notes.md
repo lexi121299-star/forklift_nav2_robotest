@@ -534,13 +534,15 @@ lattice_goal_tolerance: 0.25
 lattice_turn_cost_multiplier: 0.25
 lattice_obstacle_cost_multiplier: 1.0
 lattice_goal_heading_cost_multiplier: 0.25
+lattice_reverse_cost_multiplier: 0.5
+lattice_gear_switch_cost: 1.0
 ```
 
 保留的旧行为：
 
 - lattice 关闭时仍走原 costmap-aware A*。
 - lattice 找不到路径且 `lattice_fallback_to_astar=true` 时，仍回退到原 A*。
-- reverse primitives 仍未实现；如果误开 `lattice_reverse_enabled`，planner 会打印 warning。
+- reverse primitives 已实现，但运行配置仍默认 `lattice_reverse_enabled: false`，避免 P6.4a 前把 controller/vehicle_interface 尚未验证的倒车段直接交给 Nav2 执行。
 
 ## 13. 第二版实现记录
 
@@ -572,7 +574,45 @@ lattice_goal_heading_cost_multiplier: 0.25
 - 中间 sample 的 inflation/costmap 代价会提高 traversal cost，但不会被当作 lethal collision。
 - goal heading error 会提高 lattice heuristic。
 
-## 14. 验证记录
+## 14. 第三版实现记录
+
+第三版完成 planner 侧最小倒车 primitive 闭环，但不把 runtime 默认切到倒车。
+
+新增代码能力：
+
+- `LatticeTransition` 增加 primitive 元数据：
+  - `direction`: `FORWARD` / `REVERSE`
+  - `kind`: `STRAIGHT` / `LEFT_ARC` / `RIGHT_ARC`
+  - `length`
+  - `heading_delta`
+- `searchLattice()` 返回 `LatticePath`，内部保留 state 链和到达每个 state 的 transition。
+- 搜索 key 在 `x/y/theta_index` 外额外区分 arrival direction，避免 gear-switch cost 把同一姿态的 forward/reverse 到达方式错误合并。
+- `generatePrimitives()` 默认仍生成 3 条 forward primitive；`lattice_reverse_enabled=true` 时再额外生成：
+  - `reverse straight`
+  - `reverse left arc`
+  - `reverse right arc`
+- `transitionTraversalCost()` 增加：
+  - `lattice_reverse_cost_multiplier`
+  - `lattice_gear_switch_cost`
+- planner 成功时会记录最终 lattice path 中 forward/reverse 段数量和 gear switch 数量。
+- `nav_msgs/Path` 输出仍只表达 pose；方向语义暂时保留在 planner 内部 metadata 和日志中，P6.4a 再接 controller/vehicle_interface 的执行语义。
+
+新增参数：
+
+```yaml
+lattice_reverse_cost_multiplier: 0.5
+lattice_gear_switch_cost: 1.0
+```
+
+新增/扩展单测：
+
+- 默认 `lattice_reverse_enabled=false` 时仍只生成 3 条 forward primitive。
+- 打开 `lattice_reverse_enabled=true` 时生成 6 条 primitive。
+- reverse straight / left arc / right arc 的 endpoint、heading、direction、kind、length、heading_delta 正确。
+- reverse primitive 会被 reverse cost 提高 traversal cost。
+- 从 forward 切到 reverse 会额外增加 gear switch cost。
+
+## 15. 验证记录
 
 Foxy docker 构建：
 
@@ -598,20 +638,25 @@ Foxy docker 插件测试：
 
 ```text
 100% tests passed, 0 tests failed out of 6
-test_oru_global_planner: 6 tests passed
+Summary: 49 tests, 0 errors, 0 failures, 0 skipped
+test_oru_global_planner: 8 tests passed
 ```
 
 新增 planner 单测覆盖：
 
 - heading index 正常归一化。
 - forward straight / left arc / right arc 的终点和 heading 变化正确。
+- reverse primitive 默认关闭，打开后生成 reverse straight / left arc / right arc。
+- primitive metadata 保留 direction、kind、length、heading_delta。
 - primitive 中间 sample 碰到 lethal cell 时会被拒绝。
 - primitive 中间 sample 碰到 lethal cell 时，拒绝原因是 `COSTMAP`。
 - 转弯 primitive 的 traversal cost 高于基础弧长。
+- reverse primitive 的 traversal cost 高于基础长度。
+- forward/reverse 换向会增加 gear switch cost。
 - 中间 sample 的 inflation/costmap 代价会提高 traversal cost，但不会被当作 lethal collision。
 - goal heading error 会提高 lattice heuristic。
 
-Foxy headless runtime smoke：
+P6.2 Foxy headless runtime smoke（P6.3 仍保持 `lattice_reverse_enabled: false`，倒车执行 smoke 放到 P6.4a）：
 
 ```bash
 ros2 action send_goal /compute_path_to_pose nav2_msgs/action/ComputePathToPose \
@@ -621,7 +666,7 @@ ros2 action send_goal /compute_path_to_pose nav2_msgs/action/ComputePathToPose \
 planner 配置日志：
 
 ```text
-Configured GridBased ... use_lattice=true lattice_bins=16 lattice_step=0.20 lattice_arc_radius=0.60 lattice_goal_tolerance=0.25
+Configured GridBased ... use_lattice=true lattice_bins=16 lattice_step=0.20 lattice_arc_radius=0.60 lattice_goal_tolerance=0.25 lattice_reverse=false
 ```
 
 planner 成功日志：

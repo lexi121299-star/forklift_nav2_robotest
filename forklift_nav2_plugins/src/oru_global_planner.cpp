@@ -21,6 +21,7 @@ namespace
 {
 
 constexpr unsigned int kNoParent = std::numeric_limits<unsigned int>::max();
+constexpr unsigned int kLatticeDirectionCount = 3;
 constexpr double kMaxNonObstacleCost =
   static_cast<double>(nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE - 1);
 
@@ -127,6 +128,12 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_goal_heading_cost_multiplier",
     rclcpp::ParameterValue(lattice_goal_heading_cost_multiplier_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_reverse_cost_multiplier",
+    rclcpp::ParameterValue(lattice_reverse_cost_multiplier_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_gear_switch_cost",
+    rclcpp::ParameterValue(lattice_gear_switch_cost_));
 
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".use_diagonal", use_diagonal_);
@@ -166,6 +173,8 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".lattice_goal_heading_cost_multiplier",
     lattice_goal_heading_cost_multiplier_);
+  node->get_parameter(name_ + ".lattice_reverse_cost_multiplier", lattice_reverse_cost_multiplier_);
+  node->get_parameter(name_ + ".lattice_gear_switch_cost", lattice_gear_switch_cost_);
 
   lethal_cost_threshold_ = std::clamp(lethal_cost_threshold_, 1, 255);
   footprint_collision_cost_threshold_ =
@@ -184,25 +193,22 @@ void OruGlobalPlanner::configure(
   lattice_obstacle_cost_multiplier_ = std::max(0.0, lattice_obstacle_cost_multiplier_);
   lattice_goal_heading_cost_multiplier_ =
     std::max(0.0, lattice_goal_heading_cost_multiplier_);
+  lattice_reverse_cost_multiplier_ = std::max(0.0, lattice_reverse_cost_multiplier_);
+  lattice_gear_switch_cost_ = std::max(0.0, lattice_gear_switch_cost_);
 
   RCLCPP_INFO(
     logger_,
     "Configured %s in frame %s: allow_unknown=%s use_diagonal=%s "
     "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d start_tolerance=%.2f "
     "use_lattice=%s lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
-    "lattice_goal_tolerance=%.2f",
+    "lattice_goal_tolerance=%.2f lattice_reverse=%s",
     name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false",
     footprint_.size(), lethal_cost_threshold_, start_tolerance_,
     use_lattice_planner_ ? "true" : "false", lattice_heading_bins_,
-    lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_);
-
-  if (lattice_reverse_enabled_) {
-    RCLCPP_WARN(
-      logger_,
-      "lattice_reverse_enabled is set but P6 scaffold only implements forward primitives");
-  }
+    lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_,
+    lattice_reverse_enabled_ ? "true" : "false");
 }
 
 void OruGlobalPlanner::cleanup()
@@ -268,10 +274,10 @@ nav_msgs::msg::Path OruGlobalPlanner::createPlan(
   }
 
   if (use_lattice_planner_) {
-    const auto states = searchLattice(planning_start_cell, start_yaw, goal_cell, goal_yaw);
-    if (!states.empty()) {
-      RCLCPP_INFO(logger_, "Lattice planner produced %zu states", states.size());
-      return buildLatticePath(states, start, goal);
+    const auto lattice_path = searchLattice(planning_start_cell, start_yaw, goal_cell, goal_yaw);
+    if (!lattice_path.states.empty()) {
+      logLatticePlanMetadata(lattice_path);
+      return buildLatticePath(lattice_path, start, goal);
     }
 
     if (!lattice_fallback_to_astar_) {
@@ -412,7 +418,7 @@ std::vector<OruGlobalPlanner::Cell> OruGlobalPlanner::reconstructPath(
   return cells;
 }
 
-std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
+OruGlobalPlanner::LatticePath OruGlobalPlanner::searchLattice(
   const Cell & start,
   double start_yaw,
   const Cell & goal,
@@ -420,13 +426,15 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
 {
   const auto size_x = costmap_->getSizeInCellsX();
   const auto size_y = costmap_->getSizeInCellsY();
-  const auto state_count = size_x * size_y * lattice_heading_bins_;
+  const auto state_count =
+    size_x * size_y * lattice_heading_bins_ * kLatticeDirectionCount;
 
   const LatticeState start_state{start.x, start.y, headingIndex(start_yaw)};
-  const auto start_index = toLatticeIndex(start_state);
+  const auto start_index = toLatticeIndex(start_state, PrimitiveDirection::NONE);
 
   std::vector<double> g_score(state_count, std::numeric_limits<double>::infinity());
   std::vector<unsigned int> parent(state_count, kNoParent);
+  std::vector<LatticeTransition> arrival_transition(state_count);
   std::vector<bool> closed(state_count, false);
   std::priority_queue<QueueNode, std::vector<QueueNode>, QueueGreater> open_set;
   LatticeSearchStats stats;
@@ -452,7 +460,7 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
       std::min(stats.best_goal_distance, latticeGoalDistance(current_state, goal));
     if (isLatticeGoal(current_state, goal, goal_yaw)) {
       logLatticeStats(stats, "succeeded");
-      return reconstructLatticePath(parent, start_index, current.index);
+      return reconstructLatticePath(parent, arrival_transition, start_index, current.index);
     }
 
     if (max_iterations_ > 0 && ++iterations > max_iterations_) {
@@ -462,7 +470,9 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
       return {};
     }
 
-    for (const auto & transition : generateForwardPrimitives(current_state)) {
+    const PrimitiveDirection previous_direction = directionFromLatticeIndex(current.index);
+
+    for (const auto & transition : generatePrimitives(current_state)) {
       ++stats.generated;
       const auto reject_reason = primitiveRejectReason(transition);
       if (reject_reason != PrimitiveRejectReason::NONE) {
@@ -477,17 +487,19 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
       }
       ++stats.accepted;
 
-      const auto next_index = toLatticeIndex(transition.state);
+      const auto next_index = toLatticeIndex(transition.state, transition.direction);
       if (closed[next_index]) {
         continue;
       }
 
-      const double tentative_g = g_score[current.index] + transitionTraversalCost(transition);
+      const double tentative_g =
+        g_score[current.index] + transitionTraversalCost(transition, previous_direction);
       if (tentative_g >= g_score[next_index]) {
         continue;
       }
 
       parent[next_index] = current.index;
+      arrival_transition[next_index] = transition;
       g_score[next_index] = tentative_g;
       ++stats.improved;
       open_set.push({
@@ -500,12 +512,13 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::searchLattice(
   return {};
 }
 
-std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::reconstructLatticePath(
+OruGlobalPlanner::LatticePath OruGlobalPlanner::reconstructLatticePath(
   const std::vector<unsigned int> & parent,
+  const std::vector<LatticeTransition> & arrival_transition,
   unsigned int start_index,
   unsigned int goal_index) const
 {
-  std::vector<LatticeState> states;
+  LatticePath path;
 
   unsigned int current = goal_index;
   while (current != start_index) {
@@ -513,16 +526,18 @@ std::vector<OruGlobalPlanner::LatticeState> OruGlobalPlanner::reconstructLattice
       return {};
     }
 
-    states.push_back(fromLatticeIndex(current));
+    path.states.push_back(fromLatticeIndex(current));
+    path.transitions.push_back(arrival_transition[current]);
     current = parent[current];
   }
 
-  states.push_back(fromLatticeIndex(start_index));
-  std::reverse(states.begin(), states.end());
-  return states;
+  path.states.push_back(fromLatticeIndex(start_index));
+  std::reverse(path.states.begin(), path.states.end());
+  std::reverse(path.transitions.begin(), path.transitions.end());
+  return path;
 }
 
-std::vector<OruGlobalPlanner::LatticeTransition> OruGlobalPlanner::generateForwardPrimitives(
+std::vector<OruGlobalPlanner::LatticeTransition> OruGlobalPlanner::generatePrimitives(
   const LatticeState & state) const
 {
   double start_x = 0.0;
@@ -533,48 +548,83 @@ std::vector<OruGlobalPlanner::LatticeTransition> OruGlobalPlanner::generateForwa
   const unsigned int samples = std::max(2u, lattice_primitive_samples_);
 
   auto transition_from_samples =
-    [this, samples](std::vector<LatticePose> poses, double cost) -> LatticeTransition {
+    [this](
+    std::vector<LatticePose> poses,
+    PrimitiveDirection primitive_direction,
+    PrimitiveKind primitive_kind,
+    double length,
+    double heading_delta) -> LatticeTransition {
+      LatticeTransition transition;
+      transition.cost = length;
+      transition.direction = primitive_direction;
+      transition.kind = primitive_kind;
+      transition.length = length;
+      transition.heading_delta = heading_delta;
+
       const auto & end = poses.back();
       unsigned int end_x = 0;
       unsigned int end_y = 0;
       if (!costmap_->worldToMap(end.x, end.y, end_x, end_y)) {
-        return {{0, 0, 0}, {}, cost};
+        return transition;
       }
 
-      return {{end_x, end_y, headingIndex(end.theta)}, std::move(poses), cost};
+      transition.state = {end_x, end_y, headingIndex(end.theta)};
+      transition.samples = std::move(poses);
+      return transition;
     };
 
   std::vector<LatticeTransition> transitions;
-  transitions.reserve(3);
+  transitions.reserve(lattice_reverse_enabled_ ? 6 : 3);
 
-  std::vector<LatticePose> straight_samples;
-  straight_samples.reserve(samples);
-  for (unsigned int i = 0; i < samples; ++i) {
-    const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-    const double distance = lattice_step_distance_ * ratio;
-    straight_samples.push_back({
-      start_x + distance * std::cos(start_theta),
-      start_y + distance * std::sin(start_theta),
-      start_theta});
-  }
-  transitions.push_back(transition_from_samples(std::move(straight_samples), lattice_step_distance_));
+  const std::array<PrimitiveDirection, 2> primitive_directions = {{
+    PrimitiveDirection::FORWARD,
+    PrimitiveDirection::REVERSE
+  }};
 
-  for (const double direction : {1.0, -1.0}) {
-    std::vector<LatticePose> arc_samples;
-    arc_samples.reserve(samples);
+  for (const auto primitive_direction : primitive_directions) {
+    if (primitive_direction == PrimitiveDirection::REVERSE && !lattice_reverse_enabled_) {
+      continue;
+    }
+
+    const double motion_sign =
+      primitive_direction == PrimitiveDirection::FORWARD ? 1.0 : -1.0;
+
+    std::vector<LatticePose> straight_samples;
+    straight_samples.reserve(samples);
     for (unsigned int i = 0; i < samples; ++i) {
       const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-      const double delta_theta = direction * lattice_arc_angle_ * ratio;
-      const double signed_radius = direction * lattice_arc_radius_;
-      arc_samples.push_back({
-        start_x + signed_radius *
-        (std::sin(start_theta + delta_theta) - std::sin(start_theta)),
-        start_y - signed_radius *
-        (std::cos(start_theta + delta_theta) - std::cos(start_theta)),
-        normalizeAngle(start_theta + delta_theta)});
+      const double distance = motion_sign * lattice_step_distance_ * ratio;
+      straight_samples.push_back({
+        start_x + distance * std::cos(start_theta),
+        start_y + distance * std::sin(start_theta),
+        start_theta});
     }
     transitions.push_back(
-      transition_from_samples(std::move(arc_samples), lattice_arc_radius_ * lattice_arc_angle_));
+      transition_from_samples(
+        std::move(straight_samples), primitive_direction, PrimitiveKind::STRAIGHT,
+        lattice_step_distance_, 0.0));
+
+    for (const double turn_sign : {1.0, -1.0}) {
+      const auto primitive_kind =
+        turn_sign > 0.0 ? PrimitiveKind::LEFT_ARC : PrimitiveKind::RIGHT_ARC;
+      std::vector<LatticePose> arc_samples;
+      arc_samples.reserve(samples);
+      for (unsigned int i = 0; i < samples; ++i) {
+        const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+        const double delta_theta = turn_sign * lattice_arc_angle_ * ratio;
+        const double signed_radius = motion_sign * turn_sign * lattice_arc_radius_;
+        arc_samples.push_back({
+          start_x + signed_radius *
+          (std::sin(start_theta + delta_theta) - std::sin(start_theta)),
+          start_y - signed_radius *
+          (std::cos(start_theta + delta_theta) - std::cos(start_theta)),
+          normalizeAngle(start_theta + delta_theta)});
+      }
+      transitions.push_back(
+        transition_from_samples(
+          std::move(arc_samples), primitive_direction, primitive_kind,
+          lattice_arc_radius_ * lattice_arc_angle_, turn_sign * lattice_arc_angle_));
+    }
   }
 
   transitions.erase(
@@ -818,18 +868,38 @@ unsigned int OruGlobalPlanner::toIndex(unsigned int x, unsigned int y) const
   return costmap_->getIndex(x, y);
 }
 
-unsigned int OruGlobalPlanner::toLatticeIndex(const LatticeState & state) const
+unsigned int OruGlobalPlanner::toLatticeIndex(
+  const LatticeState & state,
+  PrimitiveDirection arrival_direction) const
 {
-  return (toIndex(state.x, state.y) * lattice_heading_bins_) +
-         (state.theta_index % lattice_heading_bins_);
+  const unsigned int direction_index = arrival_direction == PrimitiveDirection::FORWARD ? 1u :
+    arrival_direction == PrimitiveDirection::REVERSE ? 2u : 0u;
+  return ((toIndex(state.x, state.y) * lattice_heading_bins_) +
+         (state.theta_index % lattice_heading_bins_)) *
+         kLatticeDirectionCount +
+         direction_index;
 }
 
 OruGlobalPlanner::LatticeState OruGlobalPlanner::fromLatticeIndex(unsigned int index) const
 {
-  const unsigned int theta_index = index % lattice_heading_bins_;
-  const unsigned int cell_index = index / lattice_heading_bins_;
+  const unsigned int heading_cell_index = index / kLatticeDirectionCount;
+  const unsigned int theta_index = heading_cell_index % lattice_heading_bins_;
+  const unsigned int cell_index = heading_cell_index / lattice_heading_bins_;
   const auto size_x = costmap_->getSizeInCellsX();
   return {cell_index % size_x, cell_index / size_x, theta_index};
+}
+
+OruGlobalPlanner::PrimitiveDirection OruGlobalPlanner::directionFromLatticeIndex(
+  unsigned int index) const
+{
+  const unsigned int direction_index = index % kLatticeDirectionCount;
+  if (direction_index == 1u) {
+    return PrimitiveDirection::FORWARD;
+  }
+  if (direction_index == 2u) {
+    return PrimitiveDirection::REVERSE;
+  }
+  return PrimitiveDirection::NONE;
 }
 
 double OruGlobalPlanner::traversalCost(unsigned int x, unsigned int y, int dx, int dy) const
@@ -867,6 +937,13 @@ double OruGlobalPlanner::latticeHeuristic(
 
 double OruGlobalPlanner::transitionTraversalCost(const LatticeTransition & transition) const
 {
+  return transitionTraversalCost(transition, PrimitiveDirection::NONE);
+}
+
+double OruGlobalPlanner::transitionTraversalCost(
+  const LatticeTransition & transition,
+  PrimitiveDirection previous_direction) const
+{
   double max_normalized_cost = 0.0;
   bool saw_unknown = false;
 
@@ -888,9 +965,7 @@ double OruGlobalPlanner::transitionTraversalCost(const LatticeTransition & trans
       static_cast<double>(cell_cost) / kMaxNonObstacleCost);
   }
 
-  const double heading_delta =
-    transition.samples.empty() ? 0.0 :
-    std::abs(normalizeAngle(transition.samples.back().theta - transition.samples.front().theta));
+  const double heading_delta = std::abs(transition.heading_delta);
   const double turn_ratio =
     lattice_arc_angle_ > 0.0 ? std::min(1.0, heading_delta / lattice_arc_angle_) : 0.0;
 
@@ -902,7 +977,19 @@ double OruGlobalPlanner::transitionTraversalCost(const LatticeTransition & trans
     multiplier += unknown_cost_penalty_;
   }
 
-  return transition.cost * multiplier;
+  if (transition.direction == PrimitiveDirection::REVERSE) {
+    multiplier += lattice_reverse_cost_multiplier_;
+  }
+
+  double cost = transition.cost * multiplier;
+  if (previous_direction != PrimitiveDirection::NONE &&
+    transition.direction != PrimitiveDirection::NONE &&
+    previous_direction != transition.direction)
+  {
+    cost += lattice_gear_switch_cost_;
+  }
+
+  return cost;
 }
 
 double OruGlobalPlanner::latticeGoalDistance(const LatticeState & state, const Cell & goal) const
@@ -923,6 +1010,37 @@ void OruGlobalPlanner::logLatticeStats(
     result, stats.expanded, stats.generated, stats.accepted, stats.improved,
     stats.rejected_out_of_bounds, stats.rejected_costmap, stats.rejected_footprint,
     stats.best_goal_distance);
+}
+
+void OruGlobalPlanner::logLatticePlanMetadata(const LatticePath & path) const
+{
+  size_t forward_segments = 0;
+  size_t reverse_segments = 0;
+  size_t gear_switches = 0;
+  PrimitiveDirection previous_direction = PrimitiveDirection::NONE;
+
+  for (const auto & transition : path.transitions) {
+    if (transition.direction == PrimitiveDirection::FORWARD) {
+      ++forward_segments;
+    } else if (transition.direction == PrimitiveDirection::REVERSE) {
+      ++reverse_segments;
+    }
+
+    if (previous_direction != PrimitiveDirection::NONE &&
+      transition.direction != PrimitiveDirection::NONE &&
+      previous_direction != transition.direction)
+    {
+      ++gear_switches;
+    }
+    previous_direction = transition.direction;
+  }
+
+  RCLCPP_INFO(
+    logger_,
+    "Lattice planner produced %zu states, %zu segments "
+    "(forward=%zu reverse=%zu gear_switches=%zu)",
+    path.states.size(), path.transitions.size(), forward_segments, reverse_segments,
+    gear_switches);
 }
 
 unsigned int OruGlobalPlanner::headingIndex(double yaw) const
@@ -1008,7 +1126,7 @@ nav_msgs::msg::Path OruGlobalPlanner::buildPath(
 }
 
 nav_msgs::msg::Path OruGlobalPlanner::buildLatticePath(
-  const std::vector<LatticeState> & states,
+  const LatticePath & lattice_path,
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal) const
 {
@@ -1020,6 +1138,7 @@ nav_msgs::msg::Path OruGlobalPlanner::buildLatticePath(
   nav_msgs::msg::Path path;
   path.header.frame_id = global_frame_;
   path.header.stamp = node->now();
+  const auto & states = lattice_path.states;
   path.poses.reserve(states.size());
 
   for (const auto & state : states) {

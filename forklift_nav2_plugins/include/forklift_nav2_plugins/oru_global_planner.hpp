@@ -45,29 +45,53 @@ private:
 
   struct Cell
   {
-    unsigned int x;
-    unsigned int y;
+    unsigned int x{0};
+    unsigned int y{0};
   };
 
   struct LatticeState
   {
-    unsigned int x;
-    unsigned int y;
-    unsigned int theta_index;
+    unsigned int x{0};
+    unsigned int y{0};
+    unsigned int theta_index{0};
   };
 
   struct LatticePose
   {
-    double x;
-    double y;
-    double theta;
+    double x{0.0};
+    double y{0.0};
+    double theta{0.0};
+  };
+
+  enum class PrimitiveDirection
+  {
+    NONE,
+    FORWARD,
+    REVERSE
+  };
+
+  enum class PrimitiveKind
+  {
+    STRAIGHT,
+    LEFT_ARC,
+    RIGHT_ARC
   };
 
   struct LatticeTransition
   {
     LatticeState state;
     std::vector<LatticePose> samples;
-    double cost;
+    double cost{0.0};
+    PrimitiveDirection direction{PrimitiveDirection::NONE};
+    PrimitiveKind kind{PrimitiveKind::STRAIGHT};
+    double length{0.0};
+    double heading_delta{0.0};
+  };
+
+  struct LatticePath
+  {
+    std::vector<LatticeState> states;
+    std::vector<LatticeTransition> transitions;
   };
 
   enum class PrimitiveRejectReason
@@ -95,16 +119,17 @@ private:
     const std::vector<unsigned int> & parent,
     unsigned int start_index,
     unsigned int goal_index) const;
-  std::vector<LatticeState> searchLattice(
+  LatticePath searchLattice(
     const Cell & start,
     double start_yaw,
     const Cell & goal,
     double goal_yaw) const;
-  std::vector<LatticeState> reconstructLatticePath(
+  LatticePath reconstructLatticePath(
     const std::vector<unsigned int> & parent,
+    const std::vector<LatticeTransition> & arrival_transition,
     unsigned int start_index,
     unsigned int goal_index) const;
-  std::vector<LatticeTransition> generateForwardPrimitives(const LatticeState & state) const;
+  std::vector<LatticeTransition> generatePrimitives(const LatticeState & state) const;
 
   bool resolveGoalCell(
     const Cell & requested_goal,
@@ -125,8 +150,11 @@ private:
     const Cell & goal,
     double goal_yaw) const;
   unsigned int toIndex(unsigned int x, unsigned int y) const;
-  unsigned int toLatticeIndex(const LatticeState & state) const;
+  unsigned int toLatticeIndex(
+    const LatticeState & state,
+    PrimitiveDirection arrival_direction) const;
   LatticeState fromLatticeIndex(unsigned int index) const;
+  PrimitiveDirection directionFromLatticeIndex(unsigned int index) const;
 
   double traversalCost(unsigned int x, unsigned int y, int dx, int dy) const;
   double heuristic(const Cell & a, const Cell & b) const;
@@ -135,18 +163,22 @@ private:
     const Cell & goal,
     double goal_yaw) const;
   double transitionTraversalCost(const LatticeTransition & transition) const;
+  double transitionTraversalCost(
+    const LatticeTransition & transition,
+    PrimitiveDirection previous_direction) const;
   unsigned int headingIndex(double yaw) const;
   double headingForIndex(unsigned int theta_index) const;
   double normalizeAngle(double angle) const;
   double latticeGoalDistance(const LatticeState & state, const Cell & goal) const;
   void logLatticeStats(const LatticeSearchStats & stats, const char * result) const;
+  void logLatticePlanMetadata(const LatticePath & path) const;
 
   nav_msgs::msg::Path buildPath(
     const std::vector<Cell> & cells,
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal) const;
   nav_msgs::msg::Path buildLatticePath(
-    const std::vector<LatticeState> & states,
+    const LatticePath & lattice_path,
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal) const;
 
@@ -188,6 +220,8 @@ private:
   double lattice_turn_cost_multiplier_{0.25};
   double lattice_obstacle_cost_multiplier_{1.0};
   double lattice_goal_heading_cost_multiplier_{0.25};
+  double lattice_reverse_cost_multiplier_{0.5};
+  double lattice_gear_switch_cost_{1.0};
 };
 
 }  // namespace forklift_nav2_plugins

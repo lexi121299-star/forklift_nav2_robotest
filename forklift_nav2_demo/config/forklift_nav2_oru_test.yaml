@@ -339,6 +339,8 @@ planner_server:
       lattice_turn_cost_multiplier: 0.25
       lattice_obstacle_cost_multiplier: 1.0
       lattice_goal_heading_cost_multiplier: 0.25
+      lattice_reverse_cost_multiplier: 0.5
+      lattice_gear_switch_cost: 1.0
 
 planner_server_rclcpp_node:
   ros__parameters:

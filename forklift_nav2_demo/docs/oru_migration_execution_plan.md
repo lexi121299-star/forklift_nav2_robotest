@@ -21,15 +21,16 @@
 
 - `forklift_nav2_plugins`
   - `forklift_nav2_plugins/OruGlobalPlanner`
-    - 当前是 costmap-aware A* scaffold，不是完整 ORU lattice/motion primitive planner。
+    - 当前已经进入 P6 lattice scaffold 第三版：`x/y/theta_index`、forward/reverse primitives、primitive 方向元数据、沿途 footprint collision、2D A* fallback、lattice cost/diagnostics。
+    - 还不是完整 ORU lattice/motion primitive planner；倒车执行闭环、lookup/cache 和场景化 acceptance 仍待做。
   - `forklift_nav2_plugins/ForkliftMpcController`
     - 当前是 sampled predictive controller scaffold，不是完整 ORU QP-MPC。
 
 当前主要问题：
 
 - 仿真时间、`/clock`、TF、`/odom` 必须稳定，否则 2D Pose Estimate、costmap、FollowPath 都会失败。
-- 当前 controller 能做简单预测跟踪，但还没有 ORU 的 `x/y/theta/phi` 状态、转角约束和 QP 求解。
-- 当前 global planner 不理解三支点/叉车运动学，只是在 costmap 上找可通行格子。
+- 当前 controller 已经有 ORU State / Control 概念、trajectory preview、最小 MPC 求解、path preprocessing 和 rear-axle pivot-turn 预测，但还不是完整 ORU QP-MPC。
+- 当前 global planner 已经开始理解 heading、forward/reverse motion primitives、前进/倒车方向语义和换向代价；但 runtime 配置仍暂时关闭 reverse，等待 P6.4a 验证 controller/vehicle_interface 能执行倒车段。
 
 ## 1. 总体迁移顺序
 
@@ -43,10 +44,28 @@ P3  定义真实车控制模型和命令接口
 P4  把 ORU MPC 核心移进 ForkliftMpcController
 P5  接入轨迹处理和平滑
 P6  把 ORU motion planner / primitive 思路移进 GlobalPlanner
-P7  加 task_manager，统一 A-B 导航、手画 path、调度任务
 P8  加 safety，做急停、限速、防撞、掉边保护
+P7  加 task_manager，统一 A-B 导航、手画 path、调度任务
 P9  真车低速联调
 ```
+
+编号仍保留 P7/P8，但 2026-06-12 起近期执行优先级调整为：
+
+```text
+[x] P6.3  reverse primitives + direction metadata
+[ ] P6.4a 最小倒车执行验证：controller/vehicle_interface 能执行倒车段
+[ ] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
+[ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
+[ ] A-B acceptance：NavigateToPose + 障碍停车/放行
+[ ] P7.1  task_manager 最小任务入口
+```
+
+调整原因：
+
+- 当前目标是先让车能稳定从简单 A 到 B，并且遇到动态障碍物能安全停下。
+- 倒车是叉车运动能力的一部分，应该先在 planner/controller 闭环里打通。
+- 动态障碍停车/限速是上车安全底线，应在最小倒车执行闭环后尽早完成，不等所有倒车场景调优结束。
+- `forklift_task_manager` 负责站点、路线、任务暂停/恢复/取消和调度接口，可以等 A-B + safety gate 稳定后再做。
 
 原则：
 
@@ -448,7 +467,7 @@ Nav2 接入方式：
 
 ```text
 forklift_nav2_plugins/OruGlobalPlanner
-  costmap-aware A*
+  lattice scaffold with x/y/theta_index, forward/reverse primitive metadata, A* fallback
 ```
 
 目标：
@@ -533,7 +552,67 @@ reverse right arc
 
 - 叉臂不会在转弯中扫到障碍。
 
+### P6.5 当前分版路线
+
+P6 不一次性做完整 ORU planner，按分版推进：
+
+```text
+[x] 第一版：最小 lattice scaffold
+[x] 第二版：cost / diagnostics / goal approach tightening
+[x] 第三版：reverse primitives + direction metadata
+[ ] 第四版 A：最小倒车执行验证
+[ ] P8.1：最小 safety gate
+[ ] 第四版 B：倒车 acceptance 调优
+[ ] 第五版：multi-curvature / multi-length primitives + better heuristic + lookup/cache
+[ ] 第六版：narrow aisle / docking / A-B scenario acceptance
+```
+
+第三版已完成 planner 侧最小闭环：
+
+- 已加 `reverse straight / reverse left arc / reverse right arc`。
+- 已为 primitive/transition 保留方向语义：
+  - `forward`
+  - `reverse`
+  - `straight / left_arc / right_arc`
+  - length / heading_delta
+- 已加 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。
+- 已保留 A* fallback，runtime 配置仍保持 `lattice_reverse_enabled: false`，等待 P6.4a 验证倒车段执行。
+
+第三版之后不要直接等完整倒车场景都调好再做 P8。P6.4 拆成两段：
+
+```text
+P6.4a 最小倒车执行验证
+P6.4b 倒车 acceptance 调优
+```
+
+P6.4a 在 P8.1 前完成，最低标准是：
+
+- planner 可以输出倒车段。
+- controller 不会把倒车段当成前进路径硬追。
+- vehicle_interface / sim bridge 能收到正确方向的控制命令。
+- 简单倒车 path 能低速执行，或至少能在仿真中正确发负速度。
+
+P6.4a 不要求：
+
+- 复杂窄通道倒车入库。
+- 最优换向。
+- 所有倒车场景稳定。
+
+P6.4a 完成后，优先进入 P8.1 最小 safety gate。P6.4b 的倒车 acceptance 调优可以在 P8.1 后继续。
+
 ## 9. P7: 建 forklift_task_manager
+
+当前优先级：
+
+```text
+P7 暂缓，放到 P6.4a、P8.1 和 A-B acceptance 之后。
+```
+
+原因：
+
+- 简单 A 到 B 可以先直接用 Nav2 `NavigateToPose` / `FollowPath` 验收，不需要 task_manager。
+- 任务层不会直接提升车辆运动能力，也不会替代动态障碍安全停车。
+- 等 planner/controller/safety 闭环稳定后，再做 task_manager 的暂停、恢复、重试和调度接口更稳。
 
 目标：
 
@@ -582,6 +661,22 @@ cancel_task()
 
 ## 10. P8: 建 forklift_safety
 
+当前优先级：
+
+```text
+P8.1 提前到 P7.1 之前，在 P6.4a 最小倒车执行验证之后做。
+```
+
+第一阶段目标不是复杂动态绕行，而是安全停车/限速：
+
+```text
+动态障碍进入保护区 -> 停车
+障碍物离开 -> 放行或允许 Nav2 继续
+障碍物持续存在 -> 触发等待/后续重新规划策略
+控制命令超时 -> 停车
+急停输入 -> 停车
+```
+
 目标：
 
 上车必须有独立安全层，不依赖 planner/controller 自觉避障。
@@ -600,6 +695,7 @@ forklift_safety
 - 掉边保护。
 - 防撞监控。
 - 车辆状态异常停车。
+- 动态障碍物进入保护区时，对 controller 输出做安全闸门处理。
 
 可结合 Nav2：
 
@@ -607,6 +703,7 @@ forklift_safety
 nav2_collision_monitor
 costmap filter / keepout mask
 speed zone
+local/global costmap obstacle observation
 ```
 
 验收：
@@ -614,6 +711,7 @@ speed zone
 - 任意时候急停都能切断运动命令。
 - `/cmd_vel` 超时自动停车。
 - 障碍物进入保护区时停车或限速。
+- 障碍物离开后，不需要重启 Nav2 即可继续执行或重新下发目标。
 - 地图边缘/掉落风险区域不会允许继续行驶。
 
 ## 11. P9: 真车低速联调
@@ -703,19 +801,25 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P5 接入轨迹处理和平滑
 [x] P6.1 最小 lattice planner scaffold：`x/y/theta_index`、forward primitives、沿途 footprint collision、A* fallback
 [x] P6.2 lattice 代价/诊断第二版：turn/obstacle/goal-heading cost、拒绝原因统计、goal tolerance 收紧
+[x] P6.3 reverse primitives + direction metadata：倒车 primitive、方向语义、reverse/gear switch cost
+[ ] P6.4a 最小倒车执行验证：确认 planner 输出的倒车段能被 controller/vehicle interface 执行
+[ ] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
+[ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
+[ ] A-B acceptance：NavigateToPose 简单 A 到 B + 障碍停车/放行
+[ ] P7.1 task_manager 最小任务入口
 ```
 
 建议我们下一步先做：
 
 ```text
-P6
+P6.4a
 ```
 
 原因：
 
-- P5 已经能把稀疏 path 变成密集、连续、带曲率诊断和限速的 trajectory。
-- 过急曲线现在会被提示并限速，但是否真的可通行还需要 P6 继续做 footprint/path feasibility。
-- ORU qpOASES 求解器仍建议放到路径处理、约束和 footprint 检查稳定之后再接。
+- P6.3 已经在 planner 内部打通 reverse primitive、方向元数据、reverse cost 和 gear switch cost。
+- 但当前 runtime 配置仍关闭 reverse，controller/vehicle_interface 还没验证倒车段不会被当成前进路径硬追。
+- P6.4a 最小倒车执行验证完成后，优先做 P8.1 动态障碍停车/限速；P6.4b 的倒车调优和 P7 task_manager 可以等安全闭环稳定后再做。
 
 执行记录：
 
@@ -728,6 +832,8 @@ P6
 - P6 最小 lattice scaffold 的范围说明见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
 - 2026-06-11：P6.1 最小 lattice scaffold 通过。`OruGlobalPlanner` 增加可开关 `x/y/theta_index` lattice 搜索，保留原 2D A* fallback；第一版只启用 forward straight / left arc / right arc primitives，并对 primitive 沿途采样做 costmap + footprint collision。Foxy docker 构建通过，`forklift_nav2_plugins` 6 个 gtest 全部通过；headless `ComputePathToPose` smoke 中 planner server 加载 `use_lattice=true`，日志显示 `Lattice planner produced 5 states`，action 返回 `SUCCEEDED`，path heading 从起点逐步过渡到 90 度。详见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
 - 2026-06-11：P6.2 lattice 第二版通过。保持 forward-only primitives 和 2D A* fallback，新增 lattice search 统计日志、primitive 拒绝原因分类、沿途 sample obstacle cost、turn cost、goal-heading heuristic，以及 `lattice_goal_tolerance` 收紧目标收尾。Foxy docker 构建通过；`forklift_nav2_plugins` 6 个测试目标全部通过，其中 `test_oru_global_planner` 扩展到 6 个用例；headless `ComputePathToPose` 90 度 smoke 返回 `SUCCEEDED`，planner 日志显示 `Lattice search succeeded: expanded=7 generated=18 accepted=18 improved=18 rejected_oob=0 rejected_costmap=0 rejected_footprint=0 best_goal_distance=0.050` 和 `Lattice planner produced 5 states`。第二版/第三版目标、步骤和解释见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
+- 2026-06-12：迁移优先级调整。根据当前目标“简单 A 到 B 能跑起来，并且动态障碍物至少能安全停下”，P7 task_manager 暂缓；近期路线改为先做 P6.3 reverse primitives + direction metadata，再做 P6.4a 最小倒车执行验证，然后提前进入 P8.1 最小 safety gate。P6.4b 的倒车 acceptance 调优和 P7.1 task_manager 放在 safety gate 之后。编号保留 P7/P8，但实际执行顺序以本清单为准。
+- 2026-06-12：P6.3 reverse primitives + direction metadata 通过。`OruGlobalPlanner` 的 lattice transition 现在携带 `direction`、`primitive_kind`、`length`、`heading_delta`；`lattice_reverse_enabled=true` 时会生成 `reverse straight / reverse left arc / reverse right arc`，搜索 key 在 `x/y/theta_index` 外区分 arrival direction，避免 gear-switch cost 错误合并不同到达方向；搜索会保留到达每个 state 的 primitive 元数据并记录 forward/reverse 段和 gear switch 数量；新增 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。运行配置仍保持 `lattice_reverse_enabled: false`，把真实倒车执行留给 P6.4a。Foxy docker 构建通过；`forklift_nav2_plugins` 49 个 gtest 全部通过，其中 `test_oru_global_planner` 扩展到 8 个用例，覆盖 reverse primitive gating/metadata 和 reverse/gear-switch cost。
 
 ## 14. ORU 包迁移优先级
 
