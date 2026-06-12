@@ -519,7 +519,7 @@ forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml
 - lattice 输出的 `nav_msgs/Path` 使用 lattice heading 生成 pose orientation。
 - `goal_tolerance` 也用于 lattice 终点位置判定，避免 primitive 离散化必须精确命中某一个 cell。
 
-ORU 测试配置已打开：
+P6.1/P6.3 阶段 ORU 测试配置：
 
 ```yaml
 use_lattice_planner: true
@@ -542,7 +542,8 @@ lattice_gear_switch_cost: 1.0
 
 - lattice 关闭时仍走原 costmap-aware A*。
 - lattice 找不到路径且 `lattice_fallback_to_astar=true` 时，仍回退到原 A*。
-- reverse primitives 已实现，但运行配置仍默认 `lattice_reverse_enabled: false`，避免 P6.4a 前把 controller/vehicle_interface 尚未验证的倒车段直接交给 Nav2 执行。
+- P6.3 时 reverse primitives 已实现，但运行配置仍保持 `lattice_reverse_enabled: false`，避免 P6.4a 前把 controller/vehicle_interface 尚未验证的倒车段直接交给 Nav2 执行。
+- P6.4a 验证通过后，ORU test runtime 配置已低速打开 reverse；当前回退点是 `lattice_reverse_enabled`、`allow_reverse` 和 `respect_reverse_path_orientation` 三个参数。
 
 ## 13. 第二版实现记录
 
@@ -612,7 +613,39 @@ lattice_gear_switch_cost: 1.0
 - reverse primitive 会被 reverse cost 提高 traversal cost。
 - 从 forward 切到 reverse 会额外增加 gear switch cost。
 
-## 15. 验证记录
+## 15. 第四版 A 实现记录
+
+第四版 A 完成最小倒车执行验证，但不尝试一次性解决所有倒车调优场景。
+
+新增代码能力：
+
+- `MpcTrajectoryOptions` 增加 `preserve_path_orientation_for_reverse`。
+- 当 path pose yaw 与几何运动切线相差超过 90 度时，trajectory preprocessing 会保留 path yaw 作为车体朝向，并在 trajectory point 上标记 `reverse_motion`。
+- `ForkliftMpcController` 增加 `respect_reverse_path_orientation` 参数。
+- controller 只在当前 preview window 中存在 `reverse_motion` 点时允许负速度候选：
+  - reverse-intent path 可以低速倒车执行。
+  - 普通 forward path 即使全局 `allow_reverse=true`，也不会在末端随意用倒车候选做姿态微调。
+- `forklift_follow_path_acceptance` 增加 `reverse_straight` 场景，并检查：
+  - `/forklift/control_cmd` 中是否出现 reverse 样本。
+  - `/forklift/sim_cmd_vel.linear.x` 是否出现负速度。
+
+ORU test 配置已低速打开：
+
+```yaml
+allow_reverse: true
+max_reverse_velocity: 0.15
+respect_reverse_path_orientation: true
+lattice_reverse_enabled: true
+```
+
+新增/扩展单测：
+
+- lattice search 可以用 reverse primitive 到达车后方目标。
+- reverse path 在开启 preserve option 时保留车体 yaw，并标记 `reverse_motion`。
+- preserve option 关闭时仍沿用几何运动 yaw，保持旧行为可回退。
+- reverse preview window 在 `allow_reverse=true` 时会让 MPC solver 选择负速度。
+
+## 16. 验证记录
 
 Foxy docker 构建：
 
@@ -642,6 +675,16 @@ Summary: 49 tests, 0 errors, 0 failures, 0 skipped
 test_oru_global_planner: 8 tests passed
 ```
 
+P6.4a 最终 Foxy docker 插件测试：
+
+```text
+100% tests passed, 0 tests failed out of 6
+Summary: 51 tests, 0 errors, 0 failures, 0 skipped
+test_oru_global_planner: 9 tests passed
+test_forklift_mpc_trajectory: 14 tests passed
+test_forklift_mpc_solver: 6 tests passed
+```
+
 新增 planner 单测覆盖：
 
 - heading index 正常归一化。
@@ -656,7 +699,7 @@ test_oru_global_planner: 8 tests passed
 - 中间 sample 的 inflation/costmap 代价会提高 traversal cost，但不会被当作 lethal collision。
 - goal heading error 会提高 lattice heuristic。
 
-P6.2 Foxy headless runtime smoke（P6.3 仍保持 `lattice_reverse_enabled: false`，倒车执行 smoke 放到 P6.4a）：
+P6.2 Foxy headless runtime smoke（历史记录；P6.4a 后 runtime test 配置已低速打开 reverse）：
 
 ```bash
 ros2 action send_goal /compute_path_to_pose nav2_msgs/action/ComputePathToPose \
@@ -693,3 +736,37 @@ goal yaw ~= 90 deg
 ```
 
 这证明 P6 scaffold 已经实际由 Nav2 planner server 加载并产出 `x/y/theta_index` lattice path，而不是只停留在单元测试里。
+
+P6.4a Foxy headless runtime smoke：
+
+后方目标 `ComputePathToPose`：
+
+```text
+Goal finished with status: SUCCEEDED
+Lattice planner produced 2 states, 1 segments (forward=0 reverse=1 gear_switches=0)
+```
+
+`reverse_straight` FollowPath：
+
+```text
+/follow_path status: 4 SUCCEEDED
+control_samples=10 max_velocity_mps=0.150
+control_direction_samples forward=0 reverse=10
+sim_cmd_samples=48 max_linear_x=0.150 min_signed_linear_x=-0.150 max_signed_linear_x=0.000
+```
+
+`sparse_90_turn` 回归：
+
+```text
+/follow_path status: 4 SUCCEEDED
+control_samples=710 max_velocity_mps=0.450
+control_direction_samples forward=710 reverse=0
+sim_cmd_samples=1443 max_linear_x=0.450 min_signed_linear_x=0.000 max_signed_linear_x=0.450
+```
+
+这说明 P6.4a 的最小闭环成立：
+
+- planner 可以输出倒车段。
+- controller 不会把倒车段当成前进路径硬追。
+- sim bridge 能收到 reverse control 并输出负速度。
+- 普通 forward path 在 reverse 全局开启后仍保持 forward-only 执行。

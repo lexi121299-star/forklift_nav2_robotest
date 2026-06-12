@@ -106,6 +106,44 @@ TEST(ForkliftMpcTrajectory, VerticalPathUsesRosYawConvention)
   EXPECT_NEAR(trajectory[1].state.theta, 0.5 * kPi, 1e-9);
 }
 
+TEST(ForkliftMpcTrajectory, ReversePathCanPreserveSuppliedVehicleYaw)
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0, 0.0));
+  path.poses.push_back(makePose(-0.5, 0.0, 0.0));
+
+  MpcTrajectoryOptions options;
+  options.preserve_path_orientation_for_reverse = true;
+
+  const auto result = processPathToMpcTrajectory(path, testVehicleModel(), options);
+
+  ASSERT_EQ(result.trajectory.size(), 2u);
+  EXPECT_EQ(result.diagnostics.reverse_motion_points, 2u);
+  EXPECT_TRUE(result.trajectory[0].reverse_motion);
+  EXPECT_TRUE(result.trajectory[1].reverse_motion);
+  EXPECT_NEAR(result.trajectory[0].state.theta, 0.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].state.theta, 0.0, 1e-9);
+  ASSERT_EQ(result.processed_path.poses.size(), 2u);
+  EXPECT_NEAR(tf2::getYaw(result.processed_path.poses[1].pose.orientation), 0.0, 1e-9);
+}
+
+TEST(ForkliftMpcTrajectory, ReversePathUsesMotionYawWhenPreserveDisabled)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0, 0.0));
+  path.poses.push_back(makePose(-0.5, 0.0, 0.0));
+
+  const auto result = processPathToMpcTrajectory(path, testVehicleModel());
+
+  ASSERT_EQ(result.trajectory.size(), 2u);
+  EXPECT_EQ(result.diagnostics.reverse_motion_points, 0u);
+  EXPECT_FALSE(result.trajectory[0].reverse_motion);
+  EXPECT_FALSE(result.trajectory[1].reverse_motion);
+  EXPECT_NEAR(std::abs(result.trajectory[0].state.theta), kPi, 1e-9);
+  EXPECT_NEAR(std::abs(result.trajectory[1].state.theta), kPi, 1e-9);
+}
+
 TEST(ForkliftMpcTrajectory, LeftTurnHasPositiveCurvatureAndClampedSteering)
 {
   const auto vehicle_model = testVehicleModel();

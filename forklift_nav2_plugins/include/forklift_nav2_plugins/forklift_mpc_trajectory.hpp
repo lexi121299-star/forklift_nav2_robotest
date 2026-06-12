@@ -26,6 +26,7 @@ struct MpcTrajectoryOptions
   double curvature_slowdown_lateral_accel{0.0};
   double min_curvature_speed{0.0};
   double max_velocity{0.0};
+  bool preserve_path_orientation_for_reverse{false};
 };
 
 struct MpcTrajectoryDiagnostics
@@ -41,6 +42,7 @@ struct MpcTrajectoryDiagnostics
   double max_allowed_curvature{0.0};
   bool curvature_exceeds_limit{false};
   double min_speed_limit{0.0};
+  std::size_t reverse_motion_points{0};
 };
 
 struct MpcTrajectoryPoint
@@ -50,6 +52,7 @@ struct MpcTrajectoryPoint
   double curvature{0.0};
   double steering_angle{0.0};
   double speed_limit{0.0};
+  bool reverse_motion{false};
 };
 
 using MpcTrajectory = std::vector<MpcTrajectoryPoint>;

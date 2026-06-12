@@ -28,6 +28,20 @@ MpcPreviewWindow straightWindow(double length)
   return makeMpcPreviewWindowFromIndex(trajectory, 0, {trajectory.size()});
 }
 
+MpcPreviewWindow reverseWindow(double length)
+{
+  MpcTrajectory trajectory;
+  for (int i = 0; i < 4; ++i) {
+    const double x = -length * static_cast<double>(i) / 3.0;
+    trajectory.push_back({
+      makeMpcState(x, 0.0, 0.0, 0.0, testVehicleModel()),
+      std::abs(x),
+      0.0,
+      0.0});
+  }
+  return makeMpcPreviewWindowFromIndex(trajectory, 0, {trajectory.size()});
+}
+
 MpcPreviewWindow leftTurnWindow()
 {
   MpcTrajectory trajectory;
@@ -77,6 +91,25 @@ TEST(ForkliftMpcSolver, StraightWindowSelectsForwardCommandNearZeroSteeringRate)
   EXPECT_GT(result.control.v, 0.0);
   EXPECT_NEAR(result.control.w, 0.0, 1e-9);
   EXPECT_NEAR(result.command.steering_angle, 0.0, 1e-9);
+}
+
+TEST(ForkliftMpcSolver, ReverseWindowSelectsNegativeVelocityWhenAllowed)
+{
+  const auto vehicle_model = testVehicleModel();
+  auto parameters = testParameters();
+  parameters.allow_reverse = true;
+  parameters.max_reverse_velocity = 0.4;
+
+  const auto result = solveMpcCommand(
+    reverseWindow(0.6),
+    makeMpcState(0.0, 0.0, 0.0, 0.0, vehicle_model),
+    geometry_msgs::msg::Twist{},
+    vehicle_model,
+    parameters);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_LT(result.control.v, 0.0);
+  EXPECT_LT(result.command.velocity, 0.0);
 }
 
 TEST(ForkliftMpcSolver, LeftTurnWindowSelectsPositiveSteeringRate)

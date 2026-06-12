@@ -100,6 +100,9 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".preprocess_path", rclcpp::ParameterValue(preprocess_path_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".respect_reverse_path_orientation",
+    rclcpp::ParameterValue(respect_reverse_path_orientation_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".trajectory_resample_spacing",
     rclcpp::ParameterValue(trajectory_resample_spacing_));
   nav2_util::declare_parameter_if_not_declared(
@@ -174,6 +177,8 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".use_collision_check", use_collision_check_);
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".preprocess_path", preprocess_path_);
+  node->get_parameter(
+    name_ + ".respect_reverse_path_orientation", respect_reverse_path_orientation_);
   node->get_parameter(name_ + ".trajectory_resample_spacing", trajectory_resample_spacing_);
   node->get_parameter(name_ + ".trajectory_smoothing_iterations", trajectory_smoothing_iterations_);
   node->get_parameter(
@@ -253,14 +258,18 @@ void ForkliftMpcController::configure(
   RCLCPP_INFO(
     logger_,
     "Configured %s as ForkliftMpcController: wheel_base=%.3f max_v=%.3f "
-    "max_steer=%.3f max_steer_rate=%.3f max_accel=%.3f horizon=%.3f dt=%.3f "
-    "preview_points=%d use_mpc_solver=%s preprocess_path=%s resample=%.3f "
+    "max_reverse_v=%.3f allow_reverse=%s max_steer=%.3f max_steer_rate=%.3f "
+    "max_accel=%.3f horizon=%.3f dt=%.3f preview_points=%d use_mpc_solver=%s "
+    "preprocess_path=%s respect_reverse_path_orientation=%s resample=%.3f "
     "smooth_iter=%d footprint_points=%zu publish_control_cmd=%s allow_pivot_turn=%s "
     "pivot_steer=%.3f pivot_radius=%.3f rear_axle_x_offset=%.3f",
-    name_.c_str(), wheel_base_, max_velocity_, max_steering_angle_,
-    max_steering_angle_velocity_, max_acceleration_, horizon_time_, time_step_,
-    preview_window_points_, use_mpc_solver_ ? "true" : "false",
-    preprocess_path_ ? "true" : "false", trajectory_resample_spacing_,
+    name_.c_str(), wheel_base_, max_velocity_, max_reverse_velocity_,
+    allow_reverse_ ? "true" : "false",
+    max_steering_angle_, max_steering_angle_velocity_, max_acceleration_,
+    horizon_time_, time_step_, preview_window_points_, use_mpc_solver_ ? "true" : "false",
+    preprocess_path_ ? "true" : "false",
+    respect_reverse_path_orientation_ ? "true" : "false",
+    trajectory_resample_spacing_,
     trajectory_smoothing_iterations_, footprint_.size(),
     publish_control_cmd_ ? "true" : "false",
     allow_pivot_turn_ ? "true" : "false",
@@ -303,12 +312,14 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
   RCLCPP_INFO(
     logger_,
     "P5 path preprocessing: input=%zu filtered=%zu smoothed=%zu resampled=%zu "
-    "trajectory=%zu sharp_turns=%zu max_curvature=%.3f allowed=%.3f min_speed=%.3f",
+    "trajectory=%zu reverse_points=%zu sharp_turns=%zu max_curvature=%.3f "
+    "allowed=%.3f min_speed=%.3f",
     result.diagnostics.input_points,
     result.diagnostics.filtered_points,
     result.diagnostics.smoothed_points,
     result.diagnostics.resampled_points,
     global_trajectory_.size(),
+    result.diagnostics.reverse_motion_points,
     result.diagnostics.sharp_turn_count,
     result.diagnostics.max_curvature,
     result.diagnostics.max_allowed_curvature,
@@ -365,13 +376,16 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   if (!last_preview_window_.valid) {
     throw std::runtime_error("ForkliftMpcController could not build an MPC preview window");
   }
+  const bool reverse_motion_active =
+    allow_reverse_ && max_reverse_velocity_ > 0.0 && previewHasReverseMotion(last_preview_window_);
   RCLCPP_INFO_THROTTLE(
     logger_, *clock_, 2000,
-    "MPC preview window: start=%zu end=%zu points=%zu length=%.3f",
+    "MPC preview window: start=%zu end=%zu points=%zu length=%.3f reverse=%s",
     last_preview_window_.start_index,
     last_preview_window_.end_index,
     last_preview_window_.points.size(),
-    last_preview_window_.length);
+    last_preview_window_.length,
+    reverse_motion_active ? "true" : "false");
   if (trajectory_result.diagnostics.curvature_exceeds_limit) {
     RCLCPP_WARN_THROTTLE(
       logger_, *clock_, 2000,
@@ -423,7 +437,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
         xy_goal_tolerance_,
         velocity_samples_,
         steering_samples_,
-        allow_reverse_,
+        reverse_motion_active,
         path_distance_weight_,
         heading_weight_,
         1.0,
@@ -476,7 +490,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     }
   }
 
-  if (allow_reverse_ && max_reverse_velocity_ > 0.0) {
+  if (reverse_motion_active) {
     for (int i = 1; i < forward_samples; ++i) {
       const double ratio =
         static_cast<double>(i) / static_cast<double>(forward_samples - 1);
@@ -749,6 +763,7 @@ MpcTrajectoryOptions ForkliftMpcController::trajectoryOptions(double max_velocit
   options.curvature_slowdown_lateral_accel = curvature_slowdown_lateral_accel_;
   options.min_curvature_speed = min_curvature_speed_;
   options.max_velocity = max_velocity;
+  options.preserve_path_orientation_for_reverse = respect_reverse_path_orientation_;
   return options;
 }
 
@@ -768,6 +783,17 @@ double ForkliftMpcController::previewSpeedLimit(
   }
 
   return speed_limit;
+}
+
+bool ForkliftMpcController::previewHasReverseMotion(
+  const MpcPreviewWindow & preview_window) const
+{
+  return std::any_of(
+    preview_window.points.begin(),
+    preview_window.points.end(),
+    [](const MpcTrajectoryPoint & point) {
+      return point.reverse_motion;
+    });
 }
 
 double ForkliftMpcController::normalizeAngle(double angle) const

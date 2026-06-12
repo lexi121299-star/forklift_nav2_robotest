@@ -15,8 +15,10 @@ It keeps the Nav2 controller API while building an internal MPC data flow:
 rolling preview window is cut from the current state, and a minimal constrained
 solver selects velocity and steering-rate commands. Curvature diagnostics check
 the minimum turning radius and can reduce speed through tight bends. The
-selected command is converted back to the Nav2-required `TwistStamped`. It can
-also publish
+controller can preserve path pose yaw when it detects reverse motion, so a
+lattice segment whose vehicle heading opposes its translation is tracked with a
+negative velocity instead of being treated as a forward path. The selected
+command is converted back to the Nav2-required `TwistStamped`. It can also publish
 `forklift_msgs/msg/ForkliftControlCommand` when `publish_control_cmd` is enabled.
 In bridge-mode simulation, that shared command drives `sim_command_bridge`,
 which publishes the Gazebo command velocity while Gazebo remains the `/odom` and
@@ -51,7 +53,7 @@ planner_server:
       lattice_arc_radius: 0.60
       lattice_arc_angle: 0.3926990817
       lattice_primitive_samples: 5
-      lattice_reverse_enabled: false
+      lattice_reverse_enabled: true
       lattice_goal_tolerance: 0.25
       lattice_turn_cost_multiplier: 0.25
       lattice_obstacle_cost_multiplier: 1.0
@@ -73,7 +75,7 @@ controller_server:
       wheel_base: 1.2
       max_velocity: 0.45
       min_velocity: 0.03
-      max_reverse_velocity: 0.0
+      max_reverse_velocity: 0.15
       max_steering_angle: 0.55
       max_steering_angle_velocity: 0.7
       max_acceleration: 0.5
@@ -84,9 +86,11 @@ controller_server:
       velocity_samples: 6
       steering_samples: 9
       preview_window_points: 10
+      allow_reverse: true
       use_mpc_solver: true
       use_collision_check: true
       preprocess_path: true
+      respect_reverse_path_orientation: true
       trajectory_resample_spacing: 0.10
       trajectory_smoothing_iterations: 1
       trajectory_smoothing_corner_cut_ratio: 0.25
@@ -103,10 +107,10 @@ controller_server:
 1. Keep the current Nav2 setup running with Navfn and DWB.
 2. Build this package and verify pluginlib can load `OruGlobalPlanner`.
 3. Switch only `planner_server` to this planner for simulation tests.
-4. Expand the lattice primitive set with more curvatures and lengths.
-5. Validate reverse execution through the controller and vehicle interface.
-6. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
-7. Add footprint-aware collision checks and ORU-style constraint extraction.
+4. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
+5. Add footprint-aware collision checks and ORU-style constraint extraction.
+6. Validate minimal reverse execution through the controller and vehicle interface.
+7. Expand the lattice primitive set with more curvatures and lengths.
 8. Replace DWB with `ForkliftMpcController` for simulation tests.
 9. Move ORU QP/MPC internals into the controller once the vehicle protocol and
    real kinematic model are fixed.

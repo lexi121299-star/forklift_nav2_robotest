@@ -27,6 +27,13 @@ public:
     double heading_delta;
   };
 
+  struct SearchSummary
+  {
+    std::vector<unsigned int> x_cells;
+    std::vector<unsigned int> theta_indices;
+    std::vector<int> directions;
+  };
+
   static void configureForTest(
     OruGlobalPlanner & planner,
     nav2_costmap_2d::Costmap2D & costmap)
@@ -187,6 +194,26 @@ public:
   {
     return planner.latticeHeuristic({10, 10, theta_index}, {10, 10}, goal_yaw);
   }
+
+  static SearchSummary reverseSearchSummary(OruGlobalPlanner & planner)
+  {
+    planner.lattice_reverse_enabled_ = true;
+    planner.lattice_goal_tolerance_ = 0.01;
+    const auto path = planner.searchLattice({20, 20}, 0.0, {16, 20}, 0.0);
+
+    SearchSummary summary;
+    summary.x_cells.reserve(path.states.size());
+    summary.theta_indices.reserve(path.states.size());
+    summary.directions.reserve(path.transitions.size());
+    for (const auto & state : path.states) {
+      summary.x_cells.push_back(state.x);
+      summary.theta_indices.push_back(state.theta_index);
+    }
+    for (const auto & transition : path.transitions) {
+      summary.directions.push_back(static_cast<int>(transition.direction));
+    }
+    return summary;
+  }
 };
 
 namespace
@@ -267,6 +294,24 @@ TEST(OruGlobalPlanner, ReversePrimitivesAreGatedAndCarryMetadata)
   EXPECT_EQ(endpoints[5].direction, OruGlobalPlannerTestAccess::reverseDirection());
   EXPECT_EQ(endpoints[5].kind, OruGlobalPlannerTestAccess::rightArcKind());
   EXPECT_DOUBLE_EQ(endpoints[5].heading_delta, -OruGlobalPlannerTestAccess::arcAngle(planner));
+}
+
+TEST(OruGlobalPlanner, SearchCanUseReversePrimitiveForGoalBehindVehicle)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  const auto summary = OruGlobalPlannerTestAccess::reverseSearchSummary(planner);
+
+  ASSERT_EQ(summary.x_cells.size(), 2u);
+  ASSERT_EQ(summary.theta_indices.size(), 2u);
+  ASSERT_EQ(summary.directions.size(), 1u);
+  EXPECT_EQ(summary.x_cells.front(), 20u);
+  EXPECT_EQ(summary.x_cells.back(), 16u);
+  EXPECT_EQ(summary.theta_indices.front(), 0u);
+  EXPECT_EQ(summary.theta_indices.back(), 0u);
+  EXPECT_EQ(summary.directions.front(), OruGlobalPlannerTestAccess::reverseDirection());
 }
 
 TEST(OruGlobalPlanner, PrimitiveCollisionChecksIntermediateSamples)

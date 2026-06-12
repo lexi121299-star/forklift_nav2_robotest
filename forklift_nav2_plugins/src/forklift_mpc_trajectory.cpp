@@ -14,6 +14,8 @@ namespace forklift_nav2_plugins
 namespace
 {
 
+constexpr double kReverseOrientationThreshold = 0.5 * M_PI;
+
 double distanceBetween(
   const geometry_msgs::msg::Point & a,
   const geometry_msgs::msg::Point & b)
@@ -26,6 +28,11 @@ double headingBetween(
   const geometry_msgs::msg::Point & b)
 {
   return ForkliftVehicleModel::normalizeAngle(std::atan2(b.y - a.y, b.x - a.x));
+}
+
+double poseYaw(const geometry_msgs::msg::Pose & pose)
+{
+  return tf2::getYaw(pose.orientation);
 }
 
 double signedCurvature(
@@ -310,13 +317,25 @@ MpcTrajectory buildTrajectory(
 
     double theta = 0.0;
     if (poses.size() == 1) {
-      theta = tf2::getYaw(pose.orientation);
+      theta = poseYaw(pose);
     } else if (i == 0) {
       theta = headingBetween(pose.position, poses[i + 1].pose.position);
     } else if (i + 1 == poses.size()) {
       theta = headingBetween(poses[i - 1].pose.position, pose.position);
     } else {
       theta = headingBetween(poses[i - 1].pose.position, poses[i + 1].pose.position);
+    }
+
+    bool reverse_motion = false;
+    if (options.preserve_path_orientation_for_reverse && poses.size() > 1) {
+      const double path_theta = poseYaw(pose);
+      const double path_vs_motion = std::abs(
+        ForkliftVehicleModel::normalizeAngle(path_theta - theta));
+      if (path_vs_motion > kReverseOrientationThreshold) {
+        theta = path_theta;
+        reverse_motion = true;
+        ++diagnostics.reverse_motion_points;
+      }
     }
 
     double curvature = 0.0;
@@ -362,7 +381,8 @@ MpcTrajectory buildTrajectory(
       cumulative_distance,
       curvature,
       steering_angle,
-      speed_limit});
+      speed_limit,
+      reverse_motion});
   }
 
   return trajectory;

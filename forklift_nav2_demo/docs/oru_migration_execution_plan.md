@@ -21,8 +21,8 @@
 
 - `forklift_nav2_plugins`
   - `forklift_nav2_plugins/OruGlobalPlanner`
-    - 当前已经进入 P6 lattice scaffold 第三版：`x/y/theta_index`、forward/reverse primitives、primitive 方向元数据、沿途 footprint collision、2D A* fallback、lattice cost/diagnostics。
-    - 还不是完整 ORU lattice/motion primitive planner；倒车执行闭环、lookup/cache 和场景化 acceptance 仍待做。
+    - 当前已经完成 P6.4a 最小倒车执行验证：`x/y/theta_index`、forward/reverse primitives、primitive 方向元数据、沿途 footprint collision、2D A* fallback、lattice cost/diagnostics，以及 reverse path 到 controller/bridge 的低速执行链路。
+    - 还不是完整 ORU lattice/motion primitive planner；倒车场景调优、lookup/cache 和场景化 acceptance 仍待做。
   - `forklift_nav2_plugins/ForkliftMpcController`
     - 当前是 sampled predictive controller scaffold，不是完整 ORU QP-MPC。
 
@@ -30,7 +30,7 @@
 
 - 仿真时间、`/clock`、TF、`/odom` 必须稳定，否则 2D Pose Estimate、costmap、FollowPath 都会失败。
 - 当前 controller 已经有 ORU State / Control 概念、trajectory preview、最小 MPC 求解、path preprocessing 和 rear-axle pivot-turn 预测，但还不是完整 ORU QP-MPC。
-- 当前 global planner 已经开始理解 heading、forward/reverse motion primitives、前进/倒车方向语义和换向代价；但 runtime 配置仍暂时关闭 reverse，等待 P6.4a 验证 controller/vehicle_interface 能执行倒车段。
+- 当前 global planner 已经开始理解 heading、forward/reverse motion primitives、前进/倒车方向语义和换向代价；P6.4a 已在 runtime test 配置中低速打开 reverse，并通过 controller preview gating 避免普通 forward path 被倒车候选扰乱。
 
 ## 1. 总体迁移顺序
 
@@ -53,7 +53,7 @@ P9  真车低速联调
 
 ```text
 [x] P6.3  reverse primitives + direction metadata
-[ ] P6.4a 最小倒车执行验证：controller/vehicle_interface 能执行倒车段
+[x] P6.4a 最小倒车执行验证：controller/vehicle_interface 能执行倒车段
 [ ] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
 [ ] A-B acceptance：NavigateToPose + 障碍停车/放行
@@ -560,7 +560,7 @@ P6 不一次性做完整 ORU planner，按分版推进：
 [x] 第一版：最小 lattice scaffold
 [x] 第二版：cost / diagnostics / goal approach tightening
 [x] 第三版：reverse primitives + direction metadata
-[ ] 第四版 A：最小倒车执行验证
+[x] 第四版 A：最小倒车执行验证
 [ ] P8.1：最小 safety gate
 [ ] 第四版 B：倒车 acceptance 调优
 [ ] 第五版：multi-curvature / multi-length primitives + better heuristic + lookup/cache
@@ -576,7 +576,7 @@ P6 不一次性做完整 ORU planner，按分版推进：
   - `straight / left_arc / right_arc`
   - length / heading_delta
 - 已加 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。
-- 已保留 A* fallback，runtime 配置仍保持 `lattice_reverse_enabled: false`，等待 P6.4a 验证倒车段执行。
+- 已保留 A* fallback；P6.4a 之后 ORU test runtime 配置已低速打开 `lattice_reverse_enabled`，并通过 controller preview gating 只在 reverse-intent path 段允许负速度。
 
 第三版之后不要直接等完整倒车场景都调好再做 P8。P6.4 拆成两段：
 
@@ -802,7 +802,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P6.1 最小 lattice planner scaffold：`x/y/theta_index`、forward primitives、沿途 footprint collision、A* fallback
 [x] P6.2 lattice 代价/诊断第二版：turn/obstacle/goal-heading cost、拒绝原因统计、goal tolerance 收紧
 [x] P6.3 reverse primitives + direction metadata：倒车 primitive、方向语义、reverse/gear switch cost
-[ ] P6.4a 最小倒车执行验证：确认 planner 输出的倒车段能被 controller/vehicle interface 执行
+[x] P6.4a 最小倒车执行验证：确认 planner 输出的倒车段能被 controller/vehicle interface 执行
 [ ] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
 [ ] A-B acceptance：NavigateToPose 简单 A 到 B + 障碍停车/放行
@@ -812,14 +812,14 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 建议我们下一步先做：
 
 ```text
-P6.4a
+P8.1
 ```
 
 原因：
 
-- P6.3 已经在 planner 内部打通 reverse primitive、方向元数据、reverse cost 和 gear switch cost。
-- 但当前 runtime 配置仍关闭 reverse，controller/vehicle_interface 还没验证倒车段不会被当成前进路径硬追。
-- P6.4a 最小倒车执行验证完成后，优先做 P8.1 动态障碍停车/限速；P6.4b 的倒车调优和 P7 task_manager 可以等安全闭环稳定后再做。
+- P6.4a 已经证明 planner 可以输出 reverse 段，controller 会把 reverse-intent path 当作倒车追踪，sim bridge 能收到 reverse control 并输出负速度。
+- 当前目标是简单 A-B 先能跑，并且动态障碍物至少能安全停下；因此下一步优先做 P8.1 动态障碍停车/限速。
+- P6.4b 的倒车调优和 P7 task_manager 可以等 safety gate 稳定后再做。
 
 执行记录：
 
@@ -834,6 +834,7 @@ P6.4a
 - 2026-06-11：P6.2 lattice 第二版通过。保持 forward-only primitives 和 2D A* fallback，新增 lattice search 统计日志、primitive 拒绝原因分类、沿途 sample obstacle cost、turn cost、goal-heading heuristic，以及 `lattice_goal_tolerance` 收紧目标收尾。Foxy docker 构建通过；`forklift_nav2_plugins` 6 个测试目标全部通过，其中 `test_oru_global_planner` 扩展到 6 个用例；headless `ComputePathToPose` 90 度 smoke 返回 `SUCCEEDED`，planner 日志显示 `Lattice search succeeded: expanded=7 generated=18 accepted=18 improved=18 rejected_oob=0 rejected_costmap=0 rejected_footprint=0 best_goal_distance=0.050` 和 `Lattice planner produced 5 states`。第二版/第三版目标、步骤和解释见 `forklift_nav2_demo/docs/p6_lattice_planner_scaffold_notes.md`。
 - 2026-06-12：迁移优先级调整。根据当前目标“简单 A 到 B 能跑起来，并且动态障碍物至少能安全停下”，P7 task_manager 暂缓；近期路线改为先做 P6.3 reverse primitives + direction metadata，再做 P6.4a 最小倒车执行验证，然后提前进入 P8.1 最小 safety gate。P6.4b 的倒车 acceptance 调优和 P7.1 task_manager 放在 safety gate 之后。编号保留 P7/P8，但实际执行顺序以本清单为准。
 - 2026-06-12：P6.3 reverse primitives + direction metadata 通过。`OruGlobalPlanner` 的 lattice transition 现在携带 `direction`、`primitive_kind`、`length`、`heading_delta`；`lattice_reverse_enabled=true` 时会生成 `reverse straight / reverse left arc / reverse right arc`，搜索 key 在 `x/y/theta_index` 外区分 arrival direction，避免 gear-switch cost 错误合并不同到达方向；搜索会保留到达每个 state 的 primitive 元数据并记录 forward/reverse 段和 gear switch 数量；新增 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。运行配置仍保持 `lattice_reverse_enabled: false`，把真实倒车执行留给 P6.4a。Foxy docker 构建通过；`forklift_nav2_plugins` 49 个 gtest 全部通过，其中 `test_oru_global_planner` 扩展到 8 个用例，覆盖 reverse primitive gating/metadata 和 reverse/gear-switch cost。
+- 2026-06-12：P6.4a 最小倒车执行验证通过。`ForkliftMpcController` 新增 `respect_reverse_path_orientation`，在 path pose yaw 与运动切线相反时保留车体朝向并标记 `reverse_motion`；controller 只在当前 preview window 含 reverse-intent 点时允许负速度候选，避免普通 forward path 末端被倒车微调扰乱。ORU test 配置低速打开 `allow_reverse=true`、`max_reverse_velocity=0.15`、`lattice_reverse_enabled=true`。Foxy docker 构建通过；`forklift_nav2_plugins` 51 个 gtest 全部通过；headless `ComputePathToPose` 后方目标 smoke 返回 `SUCCEEDED`，planner 日志显示 `forward=0 reverse=1`；`reverse_straight` FollowPath 返回 `SUCCEEDED`，观测到 `control_direction_samples forward=0 reverse=10` 和 `/forklift/sim_cmd_vel.linear.x=-0.150`；`sparse_90_turn` 回归返回 `SUCCEEDED`，观测到 `forward=710 reverse=0`，说明 forward path 不再启用倒车候选。
 
 ## 14. ORU 包迁移优先级
 

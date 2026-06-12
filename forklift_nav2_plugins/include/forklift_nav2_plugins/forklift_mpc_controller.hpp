@@ -93,6 +93,7 @@ private:
   void publishControlCommand(double velocity, double steering, const std::string & frame_id) const;
   MpcTrajectoryOptions trajectoryOptions(double max_velocity) const;
   double previewSpeedLimit(const MpcPreviewWindow & preview_window, double fallback) const;
+  bool previewHasReverseMotion(const MpcPreviewWindow & preview_window) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
   double distanceToPose(const MpcState & state, const geometry_msgs::msg::PoseStamped & pose) const;
@@ -148,6 +149,7 @@ private:
   bool use_collision_check_{true};
   bool allow_unknown_{false};
   bool preprocess_path_{true};
+  bool respect_reverse_path_orientation_{false};
   bool curvature_slowdown_enabled_{true};
 
   int collision_cost_threshold_{nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE};
