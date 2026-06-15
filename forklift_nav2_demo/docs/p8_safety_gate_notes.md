@@ -59,6 +59,40 @@ Nav2 recovery actions，例如 `Spin` / `BackUp`，默认发布 `geometry_msgs/T
 
 fallback 只在 `/forklift/control_cmd` 未到达或超过 `command_timeout_sec` 时启用；只要 controller 正常发布 `ForkliftControlCommand`，仍然优先使用统一车辆命令。
 
+### 真车 recovery 注意事项
+
+仿真 bridge fallback 不是最终真车方案。它解决的是 Gazebo bridge 模式下 Nav2 recovery `/cmd_vel` 没有接到 `/forklift/sim_cmd_vel` 的仿真接线问题。
+
+真车上仍然需要 recovery，但不能让底盘裸订阅 Nav2 默认 `/cmd_vel`。真车推荐链路是：
+
+```text
+Nav2/controller normal command
+  -> safety gate
+  -> vehicle_interface
+  -> 真车底盘
+
+Nav2/custom recovery request
+  -> recovery command adapter
+  -> safety gate
+  -> vehicle_interface
+  -> 真车底盘
+```
+
+P8.2 要解决“recovery 命令怎么安全进入真车”：
+
+- 所有 normal control、manual control、recovery control 都进入同一个安全命令闸门。
+- recovery command adapter 只输出叉车约束下允许的 `ForkliftControlCommand` 或等价安全命令。
+- 第一版 recovery 白名单建议只包含 wait、clear-costmap 后重试、低速短时 pivot/backoff。
+- 每条 recovery 命令都必须受急停、watchdog、限速、footprint collision、车辆状态和传感器健康检查约束。
+
+P8.3 要解决“什么时候执行哪一种 recovery”：
+
+- 动态障碍短时挡路优先 wait。
+- 障碍离开后优先继续或 replan。
+- 持续阻挡时再进入 clear/replan 或任务暂停。
+- 只有安全闸门允许时才执行低速 pivot/backoff。
+- recovery 失败不能无限循环，要进入可诊断的暂停/失败状态。
+
 ## 3. 参数
 
 ORU test 配置当前打开：
@@ -218,6 +252,7 @@ NavigateToPose 简单 A-B
 P8.2 再做独立 safety package：
 
 - 独立订阅 raw control command，输出 gated command。
+- 接入 recovery command adapter，禁止真车底盘裸吃 Nav2 默认 `/cmd_vel`。
 - 接入急停硬输入或真车 safety relay。
 - 接入 keepout / speed zone。
 - 掉边保护。

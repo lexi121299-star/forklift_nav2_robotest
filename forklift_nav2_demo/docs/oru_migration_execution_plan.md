@@ -757,6 +757,9 @@ P8.2 最低标准：
 
 - 把 controller 内的最小 safety gate 抽象成独立 `forklift_safety` package 或明确的命令闸门节点。
 - controller、task_manager、手动控制等所有运动命令都必须经过 safety gate。
+- 真车 recovery 命令也必须经过 safety gate；不允许 Nav2 默认 `/cmd_vel` 直接控制底盘。
+- 明确 recovery command adapter：把允许的 recovery 动作转换成受限的 `ForkliftControlCommand` 或等价安全命令。
+- 第一版只白名单低速、短时、可解释的 recovery primitive，例如 wait、clear-costmap 后重试、受限 pivot/backoff；所有 recovery 都要受急停、watchdog、速度上限、footprint collision 和车辆状态约束。
 - 急停输入能锁住运动命令，解除后需要明确状态恢复。
 - command timeout、vehicle fault、localization lost、costmap 数据异常时停车。
 - 继续保留 controller-side 限速/停车作为可回退保护，不把安全完全交给 planner。
@@ -766,6 +769,8 @@ P8.3 最低标准：
 - 动态障碍横穿或短时挡路时，车辆停车等待。
 - 障碍离开后，Nav2 不需要重启即可继续执行，或由上层重新触发当前目标。
 - 障碍持续挡住原路径时，触发重新规划。
+- 定义真车 recovery 策略选择顺序：优先 wait，其次 clear/replan；只有安全闸门允许时才执行低速 pivot/backoff。
+- recovery 失败时进入任务暂停/失败状态，不能反复执行可能扩大风险的动作。
 - costmap 中存在足够通道时允许简单绕行；通道不足时不硬绕，保持等待或任务失败。
 - 这一阶段不要求高级人群预测，也不要求复杂动态博弈避障。
 
@@ -792,6 +797,28 @@ P8.1 已完成
 ```
 
 快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通；A-B 动态障碍停车/放行快速验证也已证明 P8.1 safety gate 在真实导航执行中能停车、放行后能继续跑完同一目标。下一步建议进入 P6.4b，把倒车/换向 acceptance 调稳；之后再做 A-B 正式验收，把普通路线、倒车/换向路线、障碍停车/放行放到同一套验收里。
+
+真车 recovery 不是忽略项，但不要用仿真 bridge fallback 的方式直接上车。仿真 fallback 只是解决 Gazebo bridge 模式下 recovery `/cmd_vel` 到不了 `/forklift/sim_cmd_vel` 的接线问题；真车阶段应在 P8.2/P8.3 中实现受控 recovery：
+
+```text
+Nav2/controller normal command
+  -> safety gate
+  -> vehicle_interface
+  -> 真车底盘
+
+Nav2/custom recovery request
+  -> recovery command adapter
+  -> safety gate
+  -> vehicle_interface
+  -> 真车底盘
+```
+
+原则：
+
+- 真车底盘不裸订阅 Nav2 默认 `/cmd_vel`。
+- recovery 可以执行，但必须转换成叉车约束下的安全命令。
+- 所有 recovery 命令都要经过急停、watchdog、限速、footprint collision、车辆状态和传感器健康检查。
+- P8.2 解决“recovery 命令怎么安全进真车”；P8.3 解决“什么情况下执行哪一种 recovery”。
 
 动态障碍停车/放行快速验证最低标准：
 
@@ -824,7 +851,7 @@ P8.1 已完成
 - A-B acceptance 快速验证和正式验收：普通路线、倒车/换向路线、障碍停车/放行都在仿真中通过。
 - P6.4b 倒车 acceptance：普通前进路线不乱倒，倒车/换向不抖，低速路径稳定。
 - P8.2 独立 safety gate 或明确命令闸门：所有运动命令经过安全层。
-- P8.3 动态障碍等待、重新规划、简单绕行：能停、能等、能放行，通道不足时不硬绕。
+- P8.3 动态障碍等待、重新规划、简单绕行和受控 recovery 策略：能停、能等、能放行，通道不足时不硬绕。
 - P8.4 真车低速 safety acceptance：速度相关保护区、前进/倒车不同保护区、keepout、地图边缘、诊断日志。
 - 真实地图、真实传感器、真实 vehicle interface 参数都已经替换仿真默认值。
 
@@ -1150,15 +1177,16 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 建议我们下一步先做：
 
 ```text
-A-B 动态障碍停车/放行快速验证
+P6.4b 倒车 acceptance 调优
 ```
 
 原因：
 
 - P6.4a 已经证明 planner 可以输出 reverse 段，controller 会把 reverse-intent path 当作倒车追踪，sim bridge 能收到 reverse control 并输出负速度。
 - P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
-- 空旷 A-B 快速验证已经通过；还缺“障碍进入保护区停车/限速，障碍离开放行”的快速闭环。
-- 如果动态障碍快速验证暴露 safety gate 架构边界，再进入 P8.2 独立 safety package；如果只是倒车/换向路径质量问题，再进入 P6.4b。
+- 空旷 A-B 快速验证和动态障碍停车/放行快速验证都已经通过。
+- 现在离 A-B 正式验收最近的缺口是倒车/换向质量：窄空间、换向稳定性、普通前进路线不乱倒。
+- 真车 recovery 命令闸门已经明确放入 P8.2/P8.3；但在进入真车 safety 架构前，先把 planner/controller 的基础运动能力调稳，能减少后续 safety/recovery 层需要兜底的问题。
 
 执行记录：
 
