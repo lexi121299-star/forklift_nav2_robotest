@@ -40,6 +40,7 @@ add_library(${PROJECT_NAME} SHARED
   src/forklift_mpc_solver.cpp
   src/forklift_mpc_types.cpp
   src/forklift_mpc_trajectory.cpp
+  src/forklift_safety_gate.cpp
   src/forklift_vehicle_model.cpp
   src/oru_global_planner.cpp
 )
@@ -139,6 +140,15 @@ if(BUILD_TESTING)
     )
     ament_target_dependencies(test_forklift_mpc_solver
       geometry_msgs
+    )
+  endif()
+
+  ament_add_gtest(test_forklift_safety_gate
+    test/test_forklift_safety_gate.cpp
+  )
+  if(TARGET test_forklift_safety_gate)
+    target_link_libraries(test_forklift_safety_gate
+      ${PROJECT_NAME}
     )
   endif()
 

@@ -97,6 +97,12 @@ controller_server:
       curvature_slowdown_enabled: true
       curvature_slowdown_lateral_accel: 0.12
       min_curvature_speed: 0.08
+      safety_gate_enabled: true
+      safety_emergency_stop_active: false
+      safety_stop_distance: 0.55
+      safety_slowdown_distance: 1.25
+      safety_min_speed: 0.05
+      safety_sample_spacing: 0.10
       collision_cost_threshold: 253
       publish_control_cmd: false
       control_cmd_topic: "/forklift/control_cmd"
@@ -110,7 +116,8 @@ controller_server:
 4. Add trajectory preprocessing, curvature diagnostics, and curve speed limits.
 5. Add footprint-aware collision checks and ORU-style constraint extraction.
 6. Validate minimal reverse execution through the controller and vehicle interface.
-7. Expand the lattice primitive set with more curvatures and lengths.
-8. Replace DWB with `ForkliftMpcController` for simulation tests.
-9. Move ORU QP/MPC internals into the controller once the vehicle protocol and
+7. Add a local costmap safety gate for minimum obstacle stop/slowdown behavior.
+8. Expand the lattice primitive set with more curvatures and lengths.
+9. Replace DWB with `ForkliftMpcController` for simulation tests.
+10. Move ORU QP/MPC internals into the controller once the vehicle protocol and
    real kinematic model are fixed.

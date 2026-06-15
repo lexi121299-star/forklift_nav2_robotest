@@ -54,7 +54,7 @@ P9  真车低速联调
 ```text
 [x] P6.3  reverse primitives + direction metadata
 [x] P6.4a 最小倒车执行验证：controller/vehicle_interface 能执行倒车段
-[ ] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
+[x] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
 [ ] A-B acceptance：NavigateToPose + 障碍停车/放行
 [ ] P7.1  task_manager 最小任务入口
@@ -578,6 +578,15 @@ P6 不一次性做完整 ORU planner，按分版推进：
 - 已加 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。
 - 已保留 A* fallback；P6.4a 之后 ORU test runtime 配置已低速打开 `lattice_reverse_enabled`，并通过 controller preview gating 只在 reverse-intent path 段允许负速度。
 
+当前倒车链路说明：
+
+- planner 搜索状态区分 `x/y/theta_index + arrival_direction`，前进到达和倒车到达不会被合并成同一种状态。
+- `lattice_reverse_enabled=true` 时，planner 会在 forward straight / left arc / right arc 外，再加入 reverse straight / left arc / right arc。
+- reverse primitive 会被 `lattice_reverse_cost_multiplier` 加价；forward/reverse 换向会被 `lattice_gear_switch_cost` 加价，所以 planner 不会无成本地乱用倒车。
+- `nav_msgs/Path` 没有 gear 字段，当前用 path pose yaw 表达车体朝向；当 path yaw 与几何运动切线相差超过 90 度时，trajectory preprocessing 会标记 `reverse_motion`。
+- controller 只有在 `allow_reverse=true`、`max_reverse_velocity>0`，并且当前 preview window 含 `reverse_motion` 点时，才允许负速度候选。
+- 因此普通 forward path 即使全局打开 reverse，也不会在前进路线里随意倒车；P6.4a 的 `sparse_90_turn` 回归已验证 `forward=710 reverse=0`。
+
 第三版之后不要直接等完整倒车场景都调好再做 P8。P6.4 拆成两段：
 
 ```text
@@ -664,7 +673,7 @@ cancel_task()
 当前优先级：
 
 ```text
-P8.1 提前到 P7.1 之前，在 P6.4a 最小倒车执行验证之后做。
+P8.1 已提前到 P7.1 之前完成；P8.2 再抽成独立 forklift_safety package。
 ```
 
 第一阶段目标不是复杂动态绕行，而是安全停车/限速：
@@ -677,11 +686,33 @@ P8.1 提前到 P7.1 之前，在 P6.4a 最小倒车执行验证之后做。
 急停输入 -> 停车
 ```
 
-目标：
+P8.1 当前落地：
+
+- `ForkliftMpcController` 增加最小 safety gate，沿当前运动方向在 local costmap 上采样 footprint。
+- 障碍进入 `safety_stop_distance` 时直接输出 brake/zero command。
+- 障碍进入 `safety_slowdown_distance` 但还没到 stop zone 时压低当前方向速度上限。
+- reverse-intent preview 时检查车后方保护区；普通 forward preview 时检查车前方保护区。
+- `safety_emergency_stop_active` 参数可运行时置 true，让 controller 直接停车。
+- `sim_command_bridge` 已有 `/forklift/set_emergency_stop` 和 `command_timeout_sec` watchdog，继续作为仿真/vehicle_interface 侧最后一道命令闸门。
+
+P8.1 参数：
+
+```yaml
+safety_gate_enabled: true
+safety_emergency_stop_active: false
+safety_stop_distance: 0.55
+safety_slowdown_distance: 1.25
+safety_min_speed: 0.05
+safety_sample_spacing: 0.10
+```
+
+P8.1 不是复杂动态绕行，也不是最终独立 safety 架构。它先给 A-B 运行加上可回退的最小停车/限速闸门；后续 P8.2 再把安全逻辑抽成独立 `forklift_safety` package 或接入 `nav2_collision_monitor`。
+
+长期目标：
 
 上车必须有独立安全层，不依赖 planner/controller 自觉避障。
 
-新 package：
+后续新 package：
 
 ```text
 forklift_safety
@@ -803,7 +834,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P6.2 lattice 代价/诊断第二版：turn/obstacle/goal-heading cost、拒绝原因统计、goal tolerance 收紧
 [x] P6.3 reverse primitives + direction metadata：倒车 primitive、方向语义、reverse/gear switch cost
 [x] P6.4a 最小倒车执行验证：确认 planner 输出的倒车段能被 controller/vehicle interface 执行
-[ ] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
+[x] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
 [ ] A-B acceptance：NavigateToPose 简单 A 到 B + 障碍停车/放行
 [ ] P7.1 task_manager 最小任务入口
@@ -812,14 +843,14 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 建议我们下一步先做：
 
 ```text
-P8.1
+A-B acceptance
 ```
 
 原因：
 
 - P6.4a 已经证明 planner 可以输出 reverse 段，controller 会把 reverse-intent path 当作倒车追踪，sim bridge 能收到 reverse control 并输出负速度。
-- 当前目标是简单 A-B 先能跑，并且动态障碍物至少能安全停下；因此下一步优先做 P8.1 动态障碍停车/限速。
-- P6.4b 的倒车调优和 P7 task_manager 可以等 safety gate 稳定后再做。
+- P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
+- 当前目标是简单 A-B 先能跑，并且障碍进入保护区至少能停车/限速；因此下一步建议做 A-B acceptance，再继续 P6.4b 倒车调优或 P8.2 独立 safety package。
 
 执行记录：
 
@@ -835,6 +866,7 @@ P8.1
 - 2026-06-12：迁移优先级调整。根据当前目标“简单 A 到 B 能跑起来，并且动态障碍物至少能安全停下”，P7 task_manager 暂缓；近期路线改为先做 P6.3 reverse primitives + direction metadata，再做 P6.4a 最小倒车执行验证，然后提前进入 P8.1 最小 safety gate。P6.4b 的倒车 acceptance 调优和 P7.1 task_manager 放在 safety gate 之后。编号保留 P7/P8，但实际执行顺序以本清单为准。
 - 2026-06-12：P6.3 reverse primitives + direction metadata 通过。`OruGlobalPlanner` 的 lattice transition 现在携带 `direction`、`primitive_kind`、`length`、`heading_delta`；`lattice_reverse_enabled=true` 时会生成 `reverse straight / reverse left arc / reverse right arc`，搜索 key 在 `x/y/theta_index` 外区分 arrival direction，避免 gear-switch cost 错误合并不同到达方向；搜索会保留到达每个 state 的 primitive 元数据并记录 forward/reverse 段和 gear switch 数量；新增 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。运行配置仍保持 `lattice_reverse_enabled: false`，把真实倒车执行留给 P6.4a。Foxy docker 构建通过；`forklift_nav2_plugins` 49 个 gtest 全部通过，其中 `test_oru_global_planner` 扩展到 8 个用例，覆盖 reverse primitive gating/metadata 和 reverse/gear-switch cost。
 - 2026-06-12：P6.4a 最小倒车执行验证通过。`ForkliftMpcController` 新增 `respect_reverse_path_orientation`，在 path pose yaw 与运动切线相反时保留车体朝向并标记 `reverse_motion`；controller 只在当前 preview window 含 reverse-intent 点时允许负速度候选，避免普通 forward path 末端被倒车微调扰乱。ORU test 配置低速打开 `allow_reverse=true`、`max_reverse_velocity=0.15`、`lattice_reverse_enabled=true`。Foxy docker 构建通过；`forklift_nav2_plugins` 51 个 gtest 全部通过；headless `ComputePathToPose` 后方目标 smoke 返回 `SUCCEEDED`，planner 日志显示 `forward=0 reverse=1`；`reverse_straight` FollowPath 返回 `SUCCEEDED`，观测到 `control_direction_samples forward=0 reverse=10` 和 `/forklift/sim_cmd_vel.linear.x=-0.150`；`sparse_90_turn` 回归返回 `SUCCEEDED`，观测到 `forward=710 reverse=0`，说明 forward path 不再启用倒车候选。
+- 2026-06-15：P8.1 最小 safety gate 通过。`ForkliftMpcController` 增加 controller-side safety gate，沿当前 forward/reverse 运动方向在 local costmap 上采样 footprint；障碍进入 `safety_stop_distance` 时直接 brake，进入 `safety_slowdown_distance` 时压低当前方向速度上限；`safety_emergency_stop_active` 可运行时置 true 触发 controller 停车。ORU test 配置打开 `safety_gate_enabled=true`，并保留 `sim_command_bridge` 既有 `/forklift/set_emergency_stop` 和 `command_timeout_sec` watchdog 作为 vehicle_interface 侧闸门。Foxy docker 构建通过；`forklift_nav2_plugins` 59 个 gtest 全部通过，其中新增 `test_forklift_safety_gate` 5 个用例；headless `sparse_90_turn` safety gate 回归返回 `SUCCEEDED`，日志确认 `safety_gate=true`，观测到 `control_direction_samples forward=560 reverse=0` 和 `max_linear_x=0.450`，说明无障碍时不会误停。详见 `forklift_nav2_demo/docs/p8_safety_gate_notes.md`。
 
 ## 14. ORU 包迁移优先级
 

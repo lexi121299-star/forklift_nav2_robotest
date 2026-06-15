@@ -645,6 +645,70 @@ lattice_reverse_enabled: true
 - preserve option 关闭时仍沿用几何运动 yaw，保持旧行为可回退。
 - reverse preview window 在 `allow_reverse=true` 时会让 MPC solver 选择负速度。
 
+### 15.1 倒车判定链路
+
+当前倒车不是单靠一个全局开关决定，而是分三层收敛：
+
+1. global planner 决定路径里是否存在 reverse primitive。
+2. trajectory preprocessing 从 path yaw 判断这段 path 是否表达倒车意图。
+3. controller 只在当前 preview window 含 reverse-intent 点时允许负速度。
+
+planner 侧的 lattice state 不是只有 `x/y`，而是 `x/y/theta_index + arrival_direction`。同一个位置和朝向，如果是前进到达和倒车到达，会作为不同搜索状态处理，避免把方向语义合并掉。
+
+primitive 生成逻辑：
+
+```text
+lattice_reverse_enabled=false:
+  forward straight
+  forward left arc
+  forward right arc
+
+lattice_reverse_enabled=true:
+  forward straight
+  forward left arc
+  forward right arc
+  reverse straight
+  reverse left arc
+  reverse right arc
+```
+
+reverse primitive 不是免费使用。搜索代价里有两个抑制项：
+
+- `lattice_reverse_cost_multiplier`：reverse primitive 额外代价。
+- `lattice_gear_switch_cost`：forward/reverse 换向额外代价。
+
+因此 planner 默认倾向于能前进就前进；只有前进路径代价更高、不可达，或者目标在车后方等场景，reverse 才更容易被选中。
+
+`nav_msgs/Path` 没有 gear 字段，所以当前用 path pose yaw 表达车体朝向。trajectory preprocessing 会比较：
+
+```text
+path pose yaw
+几何运动切线 yaw
+```
+
+如果二者相差超过 90 度，就认为这是 reverse-intent path：车头朝 path yaw，但车辆沿相反方向运动。此时会保留 path yaw 作为车体朝向，并把 trajectory point 标记为 `reverse_motion=true`。
+
+controller 侧还有最后一道门：
+
+```text
+reverse_motion_active =
+  allow_reverse
+  && max_reverse_velocity > 0
+  && 当前 preview window 含 reverse_motion 点
+```
+
+只有 `reverse_motion_active=true` 时，MPC solver 和 sampled search 才会采样负速度候选。普通 forward path 即使全局配置打开了 `allow_reverse=true`，只要 preview window 没有 reverse-intent 点，就不会为了末端姿态微调而随意倒车。
+
+当前防止前进路线里乱倒车依赖这些约束：
+
+- planner 层：`lattice_reverse_enabled` 控制 reverse primitive 是否参与搜索。
+- cost 层：`lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost` 抑制不必要倒车和频繁换向。
+- path 语义层：只有 path yaw 与运动方向相反的段才标记 `reverse_motion`。
+- controller 层：只有当前 preview window 含 `reverse_motion` 时才允许负速度。
+- 回退层：必要时可以关闭 `lattice_reverse_enabled`、`allow_reverse` 或 `respect_reverse_path_orientation`。
+
+P6.4a 的 `sparse_90_turn` 回归验证了这条链路：虽然 ORU test 配置已打开 reverse，普通 90 度前进路径没有 reverse-intent，因此 controller 观测为 `forward=710 reverse=0`，不会在前进路线末端乱倒车。
+
 ## 16. 验证记录
 
 Foxy docker 构建：

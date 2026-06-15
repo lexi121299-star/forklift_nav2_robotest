@@ -125,6 +125,19 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".min_curvature_speed", rclcpp::ParameterValue(min_curvature_speed_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_gate_enabled", rclcpp::ParameterValue(safety_gate_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_emergency_stop_active",
+    rclcpp::ParameterValue(safety_emergency_stop_active_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_stop_distance", rclcpp::ParameterValue(safety_stop_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_slowdown_distance", rclcpp::ParameterValue(safety_slowdown_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_min_speed", rclcpp::ParameterValue(safety_min_speed_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_sample_spacing", rclcpp::ParameterValue(safety_sample_spacing_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".collision_cost_threshold", rclcpp::ParameterValue(collision_cost_threshold_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".path_distance_weight", rclcpp::ParameterValue(path_distance_weight_));
@@ -189,6 +202,12 @@ void ForkliftMpcController::configure(
   node->get_parameter(
     name_ + ".curvature_slowdown_lateral_accel", curvature_slowdown_lateral_accel_);
   node->get_parameter(name_ + ".min_curvature_speed", min_curvature_speed_);
+  node->get_parameter(name_ + ".safety_gate_enabled", safety_gate_enabled_);
+  node->get_parameter(name_ + ".safety_emergency_stop_active", safety_emergency_stop_active_);
+  node->get_parameter(name_ + ".safety_stop_distance", safety_stop_distance_);
+  node->get_parameter(name_ + ".safety_slowdown_distance", safety_slowdown_distance_);
+  node->get_parameter(name_ + ".safety_min_speed", safety_min_speed_);
+  node->get_parameter(name_ + ".safety_sample_spacing", safety_sample_spacing_);
   node->get_parameter(name_ + ".collision_cost_threshold", collision_cost_threshold_);
   node->get_parameter(name_ + ".path_distance_weight", path_distance_weight_);
   node->get_parameter(name_ + ".local_goal_weight", local_goal_weight_);
@@ -246,6 +265,11 @@ void ForkliftMpcController::configure(
   minimum_turning_radius_ = std::max(0.0, minimum_turning_radius_);
   curvature_slowdown_lateral_accel_ = std::max(0.0, curvature_slowdown_lateral_accel_);
   min_curvature_speed_ = std::clamp(min_curvature_speed_, 0.0, max_velocity_);
+  const auto safety_parameters = safetyGateParameters();
+  safety_stop_distance_ = safety_parameters.stop_distance;
+  safety_slowdown_distance_ = safety_parameters.slowdown_distance;
+  safety_min_speed_ = safety_parameters.min_speed;
+  safety_sample_spacing_ = safety_parameters.sample_spacing;
   collision_cost_threshold_ = std::clamp(collision_cost_threshold_, 1, 255);
   control_cmd_accel_time_ = std::max(0.0, control_cmd_accel_time_);
   control_cmd_decel_time_ = std::max(0.0, control_cmd_decel_time_);
@@ -262,7 +286,8 @@ void ForkliftMpcController::configure(
     "max_accel=%.3f horizon=%.3f dt=%.3f preview_points=%d use_mpc_solver=%s "
     "preprocess_path=%s respect_reverse_path_orientation=%s resample=%.3f "
     "smooth_iter=%d footprint_points=%zu publish_control_cmd=%s allow_pivot_turn=%s "
-    "pivot_steer=%.3f pivot_radius=%.3f rear_axle_x_offset=%.3f",
+    "pivot_steer=%.3f pivot_radius=%.3f rear_axle_x_offset=%.3f "
+    "safety_gate=%s safety_stop=%.3f safety_slowdown=%.3f",
     name_.c_str(), wheel_base_, max_velocity_, max_reverse_velocity_,
     allow_reverse_ ? "true" : "false",
     max_steering_angle_, max_steering_angle_velocity_, max_acceleration_,
@@ -275,7 +300,10 @@ void ForkliftMpcController::configure(
     allow_pivot_turn_ ? "true" : "false",
     pivot_steering_angle_,
     pivot_turn_radius_,
-    rear_axle_x_offset_);
+    rear_axle_x_offset_,
+    safety_gate_enabled_ ? "true" : "false",
+    safety_stop_distance_,
+    safety_slowdown_distance_);
 }
 
 void ForkliftMpcController::cleanup()
@@ -396,6 +424,12 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
   const double goal_distance = distanceToPose(current_state, goal_pose);
   const double goal_heading_error = std::abs(headingErrorToPose(current_state, goal_pose));
+  if (safetyEmergencyStopActive()) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 2000, "P8.1 safety gate stopping: emergency stop parameter is active");
+    publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+    return zeroCommand(pose);
+  }
   if (goal_distance <= xy_goal_tolerance_ && goal_heading_error <= yaw_goal_tolerance_) {
     publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
     return zeroCommand(pose);
@@ -416,6 +450,35 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       requested_max_velocity,
       active_max_velocity);
   }
+  double active_max_reverse_velocity = max_reverse_velocity_;
+  const double safety_motion_sign = reverse_motion_active ? -1.0 : 1.0;
+  const double requested_safety_speed =
+    reverse_motion_active ? active_max_reverse_velocity : active_max_velocity;
+  const auto safety_limit =
+    safetyGateLimit(current_state, safety_motion_sign, requested_safety_speed);
+  if (safety_limit.stop_active) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 2000,
+      "P8.1 safety gate stopping: obstacle at %.3f m in %s protection zone",
+      safety_limit.nearest_obstacle_distance,
+      reverse_motion_active ? "reverse" : "forward");
+    publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+    return zeroCommand(pose);
+  }
+  if (safety_limit.slowdown_active) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 2000,
+      "P8.1 safety gate limiting %s speed %.3f -> %.3f; obstacle at %.3f m",
+      reverse_motion_active ? "reverse" : "forward",
+      requested_safety_speed,
+      safety_limit.max_speed,
+      safety_limit.nearest_obstacle_distance);
+    if (reverse_motion_active) {
+      active_max_reverse_velocity = safety_limit.max_speed;
+    } else {
+      active_max_velocity = safety_limit.max_speed;
+    }
+  }
   const bool allow_terminal_stop = goal_distance <= terminal_slowdown_distance_;
   const double min_forward =
     allow_terminal_stop ? 0.0 : std::min(min_velocity_, active_max_velocity);
@@ -429,9 +492,9 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       current_state,
       velocity,
       vehicle_model_,
-      {active_max_velocity,
+        {active_max_velocity,
         min_forward,
-        max_reverse_velocity_,
+        active_max_reverse_velocity,
         time_step_,
         terminal_slowdown_distance_,
         xy_goal_tolerance_,
@@ -494,7 +557,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     for (int i = 1; i < forward_samples; ++i) {
       const double ratio =
         static_cast<double>(i) / static_cast<double>(forward_samples - 1);
-      const double candidate_velocity = -ratio * max_reverse_velocity_;
+      const double candidate_velocity = -ratio * active_max_reverse_velocity;
 
       for (int j = 0; j < steering_samples_; ++j) {
         const double steering_ratio =
@@ -783,6 +846,72 @@ double ForkliftMpcController::previewSpeedLimit(
   }
 
   return speed_limit;
+}
+
+SafetyGateLimit ForkliftMpcController::safetyGateLimit(
+  const MpcState & state,
+  double motion_sign,
+  double requested_max_speed) const
+{
+  const auto parameters = safetyGateParameters();
+  const double nearest_obstacle_distance =
+    nearestSafetyObstacleDistance(state, motion_sign);
+  return safetyGateLimitForObstacleDistance(
+    nearest_obstacle_distance, requested_max_speed, parameters);
+}
+
+double ForkliftMpcController::nearestSafetyObstacleDistance(
+  const MpcState & state,
+  double motion_sign) const
+{
+  const auto parameters = safetyGateParameters();
+  if (!parameters.enabled || !use_collision_check_ || !footprint_collision_checker_ ||
+    footprint_.size() < 3)
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const double direction = motion_sign < 0.0 ? -1.0 : 1.0;
+  const double max_distance = parameters.slowdown_distance;
+  const double spacing = parameters.sample_spacing;
+  for (double distance = spacing; distance <= max_distance + 1e-9; distance += spacing) {
+    const double x = state.x + direction * distance * std::cos(state.theta);
+    const double y = state.y + direction * distance * std::sin(state.theta);
+    const double footprint_cost =
+      footprint_collision_checker_->footprintCostAtPose(x, y, state.theta, footprint_);
+
+    if (footprint_cost < 0.0) {
+      return distance;
+    }
+    if (footprint_cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) {
+      return distance;
+    }
+    if (footprint_cost >= static_cast<double>(collision_cost_threshold_)) {
+      return distance;
+    }
+  }
+
+  return std::numeric_limits<double>::infinity();
+}
+
+SafetyGateParameters ForkliftMpcController::safetyGateParameters() const
+{
+  return sanitizeSafetyGateParameters({
+    safety_gate_enabled_,
+    safety_stop_distance_,
+    safety_slowdown_distance_,
+    safety_min_speed_,
+    safety_sample_spacing_});
+}
+
+bool ForkliftMpcController::safetyEmergencyStopActive() const
+{
+  bool active = safety_emergency_stop_active_;
+  const auto node = node_.lock();
+  if (node) {
+    node->get_parameter(name_ + ".safety_emergency_stop_active", active);
+  }
+  return active;
 }
 
 bool ForkliftMpcController::previewHasReverseMotion(

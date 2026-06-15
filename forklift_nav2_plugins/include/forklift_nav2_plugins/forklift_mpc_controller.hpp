@@ -10,6 +10,7 @@
 #include "forklift_nav2_plugins/forklift_mpc_solver.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_types.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_trajectory.hpp"
+#include "forklift_nav2_plugins/forklift_safety_gate.hpp"
 #include "forklift_nav2_plugins/forklift_vehicle_model.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
@@ -93,6 +94,13 @@ private:
   void publishControlCommand(double velocity, double steering, const std::string & frame_id) const;
   MpcTrajectoryOptions trajectoryOptions(double max_velocity) const;
   double previewSpeedLimit(const MpcPreviewWindow & preview_window, double fallback) const;
+  SafetyGateLimit safetyGateLimit(
+    const MpcState & state,
+    double motion_sign,
+    double requested_max_speed) const;
+  double nearestSafetyObstacleDistance(const MpcState & state, double motion_sign) const;
+  SafetyGateParameters safetyGateParameters() const;
+  bool safetyEmergencyStopActive() const;
   bool previewHasReverseMotion(const MpcPreviewWindow & preview_window) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
@@ -168,6 +176,13 @@ private:
   double minimum_turning_radius_{0.0};
   double curvature_slowdown_lateral_accel_{0.12};
   double min_curvature_speed_{0.08};
+
+  bool safety_gate_enabled_{false};
+  bool safety_emergency_stop_active_{false};
+  double safety_stop_distance_{0.55};
+  double safety_slowdown_distance_{1.25};
+  double safety_min_speed_{0.05};
+  double safety_sample_spacing_{0.10};
 
   double speed_limit_{0.0};
   double last_steering_angle_{0.0};
