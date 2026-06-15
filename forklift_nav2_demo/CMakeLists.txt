@@ -39,6 +39,12 @@ install(
 )
 
 install(
+  PROGRAMS scripts/forklift_ab_acceptance.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME forklift_ab_acceptance
+)
+
+install(
   PROGRAMS scripts/forklift_p6_reverse_acceptance.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME forklift_p6_reverse_acceptance
