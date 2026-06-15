@@ -16,6 +16,8 @@ def generate_launch_description():
     command_timeout_sec = LaunchConfiguration('command_timeout_sec')
     control_rate_hz = LaunchConfiguration('control_rate_hz')
     cmd_vel_topic = LaunchConfiguration('cmd_vel_topic')
+    twist_fallback_topic = LaunchConfiguration('twist_fallback_topic')
+    twist_fallback_timeout_sec = LaunchConfiguration('twist_fallback_timeout_sec')
 
     bridge = Node(
         package='forklift_vehicle_interface',
@@ -34,6 +36,8 @@ def generate_launch_description():
             'command_timeout_sec': command_timeout_sec,
             'control_rate_hz': control_rate_hz,
             'cmd_vel_topic': cmd_vel_topic,
+            'twist_fallback_topic': twist_fallback_topic,
+            'twist_fallback_timeout_sec': twist_fallback_timeout_sec,
         }],
     )
 
@@ -49,5 +53,7 @@ def generate_launch_description():
         DeclareLaunchArgument('command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel'),
+        DeclareLaunchArgument('twist_fallback_topic', default_value=''),
+        DeclareLaunchArgument('twist_fallback_timeout_sec', default_value='0.5'),
         bridge,
     ])

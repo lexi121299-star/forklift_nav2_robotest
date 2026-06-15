@@ -24,6 +24,7 @@ ForkliftMpcController safety gate
 sim_command_bridge / vehicle_interface gate
   -> emergency stop service
   -> command timeout watchdog
+  -> optional recovery Twist fallback in simulation bridge mode
 ```
 
 controller safety gate 在每次 `computeVelocityCommands()` 中执行：
@@ -38,6 +39,25 @@ controller safety gate 在每次 `computeVelocityCommands()` 中执行：
 8. 没有障碍时不限制速度。
 
 速度限制逻辑在 `forklift_safety_gate` helper 中单测，controller 负责把 local costmap 最近障碍距离喂给 helper。
+
+bridge 模式下 Gazebo 订阅 `/forklift/sim_cmd_vel`，正常控制链路是：
+
+```text
+ForkliftMpcController
+  -> /forklift/control_cmd
+  -> sim_command_bridge
+  -> /forklift/sim_cmd_vel
+```
+
+Nav2 recovery actions，例如 `Spin` / `BackUp`，默认发布 `geometry_msgs/Twist` 到 `/cmd_vel`。如果 bridge 模式只监听 `/forklift/control_cmd`，recovery 会在 BT 里运行，但 Gazebo 车不会实际转动。当前修复是在 `sim_command_bridge` 中加入可选 fallback：
+
+```text
+/cmd_vel
+  -> sim_command_bridge twist_fallback_topic
+  -> /forklift/sim_cmd_vel
+```
+
+fallback 只在 `/forklift/control_cmd` 未到达或超过 `command_timeout_sec` 时启用；只要 controller 正常发布 `ForkliftControlCommand`，仍然优先使用统一车辆命令。
 
 ## 3. 参数
 
@@ -77,6 +97,19 @@ ros2 param set /controller_server FollowPath.safety_emergency_stop_active true
 
 ```bash
 ros2 service call /forklift/set_emergency_stop forklift_msgs/srv/SetEmergencyStop "{emergency_stop: true}"
+```
+
+仿真 bridge recovery fallback：
+
+```yaml
+bridge_twist_fallback_topic: /cmd_vel
+bridge_twist_fallback_timeout_sec: 0.5
+```
+
+回退方式：
+
+```yaml
+bridge_twist_fallback_topic: ''
 ```
 
 ## 4. 与 P6 倒车的关系
@@ -134,6 +167,43 @@ bridge watchdog 日志确认命令结束后停车：
 ```text
 Stopping: command timeout.
 ```
+
+Foxy headless A-B 动态障碍停车/放行快速验证：
+
+```bash
+ros2 run forklift_nav2_demo forklift_ab_dynamic_obstacle_acceptance \
+  --ros-args -p use_sim_time:=true -p timeout_sec:=150.0
+```
+
+脚本行为：
+
+```text
+NavigateToPose: (-2.0, -0.5) -> (1.2, -0.5)
+spawn obstacle: (-0.6, -0.5)
+observe blocked stop samples
+delete obstacle
+wait for automatic Nav2 recovery/replan to finish the same goal
+```
+
+结果：
+
+```text
+/navigate_to_pose status: 4 SUCCEEDED
+control_samples=399 sim_cmd_samples=1136 forward=94 reverse=0
+phase_control_zero blocked=4
+phase_sim_max after=0.450
+dynamic_obstacle_acceptance=PASS
+```
+
+关键日志：
+
+```text
+P8.1 safety gate stopping: obstacle at 0.100 m in forward protection zone
+Using fallback Twist command.
+Navigation succeeded
+```
+
+备注：短距离目标 `(0.2, -0.5)` 也能验证 fallback 已生效，但 recovery 后容易越过短目标并触发后续 planner / progress checker 边界条件；正式 quick acceptance 使用较长 A-B 目标 `(1.2, -0.5)`。
 
 ## 6. 后续
 

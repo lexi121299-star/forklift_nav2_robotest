@@ -40,6 +40,9 @@ def generate_launch_description():
     bridge_command_timeout_sec = LaunchConfiguration('bridge_command_timeout_sec')
     bridge_control_rate_hz = LaunchConfiguration('bridge_control_rate_hz')
     bridge_cmd_vel_topic = LaunchConfiguration('bridge_cmd_vel_topic')
+    bridge_twist_fallback_topic = LaunchConfiguration('bridge_twist_fallback_topic')
+    bridge_twist_fallback_timeout_sec = LaunchConfiguration(
+        'bridge_twist_fallback_timeout_sec')
     sim_ready_timeout = LaunchConfiguration('sim_ready_timeout')
     rmw_implementation = LaunchConfiguration('rmw_implementation')
     use_composition = LaunchConfiguration('use_composition')
@@ -61,6 +64,8 @@ def generate_launch_description():
             'bridge_command_timeout_sec': bridge_command_timeout_sec,
             'bridge_control_rate_hz': bridge_control_rate_hz,
             'bridge_cmd_vel_topic': bridge_cmd_vel_topic,
+            'bridge_twist_fallback_topic': bridge_twist_fallback_topic,
+            'bridge_twist_fallback_timeout_sec': bridge_twist_fallback_timeout_sec,
         }.items(),
     )
 
@@ -142,6 +147,11 @@ def generate_launch_description():
             'bridge_cmd_vel_topic',
             default_value='/forklift/sim_cmd_vel',
             description='Gazebo command topic used by sim_command_bridge mode.'),
+        DeclareLaunchArgument(
+            'bridge_twist_fallback_topic',
+            default_value='/cmd_vel',
+            description='Optional Twist topic used only after /forklift/control_cmd times out.'),
+        DeclareLaunchArgument('bridge_twist_fallback_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument(
             'sim_ready_timeout',
             default_value='0.0',

@@ -31,6 +31,8 @@ class SimCommandBridge(Node):
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('twist_fallback_topic', '')
+        self.declare_parameter('twist_fallback_timeout_sec', 0.5)
         self.declare_parameter('publish_tf', False)
 
         self._wheel_base = self._positive_param('wheel_base', 1.2)
@@ -54,6 +56,10 @@ class SimCommandBridge(Node):
         self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
         self._command_timeout_sec = self._positive_param('command_timeout_sec', 0.5)
         self._cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
+        self._twist_fallback_topic = str(self.get_parameter('twist_fallback_topic').value)
+        self._twist_fallback_timeout_sec = self._positive_param(
+            'twist_fallback_timeout_sec', 0.5
+        )
         control_rate_hz = self._positive_param('control_rate_hz', 20.0)
 
         if self.get_parameter('publish_tf').value:
@@ -65,6 +71,8 @@ class SimCommandBridge(Node):
         self._emergency_stop = False
         self._last_command: Optional[ForkliftControlCommand] = None
         self._last_command_time = self.get_clock().now()
+        self._last_fallback_twist: Optional[Twist] = None
+        self._last_fallback_twist_time = self.get_clock().now()
         self._last_stop_reason = ''
 
         self._cmd_vel_pub = self.create_publisher(Twist, self._cmd_vel_topic, 10)
@@ -81,6 +89,13 @@ class SimCommandBridge(Node):
             self._on_command,
             10,
         )
+        if self._twist_fallback_topic:
+            self.create_subscription(
+                Twist,
+                self._twist_fallback_topic,
+                self._on_fallback_twist,
+                10,
+            )
         self.create_service(
             SetEmergencyStop,
             '/forklift/set_emergency_stop',
@@ -93,8 +108,14 @@ class SimCommandBridge(Node):
         )
 
         self.create_timer(1.0 / control_rate_hz, self._on_timer)
+        fallback_text = (
+            f', fallback {self._twist_fallback_topic} -> {self._cmd_vel_topic}'
+            if self._twist_fallback_topic
+            else ''
+        )
         self.get_logger().info(
             f'sim_command_bridge ready: /forklift/control_cmd -> {self._cmd_vel_topic}'
+            f'{fallback_text}'
         )
 
     def _positive_param(self, name: str, fallback: float) -> float:
@@ -124,6 +145,10 @@ class SimCommandBridge(Node):
     def _on_command(self, msg: ForkliftControlCommand) -> None:
         self._last_command = msg
         self._last_command_time = self.get_clock().now()
+
+    def _on_fallback_twist(self, msg: Twist) -> None:
+        self._last_fallback_twist = msg
+        self._last_fallback_twist_time = self.get_clock().now()
 
     def _on_set_emergency_stop(
         self,
@@ -162,11 +187,11 @@ class SimCommandBridge(Node):
         twist = Twist()
         command = self._last_command
         if command is None:
-            return twist, 'waiting for first command'
+            return self._fallback_twist_or_stop(twist, 'waiting for first command')
 
         age_sec = (self.get_clock().now() - self._last_command_time).nanoseconds / 1e9
         if age_sec > self._command_timeout_sec:
-            return twist, 'command timeout'
+            return self._fallback_twist_or_stop(twist, 'command timeout')
         if self._emergency_stop:
             return twist, 'emergency stop'
         if not command.enable:
@@ -196,6 +221,30 @@ class SimCommandBridge(Node):
             min(self._max_angular_velocity_radps, twist.angular.z),
         )
         return twist, ''
+
+    def _fallback_twist_or_stop(self, stop_twist: Twist, stop_reason: str) -> Tuple[Twist, str]:
+        if self._emergency_stop or not self._twist_fallback_topic:
+            return stop_twist, stop_reason
+        fallback = self._last_fallback_twist
+        if fallback is None:
+            return stop_twist, stop_reason
+
+        age_sec = (
+            self.get_clock().now() - self._last_fallback_twist_time
+        ).nanoseconds / 1e9
+        if age_sec > self._twist_fallback_timeout_sec:
+            return stop_twist, stop_reason
+
+        twist = Twist()
+        twist.linear.x = max(
+            -self._max_velocity_mps,
+            min(self._max_velocity_mps, fallback.linear.x),
+        )
+        twist.angular.z = max(
+            -self._max_angular_velocity_radps,
+            min(self._max_angular_velocity_radps, fallback.angular.z),
+        )
+        return twist, 'twist fallback'
 
     def _is_pivot_turn(self, speed: float, steering: float) -> bool:
         if not self._allow_pivot_turn or speed <= 1e-6:
@@ -255,6 +304,8 @@ class SimCommandBridge(Node):
             self.get_logger().warning('Stopping: forward/reverse command is invalid.')
         elif stop_reason in {'command timeout', 'emergency stop'}:
             self.get_logger().warning(f'Stopping: {stop_reason}.')
+        elif stop_reason == 'twist fallback':
+            self.get_logger().info('Using fallback Twist command.')
         elif stop_reason:
             self.get_logger().info(f'Stopping: {stop_reason}.')
 
