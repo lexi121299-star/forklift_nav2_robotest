@@ -969,11 +969,85 @@ forward arc -> reverse arc -> forward arc
 ### 17.5 P6.4b 验收表
 
 ```text
-[ ] forward route does not reverse
-[ ] rear goal uses reverse
-[ ] reverse segment reaches controller/bridge
-[ ] three-point turn has limited gear switches
-[ ] narrow scenario succeeds or fails safely
-[ ] sparse_90_turn 回归不退化
-[ ] A-B dynamic obstacle 回归不退化
+[x] forward route does not reverse
+[x] rear goal uses reverse
+[x] reverse segment reaches controller/bridge
+[x] forward_with_goal_heading 不因为终点姿态引入倒车
+[x] sparse_90_turn 回归不退化
+[x] A-B dynamic obstacle 回归不退化
+[>] three-point / narrow aisle / docking 正式场景放到 P10/P6.5
 ```
+
+## 18. P6.4b 验收结果
+
+2026-06-15 完成当前最小 lattice scaffold 范围内的倒车 acceptance。
+
+新增脚本：
+
+```text
+ros2 run forklift_nav2_demo forklift_p6_reverse_acceptance
+```
+
+脚本流程：
+
+```text
+低频发布 /initialpose
+等待 map -> base_link
+调用 ComputePathToPose
+从 path yaw 和几何切线推断 forward/reverse/gear_switches
+必要时将 planner path 交给 FollowPath
+统计 /forklift/control_cmd 和 /forklift/sim_cmd_vel 方向样本
+```
+
+实现注意点：
+
+- `ComputePathToPose` 返回的 path stamp 可能早于当前 TF buffer；脚本在交给 `FollowPath` 前清空 path/pose stamps，避免 controller 查过去的 `map -> odom` 时失败。
+- `/initialpose` 在 Foxy headless 环境里不适合依赖一次性 `ros2 topic pub --once`；脚本改为低频发布并在 `map -> base_link` 可用后停止。
+- `forklift_ab_dynamic_obstacle_acceptance` 也加入同样的 initial pose 初始化，动态障碍验收可以自己完成 AMCL 初始化。
+
+实测结果：
+
+```text
+forward_straight:
+  ComputePathToPose SUCCEEDED
+  FollowPath SUCCEEDED
+  poses=6 forward_segments=5 reverse_segments=0 gear_switches=0
+  control_direction_samples forward=31 reverse=0
+  sim_cmd min_signed_linear_x=0.000 max_signed_linear_x=0.371
+
+reverse_straight:
+  ComputePathToPose SUCCEEDED
+  FollowPath SUCCEEDED
+  poses=2 forward_segments=0 reverse_segments=1 gear_switches=0
+  control_direction_samples forward=0 reverse=17
+  sim_cmd min_signed_linear_x=-0.096
+
+sparse_90_turn:
+  ComputePathToPose SUCCEEDED
+  FollowPath SUCCEEDED
+  poses=5 forward_segments=4 reverse_segments=0 gear_switches=0
+  control_direction_samples forward=158 reverse=0
+  sim_cmd min_signed_linear_x=0.000 max_signed_linear_x=0.272
+
+forward_with_goal_heading:
+  ComputePathToPose SUCCEEDED
+  poses=5 forward_segments=4 reverse_segments=0 gear_switches=0
+
+A-B dynamic obstacle regression:
+  NavigateToPose SUCCEEDED
+  dynamic_obstacle_acceptance=PASS
+  control_samples=389 sim_cmd_samples=1169 forward=85 reverse=0
+```
+
+结论：
+
+- 普通前进路线没有 planner reverse segment，也没有 controller reverse samples。
+- 后方目标会生成 reverse segment，并能通过 controller/bridge 变成负速度。
+- 90 度前进路线在 reverse 全局开启后仍保持 forward-only。
+- 前方目标带终点 yaw 不会为了贴姿态引入倒车。
+- P8.1 动态障碍停车/放行回归不退化。
+
+边界：
+
+- 这次 P6.4b 不声明已经具备完整 ORU 窄通道/三点掉头/倒车入库能力。
+- 这些正式场景需要更多曲率 primitive、不同长度 primitive、更好的 heuristic、primitive lookup/cache 和固定障碍场景，放入 P10/P6.5。

@@ -39,6 +39,12 @@ install(
 )
 
 install(
+  PROGRAMS scripts/forklift_p6_reverse_acceptance.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME forklift_p6_reverse_acceptance
+)
+
+install(
   PROGRAMS scripts/wait_for_sim_ready.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME wait_for_sim_ready

@@ -8,11 +8,14 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from forklift_msgs.msg import ForkliftControlCommand
 from gazebo_msgs.srv import DeleteEntity, SpawnEntity
-from geometry_msgs.msg import Pose, PoseStamped, Quaternion, Twist
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Quaternion, Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
+from rclpy.time import Time
+import tf2_ros
 
 
 STATUS_NAMES = {
@@ -85,6 +88,12 @@ class DynamicObstacleAcceptance:
         self.node.declare_parameter("obstacle_size_z", 1.00)
         self.node.declare_parameter("moving_velocity_threshold", 0.03)
         self.node.declare_parameter("zero_velocity_threshold", 0.01)
+        self.node.declare_parameter("publish_initial_pose", True)
+        self.node.declare_parameter("initial_x", -2.0)
+        self.node.declare_parameter("initial_y", -0.5)
+        self.node.declare_parameter("initial_yaw", 0.0)
+        self.node.declare_parameter("initial_pose_publish_interval_sec", 1.0)
+        self.node.declare_parameter("initial_pose_wait_sec", 30.0)
 
         self.action_name = self.node.get_parameter("action_name").value
         self.timeout_sec = float(self.node.get_parameter("timeout_sec").value)
@@ -110,6 +119,15 @@ class DynamicObstacleAcceptance:
             self.node.get_parameter("moving_velocity_threshold").value)
         self.zero_velocity_threshold = float(
             self.node.get_parameter("zero_velocity_threshold").value)
+        self.publish_initial_pose_enabled = bool(
+            self.node.get_parameter("publish_initial_pose").value)
+        self.initial_x = float(self.node.get_parameter("initial_x").value)
+        self.initial_y = float(self.node.get_parameter("initial_y").value)
+        self.initial_yaw = float(self.node.get_parameter("initial_yaw").value)
+        self.initial_pose_publish_interval_sec = float(
+            self.node.get_parameter("initial_pose_publish_interval_sec").value)
+        self.initial_pose_wait_sec = float(
+            self.node.get_parameter("initial_pose_wait_sec").value)
 
         self.phase = "before_obstacle"
         self.feedback_count = 0
@@ -143,6 +161,10 @@ class DynamicObstacleAcceptance:
             ForkliftControlCommand, "/forklift/control_cmd", self.on_control_cmd, 10)
         self.node.create_subscription(Twist, "/forklift/sim_cmd_vel", self.on_sim_cmd, 10)
         self.node.create_subscription(Odometry, "/odom", self.on_odom, 10)
+        self.initial_pose_pub = self.node.create_publisher(
+            PoseWithCovarianceStamped, "/initialpose", 10)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
 
         self.action_client = ActionClient(self.node, NavigateToPose, self.action_name)
         self.spawn_client = self.node.create_client(SpawnEntity, "/spawn_entity")
@@ -288,10 +310,43 @@ class DynamicObstacleAcceptance:
                 return result_future.result()
         return None
 
+    def publish_initial_pose(self):
+        self.node.get_logger().info(
+            "Publishing initial pose ({:.2f},{:.2f},{:.2f})".format(
+                self.initial_x, self.initial_y, self.initial_yaw))
+        wait_deadline = time.monotonic() + max(0.1, self.initial_pose_wait_sec)
+        next_publish_time = 0.0
+        while time.monotonic() < wait_deadline and rclpy.ok():
+            if self.tf_buffer.can_transform(
+                    "map", "base_link", Time(), timeout=Duration(seconds=0.1)):
+                self.node.get_logger().info("Initial pose accepted; map->base_link is available")
+                return True
+
+            now = time.monotonic()
+            if now >= next_publish_time:
+                msg = PoseWithCovarianceStamped()
+                msg.header.frame_id = "map"
+                msg.header.stamp = self.node.get_clock().now().to_msg()
+                msg.pose.pose.position.x = self.initial_x
+                msg.pose.pose.position.y = self.initial_y
+                msg.pose.pose.orientation = yaw_to_quaternion(self.initial_yaw)
+                msg.pose.covariance[0] = 0.25
+                msg.pose.covariance[7] = 0.25
+                msg.pose.covariance[35] = 0.0685
+                self.initial_pose_pub.publish(msg)
+                next_publish_time = now + max(0.2, self.initial_pose_publish_interval_sec)
+
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+
+        self.node.get_logger().error("Timed out waiting for map->base_link after initial pose")
+        return False
+
     def run(self):
         if not self.wait_for_services():
             return 2
         self.delete_obstacle()
+        if self.publish_initial_pose_enabled and not self.publish_initial_pose():
+            return 14
         if not self.action_client.wait_for_server(timeout_sec=15.0):
             self.node.get_logger().error("{} action server is not available".format(
                 self.action_name))

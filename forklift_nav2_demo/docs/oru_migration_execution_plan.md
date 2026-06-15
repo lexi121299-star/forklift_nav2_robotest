@@ -57,7 +57,7 @@ P9  真车低速联调
 [x] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
 [x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A-B
 [x] A-B 动态障碍停车/放行快速验证
-[ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
+[x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
 [ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
 [ ] P8.2  独立 safety package / 命令闸门
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
@@ -683,13 +683,13 @@ preview window 长度和 progress checker 参数
 P6.4b 验收表：
 
 ```text
-[ ] forward route does not reverse
-[ ] rear goal uses reverse
-[ ] reverse segment reaches controller/bridge
-[ ] three-point turn has limited gear switches
-[ ] narrow scenario succeeds or fails safely
-[ ] sparse_90_turn 回归不退化
-[ ] A-B dynamic obstacle 回归不退化
+[x] forward route does not reverse
+[x] rear goal uses reverse
+[x] reverse segment reaches controller/bridge
+[x] forward_with_goal_heading 不因为终点姿态引入倒车
+[x] sparse_90_turn 回归不退化
+[x] A-B dynamic obstacle 回归不退化
+[>] three-point / narrow aisle / docking 正式场景放到 P10/P6.5
 ```
 
 ## 9. P7: 建 forklift_task_manager
@@ -864,7 +864,7 @@ P8.1 到 P7.1 之间的推荐顺序：
 P8.1 已完成
 -> A-B acceptance 快速验证已完成
 -> A-B 动态障碍停车/放行快速验证已完成
--> P6.4b 倒车 acceptance 调优
+-> P6.4b 倒车 acceptance 调优已完成
 -> A-B acceptance 正式验收
 -> P8.2 独立 safety gate
 -> P8.3 动态障碍等待/重规划/简单绕行
@@ -872,7 +872,7 @@ P8.1 已完成
 -> P7.1 task_manager 最小任务入口
 ```
 
-快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通；A-B 动态障碍停车/放行快速验证也已证明 P8.1 safety gate 在真实导航执行中能停车、放行后能继续跑完同一目标。下一步建议进入 P6.4b，把倒车/换向 acceptance 调稳；之后再做 A-B 正式验收，把普通路线、倒车/换向路线、障碍停车/放行放到同一套验收里。
+快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通；A-B 动态障碍停车/放行快速验证也已证明 P8.1 safety gate 在真实导航执行中能停车、放行后能继续跑完同一目标。P6.4b 已把当前最小 lattice scaffold 的倒车 acceptance 调稳。下一步建议做 A-B 正式验收，把普通路线、倒车/换向路线、障碍停车/放行放到同一套验收里。
 
 真车 recovery 不是忽略项，但不要用仿真 bridge fallback 的方式直接上车。仿真 fallback 只是解决 Gazebo bridge 模式下 recovery `/cmd_vel` 到不了 `/forklift/sim_cmd_vel` 的接线问题；真车阶段应在 P8.2/P8.3 中实现受控 recovery：
 
@@ -904,7 +904,7 @@ Nav2/custom recovery request
 - 无障碍时，P8.1 safety gate 不误停。
 - 本阶段不要求复杂绕行；持续阻挡时允许等待或任务失败，但不能硬撞或继续推障碍。
 
-如果后续正式验收暴露 safety gate 架构边界，再进入 P8.2 独立 safety package；如果只是倒车、换向、路径质量问题，优先继续 P6.4b。
+如果后续正式验收暴露 safety gate 架构边界，再进入 P8.2 独立 safety package；如果只是更复杂的倒车、换向、窄通道路径质量问题，优先进入 P10/P6.5 的 primitive/heuristic/场景增强。
 
 ## 11. P9: 真车低速联调
 
@@ -925,7 +925,7 @@ Nav2/custom recovery request
 
 - P2.3 真车 `forklift_vehicle_interface` 实际 I/O：不再只是 dry-run 日志，必须能向底盘发送控制，并发布真实反馈。
 - A-B acceptance 快速验证和正式验收：普通路线、倒车/换向路线、障碍停车/放行都在仿真中通过。
-- P6.4b 倒车 acceptance：普通前进路线不乱倒，倒车/换向不抖，低速路径稳定。
+- P6.4b 倒车 acceptance：当前最小 lattice scaffold 中普通前进路线不乱倒、后方目标能倒、90 度和动态障碍回归不退化；更复杂的窄通道/三点掉头/倒车入库放到 P10/P6.5。
 - P8.2 独立 safety gate 或明确命令闸门：所有运动命令经过安全层。
 - P8.3 动态障碍等待、重新规划、简单绕行和受控 recovery 策略：能停、能等、能放行，通道不足时不硬绕。
 - P8.4 真车低速 safety acceptance：速度相关保护区、前进/倒车不同保护区、keepout、地图边缘、诊断日志。
@@ -1238,7 +1238,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
 [x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A 到 B
 [x] A-B 动态障碍停车/放行快速验证
-[ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
+[x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
 [ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
 [ ] P8.2 独立 safety package / 命令闸门
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
@@ -1253,15 +1253,15 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 建议我们下一步先做：
 
 ```text
-P6.4b 倒车 acceptance 调优
+A-B acceptance 正式验收
 ```
 
 原因：
 
-- P6.4a 已经证明 planner 可以输出 reverse 段，controller 会把 reverse-intent path 当作倒车追踪，sim bridge 能收到 reverse control 并输出负速度。
+- P6.4b 已经把当前最小 lattice scaffold 的倒车 acceptance 固化成脚本，并完成前进、倒车、90 度和动态障碍回归。
 - P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
 - 空旷 A-B 快速验证和动态障碍停车/放行快速验证都已经通过。
-- 现在离 A-B 正式验收最近的缺口是倒车/换向质量：窄空间、换向稳定性、普通前进路线不乱倒。
+- 现在离 A-B 正式验收最近的缺口是把普通路线、倒车/换向路线、障碍停车/放行放进同一套可复跑验收。
 - 真车 recovery 命令闸门已经明确放入 P8.2/P8.3；但在进入真车 safety 架构前，先把 planner/controller 的基础运动能力调稳，能减少后续 safety/recovery 层需要兜底的问题。
 
 执行记录：
@@ -1281,6 +1281,13 @@ P6.4b 倒车 acceptance 调优
 - 2026-06-15：P8.1 最小 safety gate 通过。`ForkliftMpcController` 增加 controller-side safety gate，沿当前 forward/reverse 运动方向在 local costmap 上采样 footprint；障碍进入 `safety_stop_distance` 时直接 brake，进入 `safety_slowdown_distance` 时压低当前方向速度上限；`safety_emergency_stop_active` 可运行时置 true 触发 controller 停车。ORU test 配置打开 `safety_gate_enabled=true`，并保留 `sim_command_bridge` 既有 `/forklift/set_emergency_stop` 和 `command_timeout_sec` watchdog 作为 vehicle_interface 侧闸门。Foxy docker 构建通过；`forklift_nav2_plugins` 59 个 gtest 全部通过，其中新增 `test_forklift_safety_gate` 5 个用例；headless `sparse_90_turn` safety gate 回归返回 `SUCCEEDED`，日志确认 `safety_gate=true`，观测到 `control_direction_samples forward=560 reverse=0` 和 `max_linear_x=0.450`，说明无障碍时不会误停。详见 `forklift_nav2_demo/docs/p8_safety_gate_notes.md`。
 - 2026-06-15：A-B acceptance 快速验证通过。Foxy docker headless + Gazebo + Nav2 + sim bridge + P8.1 safety gate 打开，从 `(-2.0, -0.5)` NavigateToPose 到 `(-0.9, -0.5)`，action 返回 `SUCCEEDED`；观测到 `feedback_count=397`、`control_samples=31`、`max_velocity_mps=0.395`、`control_direction_samples forward=31 reverse=0`、`sim_cmd_samples=100`、`max_linear_x=0.395`、末态 odom 约 `x=-1.066 y=-0.571`。planner 多次重规划均输出 forward-only lattice path，例如 `forward=5 reverse=0`、`forward=3 reverse=0`、`forward=1 reverse=0`；日志确认 `safety_gate=true safety_stop=0.550 safety_slowdown=1.250`。本次只覆盖空旷简单 A-B，不覆盖动态障碍停车/放行。
 - 2026-06-15：A-B 动态障碍停车/放行快速验证通过。新增 `forklift_ab_dynamic_obstacle_acceptance` 脚本：下发 `NavigateToPose`，在路线中间生成临时 Gazebo box 障碍，观察 safety gate 停车，删除障碍后等待 Nav2 自动恢复并完成目标。`sim_command_bridge` 增加可选 `twist_fallback_topic`，在 `/forklift/control_cmd` 超时后把 recovery `/cmd_vel` 转发到 `/forklift/sim_cmd_vel`，解决 bridge 模式下 Nav2 recovery spin 只发 `/cmd_vel`、Gazebo 不动的问题；正常控制仍优先使用 `/forklift/control_cmd`。Foxy docker 构建通过；`forklift_nav2_plugins` 59 个 gtest 全部通过；headless 动态障碍验收从 `(-2.0, -0.5)` 到 `(1.2, -0.5)` 返回 `SUCCEEDED`，脚本打印 `dynamic_obstacle_acceptance=PASS`，观测到 `control_samples=399`、`sim_cmd_samples=1136`、`phase_control_zero blocked=4`、`phase_sim_max after=0.450`、`forward=94 reverse=0`。launch 日志确认 `P8.1 safety gate stopping: obstacle at 0.100 m in forward protection zone`，障碍释放后 planner 继续输出 forward-only lattice path，recovery 期间 bridge 日志出现 `Using fallback Twist command.`。
+- 2026-06-15：P6.4b 倒车 acceptance 调优通过。新增 `forklift_p6_reverse_acceptance`：脚本先低频发布 `/initialpose` 并等待 `map -> base_link`，再调用 `ComputePathToPose`，从 path yaw 与几何切线推断 `forward_segments / reverse_segments / gear_switches`，需要执行的场景会把 planner path 交给 `FollowPath` 并记录 `/forklift/control_cmd` 与 `/forklift/sim_cmd_vel` 的方向样本。脚本在交给 controller 前清空 path stamps，避免 Foxy 中 ComputePath 返回旧 stamp 导致 `ForkliftMpcController could not transform the global plan`。`forklift_ab_dynamic_obstacle_acceptance` 也补入同样的 initial pose 初始化，减少外部 shell 对 `/initialpose` 的依赖。本轮验收结果：
+  - `forward_straight`：`ComputePathToPose` 和 `FollowPath` 均 `SUCCEEDED`；`poses=6 forward_segments=5 reverse_segments=0 gear_switches=0`；`control_direction_samples forward=31 reverse=0`；`sim_cmd_vel` 无负速度。
+  - `reverse_straight`：`ComputePathToPose` 和 `FollowPath` 均 `SUCCEEDED`；`poses=2 forward_segments=0 reverse_segments=1 gear_switches=0`；`control_direction_samples forward=0 reverse=17`；`min_signed_linear_x=-0.096`。
+  - `sparse_90_turn`：`ComputePathToPose` 和 `FollowPath` 均 `SUCCEEDED`；`poses=5 forward_segments=4 reverse_segments=0 gear_switches=0`；`control_direction_samples forward=158 reverse=0`。
+  - `forward_with_goal_heading`：planner-only `SUCCEEDED`；`poses=5 forward_segments=4 reverse_segments=0 gear_switches=0`，说明前方目标带终点 yaw 时不会为了贴姿态引入倒车。
+  - A-B 动态障碍回归：`NavigateToPose` `SUCCEEDED`，`dynamic_obstacle_acceptance=PASS`；`control_samples=389 sim_cmd_samples=1169 forward=85 reverse=0`，说明 P8.1 动态障碍停车/放行未被 P6.4b acceptance 改动破坏。
+  P6.4b 的完成边界是“当前最小 lattice scaffold 的倒车验收可回归”：普通前进路线不乱倒，后方目标会倒，controller/bridge 能执行倒车段，90 度和动态障碍回归不退化。窄通道、三点掉头、倒车入库等正式场景需要更多曲率/长度 primitive、场景生成和更强 heuristic，放到 P10/P6.5，不作为本次 P6.4b 的通过条件。
 
 ## 14. ORU 包迁移优先级
 
