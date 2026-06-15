@@ -14,6 +14,8 @@ from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
+from rclpy.exceptions import ParameterAlreadyDeclaredException
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 import tf2_ros
 
@@ -69,6 +71,7 @@ def make_box_sdf(name, sx, sy, sz):
 class DynamicObstacleAcceptance:
     def __init__(self):
         self.node = rclpy.create_node("forklift_ab_dynamic_obstacle_acceptance")
+        self.set_use_sim_time()
         self.node.declare_parameter("action_name", "/navigate_to_pose")
         self.node.declare_parameter("timeout_sec", 120.0)
         self.node.declare_parameter("spawn_delay_sec", 1.2)
@@ -173,6 +176,14 @@ class DynamicObstacleAcceptance:
             ClearEntireCostmap, "/global_costmap/clear_entirely_global_costmap")
         self.clear_local_client = self.node.create_client(
             ClearEntireCostmap, "/local_costmap/clear_entirely_local_costmap")
+
+    def set_use_sim_time(self):
+        try:
+            self.node.declare_parameter("use_sim_time", True)
+        except ParameterAlreadyDeclaredException:
+            self.node.set_parameters([
+                Parameter("use_sim_time", Parameter.Type.BOOL, True)
+            ])
 
     def on_control_cmd(self, msg):
         self.control_samples += 1

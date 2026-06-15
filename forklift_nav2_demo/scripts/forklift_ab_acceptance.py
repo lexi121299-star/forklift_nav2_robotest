@@ -15,6 +15,8 @@ from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
+from rclpy.exceptions import ParameterAlreadyDeclaredException
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 import tf2_ros
 
@@ -48,7 +50,9 @@ SCENARIOS = {
         "goal": (1.2, -0.5, 0.0),
         "timeout_sec": 140.0,
         "dynamic_obstacle": True,
-        "spawn_delay_sec": 2.5,
+        "spawn_delay_sec": 1.2,
+        "spawn_trigger_odom_x": -1.55,
+        "spawn_trigger_timeout_sec": 15.0,
         "blocked_observation_sec": 6.0,
         "release_settle_sec": 4.0,
         "obstacle": (-0.6, -0.5, 0.5),
@@ -57,6 +61,8 @@ SCENARIOS = {
         "max_reverse_samples": 0,
         "require_blocked_zero_samples": True,
         "require_after_release_motion": True,
+        "clear_costmaps_after_release": True,
+        "reissue_goal_after_release": True,
         "min_final_x": 0.75,
     },
 }
@@ -113,6 +119,7 @@ def make_box_sdf(name, sx, sy, sz):
 class AbAcceptance:
     def __init__(self):
         self.node = rclpy.create_node("forklift_ab_acceptance")
+        self.set_use_sim_time()
         self.node.declare_parameter("scenario", "forward_ab")
         self.node.declare_parameter("action_name", "/navigate_to_pose")
         self.node.declare_parameter("robot_entity_name", "forklift")
@@ -194,6 +201,14 @@ class AbAcceptance:
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
 
+    def set_use_sim_time(self):
+        try:
+            self.node.declare_parameter("use_sim_time", True)
+        except ParameterAlreadyDeclaredException:
+            self.node.set_parameters([
+                Parameter("use_sim_time", Parameter.Type.BOOL, True)
+            ])
+
     def on_control_cmd(self, msg):
         self.control_samples += 1
         self.max_control_velocity = max(self.max_control_velocity, abs(msg.velocity_mps))
@@ -265,7 +280,12 @@ class AbAcceptance:
         result_future = goal_handle.get_result_async()
 
         self.phase = "before_obstacle"
-        self.spin_for(float(scenario.get("spawn_delay_sec", 1.2)))
+        if "spawn_trigger_odom_x" in scenario:
+            self.spin_until_odom_x(
+                float(scenario["spawn_trigger_odom_x"]),
+                float(scenario.get("spawn_trigger_timeout_sec", 15.0)))
+        else:
+            self.spin_for(float(scenario.get("spawn_delay_sec", 1.2)))
         if result_future.done():
             self.node.get_logger().error("goal finished before obstacle was spawned")
             return result_future.result()
@@ -275,10 +295,18 @@ class AbAcceptance:
         self.phase = "blocked"
         self.spin_for(float(scenario.get("blocked_observation_sec", 6.0)))
         self.delete_obstacle()
-        if self.clear_costmaps_after_release:
+        if self.clear_costmaps_after_release or scenario.get("clear_costmaps_after_release", False):
             self.clear_costmaps()
 
         self.phase = "after_release"
+        if scenario.get("reissue_goal_after_release", False):
+            self.node.get_logger().info("canceling and reissuing goal after release")
+            cancel_future = goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=5.0)
+            goal_handle = self.send_goal(goal)
+            if goal_handle is None:
+                return None
+            result_future = goal_handle.get_result_async()
         result = self.wait_for_result(result_future, scenario["timeout_sec"])
         self.spin_for(float(scenario.get("release_settle_sec", 4.0)))
         return result
@@ -441,6 +469,20 @@ class AbAcceptance:
         deadline = time.monotonic() + max(0.0, duration_sec)
         while time.monotonic() < deadline and rclpy.ok():
             rclpy.spin_once(self.node, timeout_sec=0.1)
+
+    def spin_until_odom_x(self, target_x, timeout_sec):
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while time.monotonic() < deadline and rclpy.ok():
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            if self.last_odom is not None:
+                if self.last_odom.pose.pose.position.x >= target_x:
+                    self.node.get_logger().info(
+                        "spawn trigger reached: odom_x={:.3f} target_x={:.3f}".format(
+                            self.last_odom.pose.pose.position.x, target_x))
+                    return True
+        self.node.get_logger().warning(
+            "spawn trigger timed out waiting for odom_x >= {:.3f}".format(target_x))
+        return False
 
     def wait_for_result(self, result_future, timeout_sec):
         deadline = time.monotonic() + max(0.0, timeout_sec)

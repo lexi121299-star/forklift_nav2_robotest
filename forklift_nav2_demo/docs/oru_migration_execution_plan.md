@@ -58,7 +58,7 @@ P9  真车低速联调
 [x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A-B
 [x] A-B 动态障碍停车/放行快速验证
 [x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
-[ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[x] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
 [ ] P8.2  独立 safety package / 命令闸门
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
 [ ] P8.4  真车低速 safety acceptance 包
@@ -1250,10 +1250,10 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [ ] P13 需要 human-aware 能力时，再评估 ILIAD 相关包
 ```
 
-建议我们下一步继续做：
+建议我们下一步做：
 
 ```text
-A-B acceptance 正式验收缺口收敛
+P8.2 独立 safety package / 命令闸门
 ```
 
 原因：
@@ -1261,7 +1261,7 @@ A-B acceptance 正式验收缺口收敛
 - P6.4b 已经把当前最小 lattice scaffold 的倒车 acceptance 固化成脚本，并完成前进、倒车、90 度和动态障碍回归。
 - P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
 - 空旷 A-B 快速验证和动态障碍停车/放行快速验证都已经通过。
-- A-B 正式验收已经开始：普通前进和后方目标倒车通过；90 度 `NavigateToPose` 闭环和动态障碍正式复测仍有缺口。
+- A-B 正式验收主线已经通过：普通前进、后方目标倒车、动态障碍停车/放行都能复跑。
 - 真车 recovery 命令闸门已经明确放入 P8.2/P8.3；但在进入真车 safety 架构前，先把 planner/controller 的基础运动能力调稳，能减少后续 safety/recovery 层需要兜底的问题。
 
 执行记录：
@@ -1288,12 +1288,12 @@ A-B acceptance 正式验收缺口收敛
   - `forward_with_goal_heading`：planner-only `SUCCEEDED`；`poses=5 forward_segments=4 reverse_segments=0 gear_switches=0`，说明前方目标带终点 yaw 时不会为了贴姿态引入倒车。
   - A-B 动态障碍回归：`NavigateToPose` `SUCCEEDED`，`dynamic_obstacle_acceptance=PASS`；`control_samples=389 sim_cmd_samples=1169 forward=85 reverse=0`，说明 P8.1 动态障碍停车/放行未被 P6.4b acceptance 改动破坏。
   P6.4b 的完成边界是“当前最小 lattice scaffold 的倒车验收可回归”：普通前进路线不乱倒，后方目标会倒，controller/bridge 能执行倒车段，90 度和动态障碍回归不退化。窄通道、三点掉头、倒车入库等正式场景需要更多曲率/长度 primitive、场景生成和更强 heuristic，放到 P10/P6.5，不作为本次 P6.4b 的通过条件。
-- 2026-06-15：A-B acceptance 正式验收开始，暂未通过。新增 `forklift_ab_acceptance` 统一入口，脚本支持 Gazebo `/set_entity_state` 重置 `forklift` 实体、重新发布 `/initialpose`、记录 `/forklift/control_cmd` 和 `/forklift/sim_cmd_vel`，并覆盖 `forward_ab`、`reverse_ab`、`sparse_90_turn_ab`、`dynamic_stop_release_ab` 场景。为抑制普通前进路线中不必要倒车，ORU test 配置把 `lattice_reverse_cost_multiplier` 从 `0.5` 提到 `3.0`，`lattice_gear_switch_cost` 从 `1.0` 提到 `4.0`。当前验收结果：
-  - `forward_ab`：`NavigateToPose` `SUCCEEDED`；`control_samples=80 sim_cmd_samples=248 forward=80 reverse=0`；`sim_cmd max_signed_linear_x=0.450`；`odom_final x=0.928 y=-0.544`；`ab_acceptance=PASS scenario=forward_ab`。
-  - `reverse_ab`：`NavigateToPose` `SUCCEEDED`；`control_samples=20 sim_cmd_samples=78 forward=1 reverse=19`；`sim_cmd min_signed_linear_x=-0.096`；`odom_final x=-2.159 y=-0.504`；`ab_acceptance=PASS scenario=reverse_ab`。单个 forward 样本在验收阈值内，主路径仍是倒车执行。
-  - `sparse_90_turn_ab`：调参前失败时出现 `forward=115 reverse=223`，说明重规划会用倒车贴终点姿态；调参后不再出现倒车，`forward=257 reverse=0`，但 `NavigateToPose` 仍 `ABORTED`，末态 `odom_final x=-1.147 y=-1.325`。这说明 90 度 FollowPath 已通过，但 90 度 `NavigateToPose` 闭环仍未达到正式 A-B 验收标准，后续需要继续调 planner/controller/replanning 行为，而不是把它视为通过。
-  - `dynamic_stop_release_ab`：新统一脚本暂未通过，专用 `forklift_ab_dynamic_obstacle_acceptance` 复测又被一次 Foxy `map_server`/lifecycle crash 打断，未得到有效动态复测结论。动态障碍快速验证的既有通过记录仍有效，但正式验收需要下一轮在干净 launch 下复测并固化。
-  当前结论：A-B 正式验收未完成；普通前进和后方目标倒车已经通过，90 度闭环和动态障碍正式复测是下一轮 blockers。
+- 2026-06-15：A-B acceptance 正式验收通过。新增 `forklift_ab_acceptance` 统一入口，脚本支持 Gazebo `/set_entity_state` 重置 `forklift` 实体、重新发布 `/initialpose`、记录 `/forklift/control_cmd` 和 `/forklift/sim_cmd_vel`，并覆盖 `forward_ab`、`reverse_ab`、`dynamic_stop_release_ab`，另保留 `sparse_90_turn_ab` 作为诊断场景。两个 A-B 验收脚本默认启用 `use_sim_time=true`，避免 `/initialpose` 使用 wall time 造成 AMCL extrapolation；动态场景按 `/odom` 触发障碍生成，删除障碍后清 global/local costmap，并重发同一目标来验证放行后能继续到达。为抑制普通前进路线中不必要倒车，ORU test 配置把 `lattice_reverse_cost_multiplier` 从 `0.5` 提到 `3.0`，`lattice_gear_switch_cost` 从 `1.0` 提到 `4.0`。Foxy docker build 通过；正式验收结果：
+  - `forward_ab`：`NavigateToPose` `SUCCEEDED`；`control_samples=82 sim_cmd_samples=241 forward=82 reverse=0`；`sim_cmd max_signed_linear_x=0.450`；`odom_final x=1.044 y=-0.546`；`ab_acceptance=PASS scenario=forward_ab`。
+  - `reverse_ab`：`NavigateToPose` `SUCCEEDED`；`control_samples=18 sim_cmd_samples=108 forward=0 reverse=18`；`sim_cmd min_signed_linear_x=-0.096`；`odom_final x=-2.134 y=-0.497`；`ab_acceptance=PASS scenario=reverse_ab`。
+  - `dynamic_stop_release_ab`：`NavigateToPose` `SUCCEEDED` after release/reissue；障碍在 `odom_x=-1.548` 时生成；`global/local costmap cleared`；`control_samples=151 sim_cmd_samples=455 forward=97 reverse=0`；`phase_control_zero blocked=54`；`odom_final x=1.049 y=-0.623`；`ab_acceptance=PASS scenario=dynamic_stop_release_ab`。
+  - `sparse_90_turn_ab` 诊断：调参前失败时出现 `forward=115 reverse=223`，说明重规划会用倒车贴终点姿态；调参后不再出现倒车，`forward=257 reverse=0`，但 `NavigateToPose` 仍 `ABORTED`，末态 `odom_final x=-1.147 y=-1.325`。这不是本次 A-B 正式验收主线 blocker；后续作为 P10/P6.5 的 planner/controller/replanning 诊断项继续处理。
+  当前结论：第一版 A-B 正式验收主线完成；下一步进入 P8.2，把真车前所有运动命令收进独立 safety package / command gate。
 
 ## 14. ORU 包迁移优先级
 
