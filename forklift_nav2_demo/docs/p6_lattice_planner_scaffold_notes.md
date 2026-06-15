@@ -834,3 +834,146 @@ sim_cmd_samples=1443 max_linear_x=0.450 min_signed_linear_x=0.000 max_signed_lin
 - controller 不会把倒车段当成前进路径硬追。
 - sim bridge 能收到 reverse control 并输出负速度。
 - 普通 forward path 在 reverse 全局开启后仍保持 forward-only 执行。
+
+## 17. P6.4b 倒车 Acceptance 调优计划
+
+P6.4b 的目标不是马上做完整 ORU motion planner，而是把“能倒车”推进到“可验收、可回归、不会乱倒车”。
+
+### 17.1 先补固定场景
+
+第一步先扩展 acceptance，而不是凭感觉调参数。
+
+推荐场景：
+
+```text
+reverse_straight
+  目标在车后方。
+  期望：planner 输出 reverse segment，controller/bridge 观测到负速度。
+
+forward_straight
+  目标在车前方。
+  期望：planner/controller 全程 forward，reverse_samples=0。
+
+forward_with_goal_heading
+  目标在车前方，但终点 yaw 和行驶方向不完全一致。
+  期望：不会为了贴终点姿态在末端突然倒一下。
+
+sparse_90_turn
+  已有回归场景。
+  期望：reverse 全局开启后仍保持 forward-only。
+
+three_point_turn / narrow_turn
+  空间不够直接掉头。
+  期望：允许少量明确换向，而不是频繁 forward/reverse 抖动。
+
+blocked_forward_reverse_escape
+  前方被挡，后方可退。
+  期望：planner 可以选择短倒车再前进；如果空间不足，应失败或等待，不应横移/硬撞。
+```
+
+每个场景要打印或从日志中提取：
+
+```text
+NavigateToPose / FollowPath status
+planner forward segment count
+planner reverse segment count
+planner gear_switches
+controller forward samples
+controller reverse samples
+sim_cmd_vel min/max signed linear.x
+progress checker 是否触发 Failed to make progress
+path heading 是否连续
+```
+
+### 17.2 先防止普通路线乱倒车
+
+倒车是需要的，但普通前进路线不能随便倒车。
+
+优先验收：
+
+```text
+forward_straight:
+  reverse_segments=0
+  reverse_samples=0
+
+sparse_90_turn:
+  reverse_segments=0
+  reverse_samples=0
+
+A-B simple / dynamic obstacle:
+  正常前进路线不出现 reverse。
+```
+
+重点检查：
+
+```text
+lattice_reverse_cost_multiplier
+lattice_gear_switch_cost
+goal-heading heuristic / goal yaw tolerance
+respect_reverse_path_orientation
+controller reverse preview gating
+```
+
+如果出现“前进路线末端突然倒一下”，优先判断是：
+
+- planner 为了终点 yaw 选择了 reverse primitive。
+- path yaw / motion tangent 被误判成 reverse-intent。
+- controller preview window 在终点附近误开了负速度候选。
+- goal checker / yaw tolerance 过紧，让 controller 试图用倒车贴姿态。
+
+### 17.3 再稳定倒车段执行
+
+`reverse_straight` 已经证明链路能跑，但 P6.4b 要看稳定性：
+
+```text
+倒车速度是否低速可控
+倒车 preview window 是否抖动
+倒车段 heading 是否连续
+forward/reverse 切换点是否太密
+controller 是否在切换点犹豫或触发 progress checker
+```
+
+可调项：
+
+```text
+max_reverse_velocity
+lattice_reverse_cost_multiplier
+lattice_gear_switch_cost
+primitive length / arc radius
+reverse primitive heading_delta
+preview window 长度
+progress checker 参数
+```
+
+### 17.4 最后优化换向质量
+
+不希望出现：
+
+```text
+forward 0.2m -> reverse 0.1m -> forward 0.2m -> reverse 0.1m
+```
+
+期望是少量、明确的换向：
+
+```text
+forward arc -> reverse arc -> forward arc
+```
+
+如果换向太碎，优先考虑：
+
+- 提高 `lattice_gear_switch_cost`。
+- 提高 reverse cost，保留倒车但让它只在必要时出现。
+- 引入 minimum segment length 或 suppress tiny gear changes。
+- 加更多长度 primitive 前，先确认现有 primitive 的 cost/heuristic 没有鼓励抖动。
+
+### 17.5 P6.4b 验收表
+
+```text
+[ ] forward route does not reverse
+[ ] rear goal uses reverse
+[ ] reverse segment reaches controller/bridge
+[ ] three-point turn has limited gear switches
+[ ] narrow scenario succeeds or fails safely
+[ ] sparse_90_turn 回归不退化
+[ ] A-B dynamic obstacle 回归不退化
+```

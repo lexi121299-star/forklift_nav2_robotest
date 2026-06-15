@@ -616,6 +616,82 @@ P6.4a 不要求：
 
 P6.4a 完成后，优先进入 P8.1 最小 safety gate。P6.4b 的倒车 acceptance 调优可以在 P8.1 后继续。
 
+P6.4b 不从大改算法开始，而是先把倒车能力场景化验收，再根据失败现象调 planner/controller 参数和少量逻辑。
+
+P6.4b 推荐 acceptance 场景：
+
+```text
+reverse_straight
+  目标在车后方，验证 planner 输出 reverse，controller 输出负速度。
+
+forward_straight
+  目标在车前方，验证普通前进路线不乱倒车。
+
+forward_with_goal_heading
+  前方目标但终点姿态不同，验证不会为了贴终点姿态突然倒一下。
+
+three_point_turn / narrow_turn
+  空间不够直接掉头时，允许 forward + reverse 换向。
+
+blocked_forward_reverse_escape
+  前方被挡但后方可退，验证 planner 可以选择短倒车再前进。
+```
+
+每个场景至少记录：
+
+```text
+planner forward/reverse segment count
+planner gear_switches
+controller forward/reverse samples
+/forklift/sim_cmd_vel 正负速度样本
+action status
+是否触发 Failed to make progress
+路径是否出现横移、急转、不连续 heading
+```
+
+调优顺序：
+
+1. 先补 acceptance 脚本和固定场景，不靠手工看 RViz 判断。
+2. 先保证普通前进路线不随便倒车：
+   - `forward_straight`、`sparse_90_turn`、A-B 普通路线应保持 `reverse_segments=0`、`reverse_samples=0`。
+   - 只有目标在后方、空间受限或明确需要换向时，才允许 reverse。
+3. 再稳定倒车段执行：
+   - 倒车速度低速可控。
+   - preview window 不频繁跳变。
+   - reverse path heading 连续。
+   - `/forklift/control_cmd` 和 `/forklift/sim_cmd_vel` 方向一致。
+4. 再优化换向质量：
+   - 避免短距离内 `forward/reverse/forward/reverse` 抖动。
+   - 优先形成少量、明确的 `forward arc -> reverse arc -> forward arc`。
+   - 必要时提高 `lattice_gear_switch_cost` 或加入 minimum segment length / suppress tiny gear changes。
+
+优先检查和可调项：
+
+```text
+lattice_reverse_enabled
+lattice_reverse_cost_multiplier
+lattice_gear_switch_cost
+lattice_goal_heading_weight / goal-heading heuristic
+lattice_goal_tolerance / yaw tolerance
+primitive length / arc radius
+allow_reverse
+max_reverse_velocity
+respect_reverse_path_orientation
+preview window 长度和 progress checker 参数
+```
+
+P6.4b 验收表：
+
+```text
+[ ] forward route does not reverse
+[ ] rear goal uses reverse
+[ ] reverse segment reaches controller/bridge
+[ ] three-point turn has limited gear switches
+[ ] narrow scenario succeeds or fails safely
+[ ] sparse_90_turn 回归不退化
+[ ] A-B dynamic obstacle 回归不退化
+```
+
 ## 9. P7: 建 forklift_task_manager
 
 当前优先级：
