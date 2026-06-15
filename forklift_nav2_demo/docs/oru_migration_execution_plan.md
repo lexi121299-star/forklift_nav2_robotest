@@ -55,8 +55,13 @@ P9  真车低速联调
 [x] P6.3  reverse primitives + direction metadata
 [x] P6.4a 最小倒车执行验证：controller/vehicle_interface 能执行倒车段
 [x] P8.1  最小 safety gate：动态障碍停车/限速、急停、watchdog
+[x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A-B
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
-[ ] A-B acceptance：NavigateToPose + 障碍停车/放行
+[ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[ ] P8.2  独立 safety package / 命令闸门
+[ ] P8.3  动态障碍等待、重新规划、简单绕行
+[ ] P8.4  真车低速 safety acceptance 包
+[ ] P2.3  真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog
 [ ] P7.1  task_manager 最小任务入口
 ```
 
@@ -66,6 +71,7 @@ P9  真车低速联调
 - 倒车是叉车运动能力的一部分，应该先在 planner/controller 闭环里打通。
 - 动态障碍停车/限速是上车安全底线，应在最小倒车执行闭环后尽早完成，不等所有倒车场景调优结束。
 - `forklift_task_manager` 负责站点、路线、任务暂停/恢复/取消和调度接口，可以等 A-B + safety gate 稳定后再做。
+- `iliad/` 里的 human-aware navigation、HRSI、安全指标和 actor 仿真不属于当前 A-B + safety 主线，暂不作为 ORU 核心移植前置条件。
 
 原则：
 
@@ -614,7 +620,7 @@ P6.4a 完成后，优先进入 P8.1 最小 safety gate。P6.4b 的倒车 accepta
 当前优先级：
 
 ```text
-P7 暂缓，放到 P6.4a、P8.1 和 A-B acceptance 之后。
+P7 暂缓，放到 P6.4a、P8.1、A-B acceptance 和 P8.3 之后。
 ```
 
 原因：
@@ -622,6 +628,7 @@ P7 暂缓，放到 P6.4a、P8.1 和 A-B acceptance 之后。
 - 简单 A 到 B 可以先直接用 Nav2 `NavigateToPose` / `FollowPath` 验收，不需要 task_manager。
 - 任务层不会直接提升车辆运动能力，也不会替代动态障碍安全停车。
 - 等 planner/controller/safety 闭环稳定后，再做 task_manager 的暂停、恢复、重试和调度接口更稳。
+- P7.1 进入前，至少要证明简单 A-B 能跑、动态障碍能停/放行、持续阻挡能等待或重新规划；否则 task_manager 只会把底层不稳定性包装成任务失败。
 
 目标：
 
@@ -745,7 +752,285 @@ local/global costmap obstacle observation
 - 障碍物离开后，不需要重启 Nav2 即可继续执行或重新下发目标。
 - 地图边缘/掉落风险区域不会允许继续行驶。
 
+P8.2 最低标准：
+
+- 把 controller 内的最小 safety gate 抽象成独立 `forklift_safety` package 或明确的命令闸门节点。
+- controller、task_manager、手动控制等所有运动命令都必须经过 safety gate。
+- 急停输入能锁住运动命令，解除后需要明确状态恢复。
+- command timeout、vehicle fault、localization lost、costmap 数据异常时停车。
+- 继续保留 controller-side 限速/停车作为可回退保护，不把安全完全交给 planner。
+
+P8.3 最低标准：
+
+- 动态障碍横穿或短时挡路时，车辆停车等待。
+- 障碍离开后，Nav2 不需要重启即可继续执行，或由上层重新触发当前目标。
+- 障碍持续挡住原路径时，触发重新规划。
+- costmap 中存在足够通道时允许简单绕行；通道不足时不硬绕，保持等待或任务失败。
+- 这一阶段不要求高级人群预测，也不要求复杂动态博弈避障。
+
+P8.4 最低标准：
+
+- 速度相关保护区：速度越快，前向/后向保护距离越大。
+- 前进和倒车使用不同保护区，倒车时重点保护车尾与叉臂相关外形。
+- footprint 覆盖车体、叉臂和必要安全余量。
+- keepout 区、地图边缘、掉落风险区域不允许继续行驶。
+- safety 日志和诊断能说明停车、限速、等待、失败的原因，便于真车低速复盘。
+
+P8.1 到 P7.1 之间的推荐顺序：
+
+```text
+P8.1 已完成
+-> A-B acceptance 快速验证已完成
+-> P6.4b 倒车 acceptance 调优
+-> A-B acceptance 正式验收
+-> P8.2 独立 safety gate
+-> P8.3 动态障碍等待/重规划/简单绕行
+-> P8.4 真车低速 safety acceptance
+-> P7.1 task_manager 最小任务入口
+```
+
+快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通，但还没有覆盖动态障碍停车/放行。下一步有两个合理方向：先做 P6.4b，把倒车/换向 acceptance 调稳；或者先做 A-B 正式验收的动态障碍停车/放行子项。如果目标是尽快上车低速 A-B，优先补动态障碍停车/放行；如果目标是让 planner 运动能力更稳，优先 P6.4b。
+
 ## 11. P9: 真车低速联调
+
+第一版上真车前的门槛要分清三层：
+
+```text
+台架/离地硬件联调:
+  可以在 P2.3 完成后做，不启动 Nav2。
+
+地面低速手动控制:
+  P2.3 + 急停 + watchdog + /odom + TF 稳定后做。
+
+第一版 Nav2 自主 A-B:
+  必须完成到 P8.4；P7.1、P10+ 和 ILIAD 都不是前置条件。
+```
+
+第一版 Nav2 自主 A-B 上真车前必须完成：
+
+- P2.3 真车 `forklift_vehicle_interface` 实际 I/O：不再只是 dry-run 日志，必须能向底盘发送控制，并发布真实反馈。
+- A-B acceptance 快速验证和正式验收：普通路线、倒车/换向路线、障碍停车/放行都在仿真中通过。
+- P6.4b 倒车 acceptance：普通前进路线不乱倒，倒车/换向不抖，低速路径稳定。
+- P8.2 独立 safety gate 或明确命令闸门：所有运动命令经过安全层。
+- P8.3 动态障碍等待、重新规划、简单绕行：能停、能等、能放行，通道不足时不硬绕。
+- P8.4 真车低速 safety acceptance：速度相关保护区、前进/倒车不同保护区、keepout、地图边缘、诊断日志。
+- 真实地图、真实传感器、真实 vehicle interface 参数都已经替换仿真默认值。
+
+P7.1 不作为第一版上车前置条件。第一版可以直接用 Nav2 `NavigateToPose`、`FollowPath` 和 RViz/CLI 下发目标；等底层跑稳后，再加 `forklift_task_manager` 统一站点、路线、暂停、恢复、取消和调度接口。
+
+第一版上真车前必须通过的仿真测试：
+
+- `forklift_nav2_plugins` 单元测试全部通过，包括 planner、controller、trajectory、preview window、vehicle model、safety gate。
+- headless Nav2/Gazebo readiness：`/clock`、`/odom`、`odom -> base_link`、2D Pose Estimate 后 `map -> odom`、Nav2 lifecycle active。
+- `ComputePathToPose`：普通前进目标、90 度目标、后方倒车目标都能规划成功。
+- `FollowPath`：短直线、大圆弧、稀疏 90 度、简单倒车 path 都能低速执行成功。
+- `NavigateToPose`：空旷 A-B、含 90 度转弯 A-B、含一次倒车/换向 A-B 都能成功或给出可解释失败。
+- 动态障碍测试：障碍进入保护区停车/限速，障碍离开放行，持续阻挡触发等待或重新规划。
+- safety 回归：急停 service/输入触发停车，命令超时停车，local costmap 无障碍时不误停。
+- 传感器异常测试：`/scan` 丢失、`/odom` 丢失、TF 超时、costmap stale 时进入停车或任务失败状态。
+- 地图边界/keepout 测试：不会规划到地图外、未知区、掉边风险区或禁止通行区。
+
+第一版真车实际会用到的本项目 package：
+
+```text
+forklift_msgs
+  共享控制、车辆状态、故障、IO、急停和模式 service。
+
+forklift_vehicle_interface
+  真车底盘接口。第一版上车前必须把 curtis_vehicle_interface 从 dry-run
+  补成真实 CAN/串口/TCP I/O，并发布 /odom、TF、vehicle_state、fault_state、io_state。
+
+forklift_nav2_plugins
+  OruGlobalPlanner、ForkliftMpcController、trajectory preprocessing、
+  controller-side safety gate。第一版上车必须使用。
+
+forklift_nav2_demo
+  当前仍承载 launch、Nav2 参数、地图、URDF、仿真入口。第一版可以继续用，
+  但真车应新增 real bringup launch，不能启动 Gazebo。
+
+forklift_safety
+  P8.2 后新增或等价实现。第一版 Nav2 自主 A-B 前应作为安全命令闸门存在。
+```
+
+第一版上车前需要改动的 package：
+
+- `forklift_vehicle_interface`：最大改动点。补真实 CAN/串口/TCP 传输、反馈解析、`/odom`、TF、`vehicle_state`、`fault_state`、`io_state`、急停、模式切换、watchdog。
+- `forklift_nav2_demo`：新增 real launch 和 real 参数文件，真车启动不带 Gazebo，`use_sim_time=false`，地图路径、传感器 topic、速度限制、safety 参数使用真车 profile。
+- `forklift_nav2_plugins`：原则上保持算法 plugin，不写底盘协议；只根据 A-B/P8 acceptance 调 planner/controller/safety 参数，必要时补真实场景暴露的碰撞、倒车、限速逻辑。
+- `forklift_safety`：P8.2 新增或等价实现，作为真车运动命令闸门。
+- `forklift_msgs`：尽量保持稳定；只有真实底盘反馈或 IO 状态字段不够时才扩展消息。
+
+第一版上车前不要改：
+
+- 不改 `/opt/ros/*` 里的 Nav2 源码。
+- 不把底盘协议写进 `forklift_nav2_plugins`。
+- 不把 `navigation_oru-release` 或 `iliad` 直接接到真车主启动链路。
+
+第一版真车不需要启动或迁移：
+
+```text
+navigation_oru-release/*
+iliad/*
+forklift_sim
+forklift_warehouse_sim
+orunav_vehicle_execution
+orunav_coordinator_fake
+```
+
+`forklift_sim` 和 `forklift_warehouse_sim` 只是早期轻量仿真/开发包，不作为第一版真车或正式 Nav2 acceptance 的主入口。
+
+真车建议启动链路：
+
+```text
+1. 传感器 driver
+   发布 /scan，必要时发布 rear scan 或 360 度 scan。
+
+2. forklift_vehicle_interface
+   订阅 /forklift/control_cmd。
+   发布 /odom、odom -> base_link TF、/forklift/vehicle_state、
+   /forklift/fault_state、/forklift/io_state。
+   提供 /forklift/set_emergency_stop、/forklift/set_control_mode。
+
+3. robot_state_publisher 或 static TF
+   发布 base_link -> base_footprint、base_link -> base_scan、
+   以及其他传感器安装位姿。
+
+4. Nav2 bringup
+   map_server、AMCL、planner_server、controller_server、bt_navigator、
+   local/global costmap、recoveries。
+   参数使用 real profile，use_sim_time=false。
+
+5. forklift_safety
+   P8.2 后作为所有运动命令的最后安全闸门。
+
+6. RViz
+   只作为调试和初始位姿/目标下发工具，不作为安全链路。
+```
+
+当前 `forklift_nav2_demo/launch/forklift_navigation.launch.py` 会启动 Gazebo，不适合真车直接使用。上车前应新增：
+
+```text
+forklift_nav2_demo/launch/forklift_real_navigation.launch.py
+```
+
+或后续拆成：
+
+```text
+forklift_bringup/launch/real_navigation.launch.py
+forklift_description
+```
+
+真车 real launch 最低要求：
+
+- 不 include `forklift_gazebo.launch.py`。
+- `use_sim_time=false`。
+- 启动或接入真实 `forklift_vehicle_interface`。
+- 启动 robot_state_publisher/static TF。
+- 启动 Nav2 bringup，并加载真实地图和 real 参数文件。
+- 可选启动 RViz，但 RViz 不参与安全闭环。
+
+仿真主入口：
+
+```bash
+ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
+  map:=/home/pl/robotest/forklift_factory_big_map_clean.yaml \
+  nav2_params_file:=/home/pl/robotest/forklift_nav2_demo/config/forklift_nav2_oru_test.yaml \
+  use_sim_time:=true \
+  use_rviz:=false \
+  gazebo_gui:=false \
+  use_sim_command_bridge:=true
+```
+
+仿真会用到：
+
+- `forklift_nav2_demo`：Gazebo world、URDF、spawn、Nav2 launch、wait_for_sim_ready。
+- `forklift_vehicle_interface`：`sim_command_bridge`，把 `/forklift/control_cmd` 转成 Gazebo `/forklift/sim_cmd_vel`。
+- `forklift_nav2_plugins`：planner/controller/safety gate。
+- `forklift_msgs`：共享控制和状态消息。
+- Nav2、Gazebo、robot_state_publisher、AMCL、map_server、costmap。
+
+地图格式要求：
+
+- 第一版继续使用 Nav2 标准 2D occupancy grid 地图。
+- 文件格式是 `map.yaml + .pgm`，例如：
+
+```yaml
+image: forklift_factory_big_map_clean.pgm
+mode: trinary
+resolution: 0.05
+origin: [-12.4, -9.02, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
+```
+
+- `map.yaml` 描述图片、分辨率、原点和阈值；`.pgm` 保存占据栅格。
+- 地图坐标系是 `map`，AMCL 发布 `map -> odom`。
+- 地图只表达静态环境：墙、货架、固定禁行区域。动态障碍不要画进静态地图。
+- keepout、限速区、掉边风险区后续用 costmap filter 或 safety layer 表达，不直接涂进普通 occupancy map。
+- 上真车前需要用真实场地重新建图或校准当前地图，确认分辨率、原点、方向和 RViz 中实际位置一致。
+
+第一版必须输入的数据和话题：
+
+```text
+/scan
+  sensor_msgs/LaserScan
+  2D 激光雷达输入，当前 Nav2 local/global costmap 和 AMCL 都使用 scan。
+  frame 建议为 base_scan，并通过 TF 固定到 base_link。
+
+/odom
+  nav_msgs/Odometry
+  来自 forklift_vehicle_interface 或可靠里程计融合。
+  必须和 odom -> base_link TF 一致。
+
+odom -> base_link TF
+  真车里程计坐标变换。方向、速度符号、时间戳必须稳定。
+
+base_link -> base_scan TF
+  激光安装外参。必须和真实安装位置一致。
+
+base_link / base_footprint
+  当前 AMCL 配置使用 base_footprint，costmap 使用 base_link。
+  两者需要固定 TF 或统一配置，不能缺一条。
+
+/forklift/control_cmd
+  ForkliftControlCommand，controller 或 safety gate 输出给 vehicle_interface。
+
+/forklift/vehicle_state
+/forklift/fault_state
+/forklift/io_state
+  真车反馈、故障、IO、安全输入状态。
+
+/forklift/set_emergency_stop
+/forklift/set_control_mode
+  急停和控制模式 service。
+
+/initialpose
+  geometry_msgs/PoseWithCovarianceStamped，AMCL 初始位姿。
+
+NavigateToPose / FollowPath action
+  第一版 A-B 和固定路径测试入口。
+```
+
+第一版传感器最低要求：
+
+- 2D 激光雷达，能覆盖前进方向的局部避障区域，发布 `sensor_msgs/LaserScan`。
+- 如果真车第一版要测试倒车，必须有后向雷达、360 度雷达，或能覆盖车尾/叉臂风险区的等价传感器；否则真车倒车必须限速并限制场景。
+- 轮速/编码器/底盘反馈，能生成稳定 `/odom` 和 `odom -> base_link`。
+- 转向角或等价运动状态反馈。如果底盘没有真实转向角，也要在 `ForkliftVehicleState` 中提供 controller/safety 可解释的状态。
+- 急停、自动/手动模式、停车制动、故障码、通信状态输入。
+- IMU 不是第一版硬要求，但如果 odom yaw 漂移明显，应接入 IMU 或 robot_localization。
+- 3D 点云/相机不是第一版硬要求；如果后续使用 PointCloud2，需要同步修改 Nav2 costmap observation source。
+
+上车前需要你确认或提供的输入：
+
+- 真车底盘通信协议：CAN ID、字节定义、比例系数、方向/刹车/使能语义、反馈帧、故障帧。
+- 车辆几何：车体长宽、叉臂长度、base_link 位置、后轴/旋转中心偏移、最小转弯/原地转能力。
+- 速度和加速度限制：前进、倒车、转向角速度、最大角速度、急停/减速时间。
+- 传感器安装位姿：雷达相对 base_link 的 x/y/z/yaw，是否有后向或 360 度覆盖。
+- 地图：真实场地 `map.yaml + pgm`，或允许重新 SLAM 建图。
+- 安全区域：禁行区、掉边区域、限速区、测试区域边界。
+- 上车测试流程：谁看急停、最大速度、测试路线、允许倒车的区域、失败时如何人工接管。
 
 顺序：
 
@@ -823,6 +1108,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P1.2 定义 ForkliftControlCommand / ForkliftVehicleState
 [x] P2.1 创建 forklift_vehicle_interface
 [x] P2.2 写仿真 bridge: ForkliftControlCommand -> cmd_vel
+[ ] P2.3 真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog
 [x] P3.1 写 forklift_vehicle_model
 [x] P4.1 把 ORU State / Control 概念移入 ForkliftMpcController
 [x] P4.2 把 Path 转成内部 Trajectory
@@ -835,22 +1121,31 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P6.3 reverse primitives + direction metadata：倒车 primitive、方向语义、reverse/gear switch cost
 [x] P6.4a 最小倒车执行验证：确认 planner 输出的倒车段能被 controller/vehicle interface 执行
 [x] P8.1 最小 safety gate：动态障碍停车/限速、急停、watchdog
+[x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A 到 B
 [ ] P6.4b 倒车 acceptance 调优：窄空间、换向质量、倒车路径稳定性
-[ ] A-B acceptance：NavigateToPose 简单 A 到 B + 障碍停车/放行
+[ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[ ] P8.2 独立 safety package / 命令闸门
+[ ] P8.3 动态障碍等待、重新规划、简单绕行
+[ ] P8.4 真车低速 safety acceptance 包
 [ ] P7.1 task_manager 最小任务入口
+[ ] P10 motion planner lookup/primitives 加强
+[ ] P11 path smoother + constraint_extract
+[ ] P12 评估是否上完整 ORU QP-MPC
+[ ] P13 需要 human-aware 能力时，再评估 ILIAD 相关包
 ```
 
 建议我们下一步先做：
 
 ```text
-A-B acceptance
+A-B 动态障碍停车/放行快速验证
 ```
 
 原因：
 
 - P6.4a 已经证明 planner 可以输出 reverse 段，controller 会把 reverse-intent path 当作倒车追踪，sim bridge 能收到 reverse control 并输出负速度。
 - P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
-- 当前目标是简单 A-B 先能跑，并且障碍进入保护区至少能停车/限速；因此下一步建议做 A-B acceptance，再继续 P6.4b 倒车调优或 P8.2 独立 safety package。
+- 空旷 A-B 快速验证已经通过；还缺“障碍进入保护区停车/限速，障碍离开放行”的快速闭环。
+- 如果动态障碍快速验证暴露 safety gate 架构边界，再进入 P8.2 独立 safety package；如果只是倒车/换向路径质量问题，再进入 P6.4b。
 
 执行记录：
 
@@ -867,6 +1162,7 @@ A-B acceptance
 - 2026-06-12：P6.3 reverse primitives + direction metadata 通过。`OruGlobalPlanner` 的 lattice transition 现在携带 `direction`、`primitive_kind`、`length`、`heading_delta`；`lattice_reverse_enabled=true` 时会生成 `reverse straight / reverse left arc / reverse right arc`，搜索 key 在 `x/y/theta_index` 外区分 arrival direction，避免 gear-switch cost 错误合并不同到达方向；搜索会保留到达每个 state 的 primitive 元数据并记录 forward/reverse 段和 gear switch 数量；新增 `lattice_reverse_cost_multiplier` 和 `lattice_gear_switch_cost`。运行配置仍保持 `lattice_reverse_enabled: false`，把真实倒车执行留给 P6.4a。Foxy docker 构建通过；`forklift_nav2_plugins` 49 个 gtest 全部通过，其中 `test_oru_global_planner` 扩展到 8 个用例，覆盖 reverse primitive gating/metadata 和 reverse/gear-switch cost。
 - 2026-06-12：P6.4a 最小倒车执行验证通过。`ForkliftMpcController` 新增 `respect_reverse_path_orientation`，在 path pose yaw 与运动切线相反时保留车体朝向并标记 `reverse_motion`；controller 只在当前 preview window 含 reverse-intent 点时允许负速度候选，避免普通 forward path 末端被倒车微调扰乱。ORU test 配置低速打开 `allow_reverse=true`、`max_reverse_velocity=0.15`、`lattice_reverse_enabled=true`。Foxy docker 构建通过；`forklift_nav2_plugins` 51 个 gtest 全部通过；headless `ComputePathToPose` 后方目标 smoke 返回 `SUCCEEDED`，planner 日志显示 `forward=0 reverse=1`；`reverse_straight` FollowPath 返回 `SUCCEEDED`，观测到 `control_direction_samples forward=0 reverse=10` 和 `/forklift/sim_cmd_vel.linear.x=-0.150`；`sparse_90_turn` 回归返回 `SUCCEEDED`，观测到 `forward=710 reverse=0`，说明 forward path 不再启用倒车候选。
 - 2026-06-15：P8.1 最小 safety gate 通过。`ForkliftMpcController` 增加 controller-side safety gate，沿当前 forward/reverse 运动方向在 local costmap 上采样 footprint；障碍进入 `safety_stop_distance` 时直接 brake，进入 `safety_slowdown_distance` 时压低当前方向速度上限；`safety_emergency_stop_active` 可运行时置 true 触发 controller 停车。ORU test 配置打开 `safety_gate_enabled=true`，并保留 `sim_command_bridge` 既有 `/forklift/set_emergency_stop` 和 `command_timeout_sec` watchdog 作为 vehicle_interface 侧闸门。Foxy docker 构建通过；`forklift_nav2_plugins` 59 个 gtest 全部通过，其中新增 `test_forklift_safety_gate` 5 个用例；headless `sparse_90_turn` safety gate 回归返回 `SUCCEEDED`，日志确认 `safety_gate=true`，观测到 `control_direction_samples forward=560 reverse=0` 和 `max_linear_x=0.450`，说明无障碍时不会误停。详见 `forklift_nav2_demo/docs/p8_safety_gate_notes.md`。
+- 2026-06-15：A-B acceptance 快速验证通过。Foxy docker headless + Gazebo + Nav2 + sim bridge + P8.1 safety gate 打开，从 `(-2.0, -0.5)` NavigateToPose 到 `(-0.9, -0.5)`，action 返回 `SUCCEEDED`；观测到 `feedback_count=397`、`control_samples=31`、`max_velocity_mps=0.395`、`control_direction_samples forward=31 reverse=0`、`sim_cmd_samples=100`、`max_linear_x=0.395`、末态 odom 约 `x=-1.066 y=-0.571`。planner 多次重规划均输出 forward-only lattice path，例如 `forward=5 reverse=0`、`forward=3 reverse=0`、`forward=1 reverse=0`；日志确认 `safety_gate=true safety_stop=0.550 safety_slowdown=1.250`。本次只覆盖空旷简单 A-B，不覆盖动态障碍停车/放行。
 
 ## 14. ORU 包迁移优先级
 
@@ -895,3 +1191,57 @@ orunav_pallet_detection_sdf
 - `orunav_vehicle_execution` 是 ORU 自己的任务执行框架，和我们未来的 `forklift_task_manager + Nav2 actions` 职责重叠。
 - `orunav_mpc` 的控制数学最有价值。
 - `orunav_motion_planner` 的 primitive/lattice 思路很有价值，但要等 controller 和 vehicle interface 稳定后再做。
+
+P8.4 / P7.1 之后，ORU 核心算法还剩这些主要部分：
+
+```text
+1. 完整 ORU QP-MPC
+2. 更完整的 ORU motion planner / primitives / lookup tables
+3. trajectory processor / path smoother
+4. constraint_extract / 几何约束提取
+5. ORU debug / rviz / execution 框架只参考，不作为主线迁移
+```
+
+完整 ORU QP-MPC：
+
+- 当前 `ForkliftMpcController` 已有 ORU 的 State / Control 概念、trajectory preview、path preprocessing 和 sampled predictive controller scaffold。
+- 当前还不是完整 ORU `qpProblem / qpConstraints / qpOASES`。
+- 是否迁移完整 QP-MPC，取决于 sampled controller 在真车低速场景是否足够稳定。
+- 如果低速 A-B、倒车、换向、末端停车已经满足需求，可以继续保留 sampled controller。
+- 如果速度提高、路径更复杂或末端控制不够顺，再迁移 ORU QP-MPC。
+
+更完整的 ORU motion planner：
+
+- 当前 P6 已经实现 ORU-inspired lattice：`x/y/theta_index`、forward/reverse primitives、gear switch cost、footprint collision。
+- 还不是完整 ORU motion planner。
+- 后续可补 ORU primitive 文件加载、lookup table、multi-curvature / multi-length primitives、更强 heuristic、lookup/cache 加速。
+- 重点验收窄通道、倒车、换向次数、贴边距离和路径稳定性。
+
+trajectory processor / path smoother：
+
+- 当前 controller 内部已有轻量 path preprocessing。
+- 后续如果要靠近 ORU，应把路径转轨迹、方向语义、曲率、速度约束和平滑从 controller 内部逐步抽出来。
+- `orunav_path_smoother` 的约束优化思路有价值，但 ACADO 依赖成本高，不作为第一步硬移植目标。
+
+constraint_extract / 几何约束：
+
+- 可用于从 costmap 提取局部可行 corridor。
+- 可用于更严格的 footprint、叉臂、车尾碰撞检查。
+- 可给 smoother 或 MPC 提供边界约束，让路径不只是“不撞”，而是保持合理障碍余量。
+
+`iliad/` 当前处理策略：
+
+- `iliad/` 暂时不移植。
+- `iliad_human_aware_navigation`、`iliad_hrsi`、`iliad_safety_metrics` 更偏 human-aware navigation、HRSI、人车交互和安全指标。
+- `moving_actor_gazebo`、`gazebo_plugin_actor_collision`、`iliad_base_simulation` 更偏 ROS1/Gazebo actor 仿真环境。
+- `iliad_goal_manager`、`iliad_init_pose_manager` 和未来 `forklift_task_manager + Nav2 actions` 有部分职责重叠，不作为当前主线入口。
+- 只有当后续明确要做人群附近通行策略、人车交互安全指标或动态人行为预测时，再从 `iliad/` 里选模块参考或局部迁移。
+
+P8.4 / P7.1 之后的建议 ORU 后续顺序：
+
+```text
+P10  motion planner lookup/primitives 加强
+P11  path smoother + constraint_extract
+P12  评估是否上完整 ORU QP-MPC
+P13  需要 human-aware 能力时，再评估 ILIAD 相关包
+```
