@@ -59,6 +59,7 @@ P9  真车低速联调
 [x] A-B 动态障碍停车/放行快速验证
 [x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
 [x] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[ ] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进
 [ ] P8.2  独立 safety package / 命令闸门
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
 [ ] P8.4  真车低速 safety acceptance 包
@@ -70,6 +71,7 @@ P9  真车低速联调
 
 - 当前目标是先让车能稳定从简单 A 到 B，并且遇到动态障碍物能安全停下。
 - 倒车是叉车运动能力的一部分，应该先在 planner/controller 闭环里打通。
+- 第一版真车点位有大量“原地/近原地 90 度后再走”的动作；真车已确认是双驱差速，90 度绕后轴旋转，所以进入独立真车 safety gate 前需要先补最小 rear-axle pivot primitive，而不是回到 Ackermann 或靠普通 arc 硬凑。
 - 动态障碍停车/限速是上车安全底线，应在最小倒车执行闭环后尽早完成，不等所有倒车场景调优结束。
 - `forklift_task_manager` 负责站点、路线、任务暂停/恢复/取消和调度接口，可以等 A-B + safety gate 稳定后再做。
 - `iliad/` 里的 human-aware navigation、HRSI、安全指标和 actor 仿真不属于当前 A-B + safety 主线，暂不作为 ORU 核心移植前置条件。
@@ -568,8 +570,9 @@ P6 不一次性做完整 ORU planner，按分版推进：
 [x] 第二版：cost / diagnostics / goal approach tightening
 [x] 第三版：reverse primitives + direction metadata
 [x] 第四版 A：最小倒车执行验证
-[ ] P8.1：最小 safety gate
-[ ] 第四版 B：倒车 acceptance 调优
+[x] P8.1：最小 safety gate
+[x] 第四版 B：倒车 acceptance 调优
+[ ] P6.5a：rear-axle pivot primitive + stop-pivot-go acceptance
 [ ] 第五版：multi-curvature / multi-length primitives + better heuristic + lookup/cache
 [ ] 第六版：narrow aisle / docking / A-B scenario acceptance
 ```
@@ -687,10 +690,103 @@ P6.4b 验收表：
 [x] rear goal uses reverse
 [x] reverse segment reaches controller/bridge
 [x] forward_with_goal_heading 不因为终点姿态引入倒车
-[x] sparse_90_turn 回归不退化
+[x] sparse_90_turn 回归不退化（FollowPath SUCCEEDED，reverse=0）
 [x] A-B dynamic obstacle 回归不退化
 [>] three-point / narrow aisle / docking 正式场景放到 P10/P6.5
 ```
+
+> **v1 能力边界（故意设计，不是遗漏）：**
+> - 当前 `lattice_reverse_requires_goal_behind=true` 作为 transit 阶段默认约束，goal 在前方时不生成 reverse primitive。
+> - `PlannerConstraints` 运行时通道（transit/maneuver/dock 语义）推迟到 P7/P10。
+> - **v1 明确不支持**：窄道三点掉头、倒车入库 docking（这些需要 task_manager 在运行时 relax 掉 goal-behind guard）。
+
+### P6.5a 上车前 rear-axle pivot primitive
+
+新增优先级背景：
+
+- 第一版真车测试有很多点位需要“原地/近原地转 90 度后再走”。
+- 真车信息已确认：双驱差速，90 度绕后轴旋转。
+- 因此不要回到 Ackermann，也不要只靠普通 forward arc / reverse arc 调参硬凑。
+- 当前 `sparse_90_turn_ab` 诊断失败不是简单 A-B blocker，但它暴露了短距离贴 90 度终点姿态时，完整 Nav2 重规划/controller/recovery 链路还不稳；如果真车点位大量依赖近原地 90 度转向，上车前必须补这一层。
+
+P6.5a 的目标是一个最小、可回退的 stop-pivot-go 闭环：
+
+```text
+前进到转向点
+-> 停车或降到接近 0
+-> 绕后轴 pivot left/right
+-> yaw 到位后继续前进
+```
+
+planner 侧最小改动：
+
+- 在 lattice primitive 中新增 `pivot_left` / `pivot_right`，由参数开关控制，例如 `lattice_pivot_enabled`，默认可保持关闭，ORU test 配置再打开。
+- pivot 几何以“后轴中心不动、车身 yaw 改变”为准。
+- 当前不急着移动 `base_link` 到后轴中心；继续使用 `rear_axle_x_offset` 计算后轴点和旋转后的 base pose，减少对 AMCL、costmap、传感器 TF 和 footprint 的牵动。
+- 每个 primitive 先按 heading bin 小步旋转，例如 16 个 heading bins 时每步 22.5 度；90 度由 4 个 pivot primitive 组成，不直接一次跳 90 度。
+- pivot 沿途按多个 yaw sample 做 footprint collision，覆盖车体和叉臂扫掠范围；任意采样碰撞就拒绝该 primitive。
+- 保留现有 costmap-aware A* / 非 pivot lattice 路径作为 fallback，确保新 primitive 可开关、可回退。
+
+controller / bridge 侧最小改动：
+
+- controller 需要识别 pivot-intent 段，不能把它当成普通前进弧线追踪。
+- 执行策略优先用低速、可解释的 stop-pivot-go：先 brake 或降速到接近 0，再发 pivot command，再在 yaw 到位后恢复普通前进/倒车控制。
+- pivot command 使用当前已有语义：`allow_pivot_turn=true`、`pivot_steering_angle` 接近 90 度、低速 `velocity_mps` 决定 yaw rate，`steering_angle` 和 forward/reverse 方向共同决定旋转方向。
+- 如果 `nav_msgs/Path` 不能稳定表达 pivot intent，就在 trajectory preprocessing 中通过“后轴点近似不动 + path yaw 连续变化”识别，或增加内部 transition metadata；不要靠横移假路径伪装 pivot。
+
+safety 侧必须补的边界：
+
+- P8.1 当前主要检查 forward/reverse 方向保护区；pivot 时需要检查旋转扫掠 footprint。
+- pivot 执行前和执行中都要检查 swept footprint，障碍进入旋转包络时必须停车，不允许继续硬转。
+- P8.2 独立 safety gate 要把 pivot/backoff 这类 recovery 或 planner command 纳入统一命令闸门，不能让 Nav2 默认 `/cmd_vel` 或裸 pivot command 直接进底盘。
+
+P6.5a acceptance：
+
+```text
+pivot_90_left_in_place
+  同一后轴中心附近，yaw 从 0 转到 90 度。
+  门槛：pivot_control_samples >= 1，abs_sim_angular_z >= 0.05，NavigateToPose SUCCEEDED。
+
+pivot_90_right_in_place
+  同一后轴中心附近，yaw 从 0 转到 -90 度。
+  门槛：pivot_control_samples >= 1，abs_sim_angular_z >= 0.05，NavigateToPose SUCCEEDED。
+
+pivot_90_then_forward_ab
+  先近原地转 90 度，再前进到 B 点。
+  门槛：pivot_control_samples >= 1，reverse_control_samples = 0，NavigateToPose SUCCEEDED。
+
+pivot_blocked_stop
+  在 pivot 扫掠范围内放障碍，planner 或 safety gate 必须拒绝/停车。
+  门槛：NavigateToPose ABORTED 或 controller 输出 zero command。
+
+l_shaped_corridor_ab（真车典型场景）
+  起点面朝过道方向，先沿过道前进约 1.5 m，到路口后 pivot 90°，再进侧道前进。
+  场景比 sparse_90_turn_ab 的腿更长（接近真车仓库点位），验证 replanning 不退化。
+  门槛：pivot_control_samples >= 1，reverse_control_samples = 0，NavigateToPose SUCCEEDED。
+
+sparse_90_turn_ab（从「诊断项」升为「硬验收门」）
+  起点 (-2.0, -0.5, 0°)，终点 (-1.3, 0.2, 90°)。
+  终点 90° 姿态由终端 pivot 贴近，不靠 reverse 弧。
+  门槛：reverse_control_samples = 0，NavigateToPose SUCCEEDED。
+  说明：v1 上车前此场景必须 SUCCEEDED。pivot primitive 上线后不再是诊断项。
+
+forward_ab / reverse_ab / dynamic_stop_release_ab 回归
+  确认普通 A-B、倒车、动态障碍停车/放行不被 pivot primitive 破坏。
+```
+
+终点姿态策略（v1）：
+
+- 保留 `use_final_approach_orientation=true`，终点朝向是硬约束。
+- **终点姿态由终端 pivot 执行**：前进或弧线到达终点附近 → planner 输出 pivot primitive 修正剩余 yaw 偏差 → controller stop-pivot-go 贴近目标 yaw。
+- **不靠 reverse 弧贴终点姿态**，`lattice_reverse_requires_goal_behind=true` 阻止 goal 在前方时生成 reverse primitive。
+
+P6.5a 不要求：
+
+- 完整 ORU primitive lookup/cache。
+- 高速连续圆弧转弯的最优平滑。
+- 窄通道三点掉头、倒车入库、复杂 docking 全部稳定。
+- 立即移动 `base_link` 到后轴中心。
+- `PlannerConstraints` 运行时约束通道（transit/maneuver/dock 语义推迟到 P7/P10）。
 
 ## 9. P7: 建 forklift_task_manager
 
@@ -865,14 +961,15 @@ P8.1 已完成
 -> A-B acceptance 快速验证已完成
 -> A-B 动态障碍停车/放行快速验证已完成
 -> P6.4b 倒车 acceptance 调优已完成
--> A-B acceptance 正式验收
+-> A-B acceptance 正式验收已完成
+-> P6.5a rear-axle pivot primitive / stop-pivot-go acceptance
 -> P8.2 独立 safety gate
 -> P8.3 动态障碍等待/重规划/简单绕行
 -> P8.4 真车低速 safety acceptance
 -> P7.1 task_manager 最小任务入口
 ```
 
-快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通；A-B 动态障碍停车/放行快速验证也已证明 P8.1 safety gate 在真实导航执行中能停车、放行后能继续跑完同一目标。P6.4b 已把当前最小 lattice scaffold 的倒车 acceptance 调稳。下一步建议做 A-B 正式验收，把普通路线、倒车/换向路线、障碍停车/放行放到同一套验收里。
+快速 A-B acceptance 已证明空旷 `NavigateToPose` 链路可跑通；A-B 动态障碍停车/放行快速验证也已证明 P8.1 safety gate 在真实导航执行中能停车、放行后能继续跑完同一目标。P6.4b 已把当前最小 lattice scaffold 的倒车 acceptance 调稳，A-B 正式验收主线也已通过。由于第一版真车点位大量依赖近原地 90 度转向，下一步建议先做 P6.5a rear-axle pivot primitive，再进入 P8.2，把 pivot/backoff/recovery 等真实运动命令统一收进独立 safety gate。
 
 真车 recovery 不是忽略项，但不要用仿真 bridge fallback 的方式直接上车。仿真 fallback 只是解决 Gazebo bridge 模式下 recovery `/cmd_vel` 到不了 `/forklift/sim_cmd_vel` 的接线问题；真车阶段应在 P8.2/P8.3 中实现受控 recovery：
 
@@ -904,7 +1001,7 @@ Nav2/custom recovery request
 - 无障碍时，P8.1 safety gate 不误停。
 - 本阶段不要求复杂绕行；持续阻挡时允许等待或任务失败，但不能硬撞或继续推障碍。
 
-如果后续正式验收暴露 safety gate 架构边界，再进入 P8.2 独立 safety package；如果只是更复杂的倒车、换向、窄通道路径质量问题，优先进入 P10/P6.5 的 primitive/heuristic/场景增强。
+如果后续 P6.5a 暴露的是 pivot 几何、primitive 表达或 controller stop-pivot-go 问题，优先在 P6.5a/P10 解决；如果暴露的是命令闸门、recovery 入口或真车安全边界问题，进入 P8.2/P8.3 解决。
 
 ## 11. P9: 真车低速联调
 
@@ -1239,7 +1336,14 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] A-B acceptance 快速验证：空旷 NavigateToPose 简单 A 到 B
 [x] A-B 动态障碍停车/放行快速验证
 [x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
-[ ] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[x] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
+[ ] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进
+    子任务（按顺序）：
+    [ ] 6.5a-1 Foxy build + 单测通过（63 tests / 0 failures）
+    [ ] 6.5a-2 pivot 全链路打通确认：planner pivot_segments>0 → trajectory pivot_points>0 → controller previewHasPivotMotion=true → bridge angular.z≠0, linear.x≈0
+    [ ] 6.5a-3 pivot 验收：pivot_90_left/right_in_place、pivot_90_then_forward_ab、pivot_blocked_stop、l_shaped_corridor_ab
+    [ ] 6.5a-4 sparse_90_turn_ab 硬验收（reverse=0，NavigateToPose SUCCEEDED）
+    [ ] 6.5a-5 三大回归：forward_ab、reverse_ab、dynamic_stop_release_ab
 [ ] P8.2 独立 safety package / 命令闸门
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
 [ ] P8.4 真车低速 safety acceptance 包
@@ -1253,7 +1357,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 建议我们下一步做：
 
 ```text
-P8.2 独立 safety package / 命令闸门
+P6.5a 上车前 rear-axle pivot primitive / stop-pivot-go acceptance
 ```
 
 原因：
@@ -1262,7 +1366,8 @@ P8.2 独立 safety package / 命令闸门
 - P8.1 已经加上最小 safety gate、急停参数和 bridge watchdog 基线。
 - 空旷 A-B 快速验证和动态障碍停车/放行快速验证都已经通过。
 - A-B 正式验收主线已经通过：普通前进、后方目标倒车、动态障碍停车/放行都能复跑。
-- 真车 recovery 命令闸门已经明确放入 P8.2/P8.3；但在进入真车 safety 架构前，先把 planner/controller 的基础运动能力调稳，能减少后续 safety/recovery 层需要兜底的问题。
+- 第一版真车点位大量需要“原地/近原地 90 度后再走”；真车已确认是双驱差速、绕后轴旋转，所以需要先补 rear-axle pivot primitive，不回 Ackermann，也不靠普通 arc 硬凑。
+- 真车 recovery 命令闸门已经明确放入 P8.2/P8.3；但在进入真车 safety 架构前，先把 planner/controller 的 pivot 基础运动能力调稳，能减少后续 safety/recovery 层需要兜底的问题。
 
 执行记录：
 
@@ -1293,7 +1398,16 @@ P8.2 独立 safety package / 命令闸门
   - `reverse_ab`：`NavigateToPose` `SUCCEEDED`；`control_samples=18 sim_cmd_samples=108 forward=0 reverse=18`；`sim_cmd min_signed_linear_x=-0.096`；`odom_final x=-2.134 y=-0.497`；`ab_acceptance=PASS scenario=reverse_ab`。
   - `dynamic_stop_release_ab`：`NavigateToPose` `SUCCEEDED` after release/reissue；障碍在 `odom_x=-1.548` 时生成；`global/local costmap cleared`；`control_samples=151 sim_cmd_samples=455 forward=97 reverse=0`；`phase_control_zero blocked=54`；`odom_final x=1.049 y=-0.623`；`ab_acceptance=PASS scenario=dynamic_stop_release_ab`。
   - `sparse_90_turn_ab` 诊断：调参前失败时出现 `forward=115 reverse=223`，说明重规划会用倒车贴终点姿态；调参后不再出现倒车，`forward=257 reverse=0`，但 `NavigateToPose` 仍 `ABORTED`，末态 `odom_final x=-1.147 y=-1.325`。这不是本次 A-B 正式验收主线 blocker；后续作为 P10/P6.5 的 planner/controller/replanning 诊断项继续处理。
-  当前结论：第一版 A-B 正式验收主线完成；下一步进入 P8.2，把真车前所有运动命令收进独立 safety package / command gate。
+- 2026-06-16：根据第一版真车点位信息，很多站点需要“原地/近原地 90 度后再走”；真车已确认是双驱差速，90 度绕后轴旋转。路线调整为先补 P6.5a 上车前 rear-axle pivot primitive，再进入 P8.2 独立 safety gate。P6.5a 范围是最小 stop-pivot-go 闭环：global planner 增加可开关 `pivot_left` / `pivot_right` primitive，几何按后轴中心不动和 `rear_axle_x_offset` 计算 base pose，按 heading bin 小步旋转并沿途做 swept footprint collision；controller 识别 pivot intent，先停车/低速再发 pivot command，yaw 到位后恢复普通前进；safety gate 需要补 pivot 扫掠 footprint 检查。当前不回 Ackermann，也不急着移动 `base_link` 到后轴中心。P6.5a acceptance 至少覆盖 `pivot_90_left_in_place`、`pivot_90_right_in_place`、`pivot_90_then_forward_ab`、`pivot_blocked_stop`，并回归 `forward_ab`、`reverse_ab`、`dynamic_stop_release_ab`。
+  当前结论：第一版 A-B 正式验收主线完成；下一步做 P6.5a，把真车需要的后轴近原地 90 度转向补成 planner/controller/safety 都能理解的可验收 primitive；随后进入 P8.2，把真车前所有运动命令收进独立 safety package / command gate。
+- 2026-06-16（续）：P6.5a 初版代码已写入工作树（planner pivot primitive + goal-behind guard + controller stop-pivot-go + trajectory pivot 识别）。Foxy docker build 通过，`forklift_nav2_plugins` 63 个 gtest 全部通过，其中 `test_oru_global_planner` 扩展到 12 个用例，覆盖 `PivotPrimitivesAreGatedAndRotateAroundRearAxle`（pivot 几何 + rear_axle_x_offset）和 `SearchCanUsePivotPrimitiveForInPlaceGoalHeading`（lattice 搜索能用 pivot primitive 到达原地 90° 目标）。`test_forklift_mpc_trajectory` 和 `test_forklift_mpc_controller` 相关单测也通过。migration plan 同步三处修正：(1) `sparse_90_turn_ab` 从「诊断项」升为 P6.5a 硬验收门（`reverse=0 + pivot>=1 + NavigateToPose SUCCEEDED`）；(2) 新增 `l_shaped_corridor_ab` 场景（L 形过道，两腿各约 1.5 m，接近真车仓库点位，验证 replanning 过程中 pivot 不退化）；(3) 明确 v1 能力边界：`lattice_reverse_requires_goal_behind=true` 是 transit 阶段的静态占位约束，窄道三点掉头/docking 放到 P7/P10，不是 v1 目标。P6.5a 下一步：headless 仿真验证 pivot 全链路（`pivot_segments>0 → pivot_points>0 → previewHasPivotMotion=true → bridge linear.x≈0 angular.z≠0`），再跑 4 个 pivot 验收场景 + 3 个回归。
+- 2026-06-16（P6.5a headless 验收 + v1 架构定调）：在 Foxy docker 跑了全部 pivot 场景，结论分三层。
+  - **第一层 — pivot 链路本身通**：`sparse_90_turn_ab` 稳定 PASS（`forward=300 reverse=0 pivot=139`，`NavigateToPose SUCCEEDED`）。`reverse_ab` 回归 PASS（`forward=0 reverse=16 SUCCEEDED`）。64 个 gtest 全过。
+  - **第二层 — 发现并修掉「终点航向倒车污染」**：`pivot_90_left/right_in_place`、`l_shaped_corridor_ab`、`pivot_90_then_forward_ab` 初次全 ABORTED。读 planner 日志定位：首条路径是好的前进路径、车也到达目标 xy，但在终点区为凑 `goal_yaw` 反复吐 `reverse+pivot` 微调；后轴 pivot 落点天然「在身后」→ `reversePrimitiveAllowedTowardGoal` 误判开倒车 → controller 执行微调时振荡、抖离目标。修复：guard 增加「终点 pivot regime」——`start` 距目标 ≤ `lattice_pivot_terminal_radius`(0.6m) 且航向差 ≥ `lattice_pivot_terminal_heading`(45°) 时禁 reverse、纯 pivot 凑航向；判别式天然放行同航向纯倒车（`reverse_ab` 不受影响）。新增单测 `TerminalPivotRegimeSuppressesReverseForGoalBehind`。修复后 `l_shaped` 的 controller 端 `reverse 117→0`，5 连跑那轮 pivot/in-place/sparse/reverse 全 PASS。
+  - **第三层 — 残留 flaky 不是 guard 能修的**：`l_shaped_corridor_ab` 复跑时仍偶发 ABORTED（`odom_final` 被甩到对面角落 ~5m 外）。根因：当前是**最小 lattice scaffold**，车到目标区时 lattice 某些位姿 footprint 全拒 → 退化到**纯 2D A***（全向、无朝向/运动学）→ forklift controller 跟不动 → 发散。这是 scaffold 成熟度问题，不是 bug；完整 ORU planner（更丰富 primitive、更强 heuristic、运动学合法 fallback）才能让长双腿单次自主规划稳过。
+  - **v1 架构定调（Option A，已决策）**：第一版**不依赖在线自主重规划**。L-shape 等路线**拆成已验证的原子段序列**（直行 FollowPath → 原地 pivot 90° → 直行 FollowPath），每段单次规划+验证（`reverse=0`、无 fallback）后执行；动态障碍**停车/离障继续，不自己重规划**（复用已验证的 P8.1 `dynamic_stop_release_ab`）；持续挡路 → 任务等待/失败，不自主绕行。完整自主规划（单个 `NavigateToPose` 跑通长双腿 + 精细终点机动）**不是上车前置**，归 **P10** 继续移植 ORU planner。
+  - **本轮落地代码**：`lattice_fallback_to_astar` 在 foxy/test 两个配置都改为 `false`——v1 fail-safe，lattice 无解时抛 `PlannerException` 干净失败，绝不把全向 A* 路径交给运动学受限的 controller（叉车不会被甩飞）。planner 抛错信息同步说明该姿态。
+  - **下一步**：① L-shape 路点分解执行（路点序列器，每段单次规划+FollowPath，关全局在线重规划）；② P8.2 独立 safety/command gate（含 recovery 命令白名单与扫掠 footprint，把「失败/发散」彻底变「安全停」）。`l_shaped` 长双腿单次自主规划与 A* 替代（运动学合法 fallback）归 P10。
 
 ## 14. ORU 包迁移优先级
 
@@ -1376,3 +1490,152 @@ P11  path smoother + constraint_extract
 P12  评估是否上完整 ORU QP-MPC
 P13  需要 human-aware 能力时，再评估 ILIAD 相关包
 ```
+
+## 15. P10: ORU 规划器完整移植（替换 lattice scaffold）
+
+> 2026-06-16 立项。背景：当前 `oru_global_planner` 是**最小 lattice scaffold**（手写少量
+> primitive + 弱 heuristic + 退化 2D-A* fallback），monolithic `l_shaped_corridor_ab`
+> 单次自主规划会发散（详见 §13 执行日志「第三层」）。结论：让长双腿 L 形单次自主规划稳过，
+> 需要把 ORU 真正的 state-lattice 规划器核心移过来。本章是给执行方（Codex）的正式分阶段计划。
+> 路点分解（drive→pivot→drive 顺序执行）作为另一条 v1 路线已评估，本轮暂缓，优先 ORU 核心移植。
+
+### P10.0 scope —— 移什么 / 不移什么
+
+只移**规划器核心**，其余保留：
+
+| ORU 组件 | 移不移 | 原因 |
+|---|---|---|
+| `orunav_motion_planner`（state-lattice + primitives + heuristic + ARA* 搜索） | 移（核心） | 补 scaffold 两个短板：丰富 primitive 集 + 强 heuristic |
+| primitive 生成器 + 生成的 primitive 文件 | 移 | scaffold 弱在手写 primitive 太少 |
+| `orunav_constraint_extract` / `path_smoother` | 可选（后期 P11） | 让路径更顺，v1 可先不要 |
+| `orunav_mpc` | 不移 | 已有 `ForkliftMpcController` 当跟踪器 |
+| `orunav_coordinator`（多车协调） | 不移 | 单车 v1 不需要 |
+
+- **保留不动**：`ForkliftMpcController`（控制器）、Nav2 costmap/TF/BT、现有验收门
+  （`forward_ab`/`sparse_90_turn_ab`/`pivot_90_*`/`l_shaped_corridor_ab`）。
+- **替换**：`oru_global_planner`（最小 scaffold）→ 包成新插件接 ORU 核心。
+- 分工：ORU 规划器是 plan-once，出一条运动学合法路径；跟踪交给 `ForkliftMpcController`。
+
+### P10.1（Phase 0）vendor 并隔离规划器核心，先单独编译
+- 从上游 `navigation_oru` 取 `orunav_motion_planner` 的纯 C++ 核心（World/占据表示、
+  VehicleModel、primitive 加载器、heuristic、ARA* 搜索），放进新包 `forklift_oru_planner/vendor/`。
+- 剥掉 ROS1 依赖（`ros/ros.h`、tf、roscpp 消息）；核心基本 ROS 无关。
+- 普通 CMake 编静态库，先在 foxy docker 工具链跑通编译，不接 Nav2。
+- **先确认上游 repo 与 license**（BSD/LGPL 系，核实并保留 LICENSE/出处）。
+- 验收：vendor 库 `colcon build` 通过，带最小 main 能 load primitives + 跑一次搜索。
+
+### P10.2（Phase 1）为本车生成 primitive 集
+- 用 ORU primitive 生成器按本车运动学产出：轴距、`max_steering`、后轴 pivot
+  （对应 `rear_axle_x_offset=-0.34`、`pivot_turn_radius=0.6`）、允许倒车、heading 离散（建议 16）。
+- 提交生成的 primitive 文件到 repo。
+- 验收：单测加载 primitive，断言存在 pivot 原语、reverse 原语、各 heading 前进原语，
+  几何与现有 `pivot_steering_angle≈π/2` 一致。
+
+### P10.3（Phase 2）costmap 碰撞适配器
+- adapter 把 ORU 世界查询映射到 Nav2 `costmap_2d`（inflation 层）：对每条 primitive 的
+  扫掠 footprint 做碰撞检查，定 lethal 阈值/分辨率。
+- 验收：已知障碍图上单测「穿障 primitive 被拒、空地 primitive 通过」。
+
+### P10.4（Phase 3）heuristic（治本一步）
+- 启用 ORU 混合 heuristic：nonholonomic-without-obstacles（离线预计算查找表）+
+  holonomic-with-obstacles（对 costmap 跑 Dijkstra）取大。
+- 这正是 scaffold「到目标区 thrash」的根因解。
+- 验收：对比开/关 heuristic 的搜索扩展节点数与终点收敛性。
+
+### P10.5（Phase 4）包成 Nav2 GlobalPlanner 插件
+- 实现 `nav2_core::GlobalPlanner`（`configure/activate/createPlan`）：start/goal pose →
+  建 ORU mission → ARA* 搜索 → primitive 路径转 `nav_msgs/Path`（稠密带朝向）→ 返回。
+- **goal yaw 当硬约束**（lattice 终点 state 含 heading），终点 pivot 由规划器原生给出，
+  不再靠 terminal-pivot guard 补丁。
+- 失败 `throw nav2_core::PlannerException`（沿用 v1 fail-safe，不退化到 2D A*）。
+- 验收：插件被 Nav2 加载，单次 `createPlan` 对 L 形给出含终点 pivot 的运动学合法路径。
+
+### P10.6（Phase 5）集成、切换、调参（monolithic L 形应在此一把过）
+- 配置里把 `GridBased` 从 `oru_global_planner`（scaffold）换成新插件。
+- 跑全部现有门：`forward_ab`/`sparse_90_turn_ab`/`pivot_90_*`/`l_shaped_corridor_ab`
+  （monolithic 单次 NavigateToPose）。
+- 调 primitive 代价（reverse 倍率、换挡代价）与 heuristic 权重。
+- **核心验收：`l_shaped_corridor_ab` 单次自主规划 3 连跑全 PASS**
+  （reverse=0 / pivot≥1 / SUCCEEDED / 末端 y≥0.6）—— scaffold 做不到、ORU 该解决的目标。
+
+### P10.7（Phase 6，可选/后期）port constraint-extract + smoother
+- 让路径更顺、更易跟踪；控制器仍是 `ForkliftMpcController`。归并到 P11。
+
+### P10 关键提醒（给执行方）
+- 接口缝在 Phase 2/4（costmap 适配、pose↔lattice state 转换），bug 多发，先写单测。
+- 坐标/单位：ORU 内部用自己的世界系，注意与 map 系、分辨率、角度离散的换算。
+- 不要动控制器：ORU 出路径即可，跟踪交给现有 `ForkliftMpcController`。
+- 现有 terminal-pivot guard、`lattice_fallback_to_astar=false` 是 scaffold 的补丁，
+  ORU 上来后大概率可移除——但先留着，等 Phase 5 验证后再删。
+- 风险/工期：数周级运动学规划器移植，主要不确定性在 primitive 生成与 heuristic 调参；
+  Phase 0/1 跑通即说明可行，没跑通要尽早暴露。
+
+### P10 执行记录（2026-06-16）
+
+本轮按 Phase 0→5 顺序推进，先落地一个 ROS/Nav2-free 的 ORU-style lattice core，再把
+`OruGlobalPlanner` 从原先最小 scaffold 改成调用 core。注意：本轮没有直接拷贝上游
+`navigation_oru` 源码。原因是本地 `navigation_oru-release/LICENSE` 对非 ILIAD H2020
+参与者是 `CC BY-NC-SA 4.0`，与当前仓库工程落地不匹配；因此只保留 license/出处说明，
+实现采用 clean-room ORU-style core。
+
+Phase 0 gate：
+
+- 新增 `forklift_oru_planner` 包，`vendor/` 下提供纯 C++17 静态库 `forklift_oru_lattice_core`。
+- core 不依赖 ROS、Nav2、tf 或 costmap 消息，只通过 `GridAdapter` 回调查询栅格/footprint/cost。
+- `vendor/README.md` 记录本地上游来源、license 核查结论和 clean-room 决策。
+- 验收：Foxy docker `colcon build --packages-select forklift_oru_planner` 通过；core 单测能生成/加载 primitive 并跑一次搜索。
+
+Phase 1 gate：
+
+- 提交 `forklift_oru_planner/primitives/forklift_16_heading.mprim`。
+- 参数采用 16 headings、`rear_axle_x_offset=-0.34`、`pivot_turn_radius=0.6`、允许 reverse/pivot。
+- primitive 集包含 forward、reverse、left/right arc、`pivot_left`、`pivot_right`。
+- 验收：`test_oru_lattice_core` 覆盖 forward/reverse/pivot primitive 存在性和后轴 pivot 几何。
+
+Phase 2 gate：
+
+- `GridAdapter` 支持 `cell_traversable`、`footprint_traversable`、`normalized_cost` 三个回调。
+- core 在 primitive rollout 的每个 sample 上做 cell + swept footprint 检查，并记录
+  `OUT_OF_BOUNDS`、`COSTMAP_BLOCKED`、`FOOTPRINT_BLOCKED` reject reason。
+- Nav2 插件桥接到 `costmap_2d`，沿用 lethal threshold、unknown policy、footprint sweep。
+- 验收：core 单测覆盖障碍图上穿障 primitive 被拒、空地 primitive 通过。
+
+Phase 3 gate：
+
+- core heuristic 为 nonholonomic-without-obstacles + holonomic-with-obstacles Dijkstra 取大值。
+- holonomic heuristic 基于 costmap traversability 和 normalized cost 预计算到目标的 8 邻接 Dijkstra。
+- 验收：单测对比开/关 obstacle heuristic，启用 hybrid heuristic 后搜索仍收敛并减少无效扩展。
+
+Phase 4 gate：
+
+- `forklift_nav2_plugins::OruGlobalPlanner` 已改为在 `searchLattice()` 中构建
+  `forklift_oru_planner::LatticeCore`，再把 core states/transitions 转回现有 path/diagnostics。
+- `forklift_nav2_plugins` 依赖 `forklift_oru_planner`，Foxy build/test 脚本同步加入新包。
+- 保持 hard goal yaw、`lattice_fallback_to_astar=false` 的 fail-safe 策略：core 无 kinodynamic path 时抛
+  `nav2_core::PlannerException`，不把全向 2D A* 路径交给 forklift controller。
+- 验收：`forklift_oru_planner` + `forklift_nav2_plugins` Foxy docker build 通过；总计 70 个 gtest 通过。
+
+Phase 5 gate：
+
+- 配置仍使用 `GridBased` / `forklift_nav2_plugins/OruGlobalPlanner`，实现已切到新 core。
+- 新增 `forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml`，配置指向该 BT，
+  目标是 plan-once 后交给 `ForkliftMpcController` 跟踪。
+- Headless Gazebo gate 已实跑 `forward_ab`。结果：planner 初始 plan 成功，例如
+  `Lattice search succeeded: expanded=16 generated=120 accepted=15 ...`，并输出全 forward path；
+  controller 开始执行并产生 forward command；但 Foxy BT 在 FollowPath 运行中仍重新 tick
+  `ComputePathToPose`，中间位姿 footprint 被 costmap 判 blocked 后 planner 抛异常，BT 进入 recovery，
+  取消 FollowPath，最终 `/navigate_to_pose status: 6 ABORTED`。
+- 复测过三版 BT：`Sequence`、`PipelineSequence + RateController(hz=0.001)`、
+  `PipelineSequence + DistanceController(distance=1000.0)`，install 侧 XML 已确认更新；
+  Foxy 运行态仍会重复调用 planner。因此 Phase 5 的 monolithic `NavigateToPose` gate 未通过。
+- 最后一轮 `forward_ab` 失败指标：`control_samples=50 sim_cmd_samples=1252 forward=50 reverse=0 pivot=0`，
+  `odom_final x=-0.207 y=-0.545`，状态 `ABORTED`。失败根因不是 core 初始规划失败，而是 Nav2 Foxy
+  BT/action 执行层未形成真正 plan-once，导致在线重规划取消有效初始路径。
+
+当前结论：
+
+- Phase 0→4 已通过代码和单测验收；Phase 5 集成已接线并暴露了新的运行态 blocker。
+- 继续要过 `l_shaped_corridor_ab` 3 连 PASS，下一步不应再调 primitive 成本；应先把执行层改成真正 plan-once：
+  方案 A 是新增一个小 BT control/decorator node，只 tick `ComputePathToPose` 一次并保持 `FollowPath` RUNNING；
+  方案 B 是在 acceptance/task-manager 侧拆成显式 `ComputePathToPose` 一次 + `FollowPath` action，而不是走
+  `NavigateToPose` 默认 BT tick loop。

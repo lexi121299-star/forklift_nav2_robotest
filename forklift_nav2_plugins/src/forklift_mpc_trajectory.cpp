@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2/utils.h"
@@ -33,6 +34,61 @@ double headingBetween(
 double poseYaw(const geometry_msgs::msg::Pose & pose)
 {
   return tf2::getYaw(pose.orientation);
+}
+
+std::pair<double, double> rearAxlePoint(
+  const geometry_msgs::msg::Pose & pose,
+  double rear_axle_x_offset)
+{
+  const double yaw = poseYaw(pose);
+  return {
+    pose.position.x + rear_axle_x_offset * std::cos(yaw),
+    pose.position.y + rear_axle_x_offset * std::sin(yaw)};
+}
+
+bool pivotSegment(
+  const geometry_msgs::msg::PoseStamped & a,
+  const geometry_msgs::msg::PoseStamped & b,
+  const MpcTrajectoryOptions & options)
+{
+  if (!options.detect_pivot_turns) {
+    return false;
+  }
+
+  const double heading_change = std::abs(
+    ForkliftVehicleModel::normalizeAngle(poseYaw(b.pose) - poseYaw(a.pose)));
+  if (heading_change < options.pivot_min_heading_change) {
+    return false;
+  }
+
+  const auto rear_a = rearAxlePoint(a.pose, options.pivot_rear_axle_x_offset);
+  const auto rear_b = rearAxlePoint(b.pose, options.pivot_rear_axle_x_offset);
+  const double rear_axle_motion =
+    std::hypot(rear_b.first - rear_a.first, rear_b.second - rear_a.second);
+  return rear_axle_motion <= options.pivot_max_rear_axle_motion;
+}
+
+bool hasLocalYawChange(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
+  std::size_t index,
+  double threshold)
+{
+  const double yaw = poseYaw(poses[index].pose);
+  if (index > 0) {
+    const double previous_change = std::abs(
+      ForkliftVehicleModel::normalizeAngle(yaw - poseYaw(poses[index - 1].pose)));
+    if (previous_change >= threshold) {
+      return true;
+    }
+  }
+  if (index + 1 < poses.size()) {
+    const double next_change = std::abs(
+      ForkliftVehicleModel::normalizeAngle(poseYaw(poses[index + 1].pose) - yaw));
+    if (next_change >= threshold) {
+      return true;
+    }
+  }
+  return false;
 }
 
 double signedCurvature(
@@ -108,8 +164,11 @@ std::vector<geometry_msgs::msg::PoseStamped> filterPathPoses(
 
   const double min_spacing = std::max(0.0, min_point_spacing);
   for (const auto & pose : path.poses) {
+    const double yaw_change = poses.empty() ? 0.0 : std::abs(
+      ForkliftVehicleModel::normalizeAngle(poseYaw(pose.pose) - poseYaw(poses.back().pose)));
     if (poses.empty() ||
-      distanceBetween(poses.back().pose.position, pose.pose.position) >= min_spacing)
+      distanceBetween(poses.back().pose.position, pose.pose.position) >= min_spacing ||
+      yaw_change > 1e-6)
     {
       poses.push_back(pose);
     }
@@ -327,11 +386,30 @@ MpcTrajectory buildTrajectory(
     }
 
     bool reverse_motion = false;
+    bool pivot_motion = false;
+    double pivot_heading_delta = 0.0;
+    if (i > 0 && pivotSegment(poses[i - 1], poses[i], options)) {
+      pivot_motion = true;
+      pivot_heading_delta = ForkliftVehicleModel::normalizeAngle(
+        poseYaw(pose) - poseYaw(poses[i - 1].pose));
+    } else if (i + 1 < poses.size() && pivotSegment(poses[i], poses[i + 1], options)) {
+      pivot_motion = true;
+      pivot_heading_delta = ForkliftVehicleModel::normalizeAngle(
+        poseYaw(poses[i + 1].pose) - poseYaw(pose));
+    }
+
+    if (pivot_motion) {
+      theta = poseYaw(pose);
+      ++diagnostics.pivot_motion_points;
+    }
+
     if (options.preserve_path_orientation_for_reverse && poses.size() > 1) {
       const double path_theta = poseYaw(pose);
       const double path_vs_motion = std::abs(
         ForkliftVehicleModel::normalizeAngle(path_theta - theta));
-      if (path_vs_motion > kReverseOrientationThreshold) {
+      const bool local_yaw_is_turning =
+        hasLocalYawChange(poses, i, options.pivot_min_heading_change);
+      if (!pivot_motion && !local_yaw_is_turning && path_vs_motion > kReverseOrientationThreshold) {
         theta = path_theta;
         reverse_motion = true;
         ++diagnostics.reverse_motion_points;
@@ -356,6 +434,11 @@ MpcTrajectory buildTrajectory(
           poses[i].pose.position,
           poses[i + 1].pose.position);
       }
+    }
+    if (pivot_motion) {
+      const auto & parameters = vehicle_model.parameters();
+      const double turn_sign = pivot_heading_delta >= 0.0 ? 1.0 : -1.0;
+      curvature = turn_sign / std::max(0.05, parameters.pivot_turn_radius);
     }
 
     const double abs_curvature = std::abs(curvature);
@@ -382,7 +465,8 @@ MpcTrajectory buildTrajectory(
       curvature,
       steering_angle,
       speed_limit,
-      reverse_motion});
+      reverse_motion,
+      pivot_motion});
   }
 
   return trajectory;

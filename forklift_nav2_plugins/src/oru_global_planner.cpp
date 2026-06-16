@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "forklift_oru_planner/oru_lattice_core.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_util/node_utils.hpp"
@@ -134,6 +135,29 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_gear_switch_cost",
     rclcpp::ParameterValue(lattice_gear_switch_cost_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_reverse_requires_goal_behind",
+    rclcpp::ParameterValue(lattice_reverse_requires_goal_behind_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_reverse_goal_behind_margin",
+    rclcpp::ParameterValue(lattice_reverse_goal_behind_margin_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_pivot_enabled",
+    rclcpp::ParameterValue(lattice_pivot_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_pivot_angle", rclcpp::ParameterValue(lattice_pivot_angle_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_pivot_turn_cost",
+    rclcpp::ParameterValue(lattice_pivot_turn_cost_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_rear_axle_x_offset",
+    rclcpp::ParameterValue(lattice_rear_axle_x_offset_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_pivot_terminal_radius",
+    rclcpp::ParameterValue(lattice_pivot_terminal_radius_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_pivot_terminal_heading",
+    rclcpp::ParameterValue(lattice_pivot_terminal_heading_));
 
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".use_diagonal", use_diagonal_);
@@ -175,6 +199,20 @@ void OruGlobalPlanner::configure(
     lattice_goal_heading_cost_multiplier_);
   node->get_parameter(name_ + ".lattice_reverse_cost_multiplier", lattice_reverse_cost_multiplier_);
   node->get_parameter(name_ + ".lattice_gear_switch_cost", lattice_gear_switch_cost_);
+  node->get_parameter(
+    name_ + ".lattice_reverse_requires_goal_behind",
+    lattice_reverse_requires_goal_behind_);
+  node->get_parameter(
+    name_ + ".lattice_reverse_goal_behind_margin",
+    lattice_reverse_goal_behind_margin_);
+  node->get_parameter(name_ + ".lattice_pivot_enabled", lattice_pivot_enabled_);
+  node->get_parameter(name_ + ".lattice_pivot_angle", lattice_pivot_angle_);
+  node->get_parameter(name_ + ".lattice_pivot_turn_cost", lattice_pivot_turn_cost_);
+  node->get_parameter(name_ + ".lattice_rear_axle_x_offset", lattice_rear_axle_x_offset_);
+  node->get_parameter(
+    name_ + ".lattice_pivot_terminal_radius", lattice_pivot_terminal_radius_);
+  node->get_parameter(
+    name_ + ".lattice_pivot_terminal_heading", lattice_pivot_terminal_heading_);
 
   lethal_cost_threshold_ = std::clamp(lethal_cost_threshold_, 1, 255);
   footprint_collision_cost_threshold_ =
@@ -195,20 +233,32 @@ void OruGlobalPlanner::configure(
     std::max(0.0, lattice_goal_heading_cost_multiplier_);
   lattice_reverse_cost_multiplier_ = std::max(0.0, lattice_reverse_cost_multiplier_);
   lattice_gear_switch_cost_ = std::max(0.0, lattice_gear_switch_cost_);
+  lattice_reverse_goal_behind_margin_ = std::max(0.0, lattice_reverse_goal_behind_margin_);
+  if (lattice_pivot_angle_ <= 0.0) {
+    lattice_pivot_angle_ = 2.0 * M_PI / static_cast<double>(lattice_heading_bins_);
+  }
+  lattice_pivot_angle_ = std::clamp(lattice_pivot_angle_, 0.01, M_PI_2);
+  lattice_pivot_turn_cost_ = std::max(0.0, lattice_pivot_turn_cost_);
+  lattice_pivot_terminal_radius_ = std::max(0.0, lattice_pivot_terminal_radius_);
+  lattice_pivot_terminal_heading_ = std::clamp(lattice_pivot_terminal_heading_, 0.0, M_PI);
+  lattice_rear_axle_x_offset_ = std::clamp(lattice_rear_axle_x_offset_, -10.0, 10.0);
 
   RCLCPP_INFO(
     logger_,
     "Configured %s in frame %s: allow_unknown=%s use_diagonal=%s "
     "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d start_tolerance=%.2f "
     "use_lattice=%s lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
-    "lattice_goal_tolerance=%.2f lattice_reverse=%s",
+    "lattice_goal_tolerance=%.2f lattice_reverse=%s reverse_requires_goal_behind=%s "
+    "lattice_pivot=%s",
     name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false",
     footprint_.size(), lethal_cost_threshold_, start_tolerance_,
     use_lattice_planner_ ? "true" : "false", lattice_heading_bins_,
     lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_,
-    lattice_reverse_enabled_ ? "true" : "false");
+    lattice_reverse_enabled_ ? "true" : "false",
+    lattice_reverse_requires_goal_behind_ ? "true" : "false",
+    lattice_pivot_enabled_ ? "true" : "false");
 }
 
 void OruGlobalPlanner::cleanup()
@@ -281,7 +331,12 @@ nav_msgs::msg::Path OruGlobalPlanner::createPlan(
     }
 
     if (!lattice_fallback_to_astar_) {
-      throw nav2_core::PlannerException("OruGlobalPlanner lattice search could not find a path");
+      // v1 fail-safe: do not emit a holonomic 2D-A* path the kinodynamic forklift
+      // controller cannot track. Failing here keeps the vehicle from diverging; the
+      // navigation server stops/aborts on the same fixed route instead of re-routing.
+      throw nav2_core::PlannerException(
+              "OruGlobalPlanner lattice search found no kinodynamic path "
+              "(holonomic A* fallback disabled for v1 fail-safe)");
     }
 
     RCLCPP_WARN(logger_, "Lattice planner failed; falling back to 2D costmap A*");
@@ -418,98 +473,179 @@ std::vector<OruGlobalPlanner::Cell> OruGlobalPlanner::reconstructPath(
   return cells;
 }
 
+forklift_oru_planner::PlannerOptions OruGlobalPlanner::makeCoreOptions() const
+{
+  forklift_oru_planner::PlannerOptions options;
+  options.heading_bins = lattice_heading_bins_;
+  options.resolution = costmap_->getResolution();
+  options.origin_x = costmap_->getOriginX();
+  options.origin_y = costmap_->getOriginY();
+  options.step_distance = lattice_step_distance_;
+  options.arc_radius = lattice_arc_radius_;
+  options.arc_angle = lattice_arc_angle_;
+  options.primitive_samples = lattice_primitive_samples_;
+  options.reverse_enabled = lattice_reverse_enabled_;
+  options.reverse_requires_goal_behind = lattice_reverse_requires_goal_behind_;
+  options.reverse_goal_behind_margin = lattice_reverse_goal_behind_margin_;
+  options.pivot_enabled = lattice_pivot_enabled_;
+  options.pivot_angle = lattice_pivot_angle_;
+  options.pivot_turn_cost = lattice_pivot_turn_cost_;
+  options.rear_axle_x_offset = lattice_rear_axle_x_offset_;
+  options.goal_tolerance =
+    lattice_goal_tolerance_ > 0.0 ? lattice_goal_tolerance_ : goal_tolerance_;
+  options.use_final_approach_orientation = use_final_approach_orientation_;
+  options.turn_cost_multiplier = lattice_turn_cost_multiplier_;
+  options.obstacle_cost_multiplier =
+    cost_travel_multiplier_ + lattice_obstacle_cost_multiplier_;
+  options.goal_heading_cost_multiplier = lattice_goal_heading_cost_multiplier_;
+  options.reverse_cost_multiplier = lattice_reverse_cost_multiplier_;
+  options.gear_switch_cost = lattice_gear_switch_cost_;
+  options.unknown_cost_penalty = unknown_cost_penalty_;
+  options.use_holonomic_obstacle_heuristic = true;
+  options.pivot_terminal_radius = lattice_pivot_terminal_radius_;
+  options.pivot_terminal_heading = lattice_pivot_terminal_heading_;
+  options.max_iterations = max_iterations_;
+  return options;
+}
+
+forklift_oru_planner::GridAdapter OruGlobalPlanner::makeCoreGridAdapter() const
+{
+  forklift_oru_planner::GridAdapter grid;
+  grid.width = costmap_->getSizeInCellsX();
+  grid.height = costmap_->getSizeInCellsY();
+  grid.cell_traversable =
+    [this](unsigned int x, unsigned int y) {
+      return isTraversable(x, y);
+    };
+  grid.footprint_traversable =
+    [this](double wx, double wy, double yaw) {
+      return isFootprintTraversableAtPose(wx, wy, yaw);
+    };
+  grid.normalized_cost =
+    [this](double wx, double wy) {
+      unsigned int mx = 0;
+      unsigned int my = 0;
+      if (!costmap_->worldToMap(wx, wy, mx, my)) {
+        return 1.0;
+      }
+      const auto cell_cost = costmap_->getCost(mx, my);
+      if (cell_cost == nav2_costmap_2d::NO_INFORMATION) {
+        return allow_unknown_ ? 0.0 : 1.0;
+      }
+      return std::min(
+        1.0,
+        static_cast<double>(cell_cost) / kMaxNonObstacleCost);
+    };
+  return grid;
+}
+
+OruGlobalPlanner::PrimitiveDirection OruGlobalPlanner::fromCoreDirection(
+  forklift_oru_planner::PrimitiveDirection direction) const
+{
+  using CoreDirection = forklift_oru_planner::PrimitiveDirection;
+  if (direction == CoreDirection::FORWARD) {
+    return PrimitiveDirection::FORWARD;
+  }
+  if (direction == CoreDirection::REVERSE) {
+    return PrimitiveDirection::REVERSE;
+  }
+  return PrimitiveDirection::NONE;
+}
+
+OruGlobalPlanner::PrimitiveKind OruGlobalPlanner::fromCoreKind(
+  forklift_oru_planner::PrimitiveKind kind) const
+{
+  using CoreKind = forklift_oru_planner::PrimitiveKind;
+  if (kind == CoreKind::LEFT_ARC) {
+    return PrimitiveKind::LEFT_ARC;
+  }
+  if (kind == CoreKind::RIGHT_ARC) {
+    return PrimitiveKind::RIGHT_ARC;
+  }
+  if (kind == CoreKind::PIVOT_LEFT) {
+    return PrimitiveKind::PIVOT_LEFT;
+  }
+  if (kind == CoreKind::PIVOT_RIGHT) {
+    return PrimitiveKind::PIVOT_RIGHT;
+  }
+  return PrimitiveKind::STRAIGHT;
+}
+
+OruGlobalPlanner::PrimitiveRejectReason OruGlobalPlanner::fromCoreRejectReason(
+  forklift_oru_planner::RejectReason reason) const
+{
+  using CoreReason = forklift_oru_planner::RejectReason;
+  if (reason == CoreReason::OUT_OF_BOUNDS) {
+    return PrimitiveRejectReason::OUT_OF_BOUNDS;
+  }
+  if (reason == CoreReason::COSTMAP) {
+    return PrimitiveRejectReason::COSTMAP;
+  }
+  if (reason == CoreReason::FOOTPRINT) {
+    return PrimitiveRejectReason::FOOTPRINT;
+  }
+  return PrimitiveRejectReason::NONE;
+}
+
+OruGlobalPlanner::LatticeTransition OruGlobalPlanner::fromCoreTransition(
+  const forklift_oru_planner::Primitive & primitive) const
+{
+  LatticeTransition transition;
+  transition.state = {
+    primitive.state.x,
+    primitive.state.y,
+    primitive.state.theta_index};
+  transition.samples.reserve(primitive.samples.size());
+  for (const auto & pose : primitive.samples) {
+    transition.samples.push_back({pose.x, pose.y, pose.theta});
+  }
+  transition.cost = primitive.cost;
+  transition.direction = fromCoreDirection(primitive.direction);
+  transition.kind = fromCoreKind(primitive.kind);
+  transition.length = primitive.length;
+  transition.heading_delta = primitive.heading_delta;
+  return transition;
+}
+
 OruGlobalPlanner::LatticePath OruGlobalPlanner::searchLattice(
   const Cell & start,
   double start_yaw,
   const Cell & goal,
   double goal_yaw) const
 {
-  const auto size_x = costmap_->getSizeInCellsX();
-  const auto size_y = costmap_->getSizeInCellsY();
-  const auto state_count =
-    size_x * size_y * lattice_heading_bins_ * kLatticeDirectionCount;
+  const forklift_oru_planner::LatticeCore core(makeCoreOptions());
+  const auto result = core.plan(
+    makeCoreGridAdapter(),
+    {start.x, start.y},
+    start_yaw,
+    {goal.x, goal.y},
+    goal_yaw);
 
-  const LatticeState start_state{start.x, start.y, headingIndex(start_yaw)};
-  const auto start_index = toLatticeIndex(start_state, PrimitiveDirection::NONE);
-
-  std::vector<double> g_score(state_count, std::numeric_limits<double>::infinity());
-  std::vector<unsigned int> parent(state_count, kNoParent);
-  std::vector<LatticeTransition> arrival_transition(state_count);
-  std::vector<bool> closed(state_count, false);
-  std::priority_queue<QueueNode, std::vector<QueueNode>, QueueGreater> open_set;
   LatticeSearchStats stats;
+  stats.expanded = result.stats.expanded;
+  stats.generated = result.stats.generated;
+  stats.accepted = result.stats.accepted;
+  stats.rejected_out_of_bounds = result.stats.rejected_out_of_bounds;
+  stats.rejected_costmap = result.stats.rejected_costmap;
+  stats.rejected_footprint = result.stats.rejected_footprint;
+  stats.improved = result.stats.improved;
+  stats.best_goal_distance = result.stats.best_goal_distance;
+  logLatticeStats(stats, result.succeeded ? "succeeded" : "exhausted open set");
 
-  g_score[start_index] = 0.0;
-  parent[start_index] = start_index;
-  open_set.push({start_index, latticeHeuristic(start_state, goal, goal_yaw)});
-  stats.best_goal_distance = latticeGoalDistance(start_state, goal);
-
-  unsigned int iterations = 0;
-  while (!open_set.empty()) {
-    const auto current = open_set.top();
-    open_set.pop();
-
-    if (closed[current.index]) {
-      continue;
-    }
-
-    closed[current.index] = true;
-    ++stats.expanded;
-    const auto current_state = fromLatticeIndex(current.index);
-    stats.best_goal_distance =
-      std::min(stats.best_goal_distance, latticeGoalDistance(current_state, goal));
-    if (isLatticeGoal(current_state, goal, goal_yaw)) {
-      logLatticeStats(stats, "succeeded");
-      return reconstructLatticePath(parent, arrival_transition, start_index, current.index);
-    }
-
-    if (max_iterations_ > 0 && ++iterations > max_iterations_) {
-      RCLCPP_WARN(
-        logger_, "Lattice search stopped after reaching max_iterations=%u", max_iterations_);
-      logLatticeStats(stats, "hit max_iterations");
-      return {};
-    }
-
-    const PrimitiveDirection previous_direction = directionFromLatticeIndex(current.index);
-
-    for (const auto & transition : generatePrimitives(current_state)) {
-      ++stats.generated;
-      const auto reject_reason = primitiveRejectReason(transition);
-      if (reject_reason != PrimitiveRejectReason::NONE) {
-        if (reject_reason == PrimitiveRejectReason::OUT_OF_BOUNDS) {
-          ++stats.rejected_out_of_bounds;
-        } else if (reject_reason == PrimitiveRejectReason::COSTMAP) {
-          ++stats.rejected_costmap;
-        } else if (reject_reason == PrimitiveRejectReason::FOOTPRINT) {
-          ++stats.rejected_footprint;
-        }
-        continue;
-      }
-      ++stats.accepted;
-
-      const auto next_index = toLatticeIndex(transition.state, transition.direction);
-      if (closed[next_index]) {
-        continue;
-      }
-
-      const double tentative_g =
-        g_score[current.index] + transitionTraversalCost(transition, previous_direction);
-      if (tentative_g >= g_score[next_index]) {
-        continue;
-      }
-
-      parent[next_index] = current.index;
-      arrival_transition[next_index] = transition;
-      g_score[next_index] = tentative_g;
-      ++stats.improved;
-      open_set.push({
-        next_index,
-        tentative_g + latticeHeuristic(transition.state, goal, goal_yaw)});
-    }
+  if (!result.succeeded) {
+    return {};
   }
 
-  logLatticeStats(stats, "exhausted open set");
-  return {};
+  LatticePath path;
+  path.states.reserve(result.states.size());
+  path.transitions.reserve(result.transitions.size());
+  for (const auto & state : result.states) {
+    path.states.push_back({state.x, state.y, state.theta_index});
+  }
+  for (const auto & transition : result.transitions) {
+    path.transitions.push_back(fromCoreTransition(transition));
+  }
+  return path;
 }
 
 OruGlobalPlanner::LatticePath OruGlobalPlanner::reconstructLatticePath(
@@ -540,100 +676,16 @@ OruGlobalPlanner::LatticePath OruGlobalPlanner::reconstructLatticePath(
 std::vector<OruGlobalPlanner::LatticeTransition> OruGlobalPlanner::generatePrimitives(
   const LatticeState & state) const
 {
-  double start_x = 0.0;
-  double start_y = 0.0;
-  costmap_->mapToWorld(state.x, state.y, start_x, start_y);
-
-  const double start_theta = headingForIndex(state.theta_index);
-  const unsigned int samples = std::max(2u, lattice_primitive_samples_);
-
-  auto transition_from_samples =
-    [this](
-    std::vector<LatticePose> poses,
-    PrimitiveDirection primitive_direction,
-    PrimitiveKind primitive_kind,
-    double length,
-    double heading_delta) -> LatticeTransition {
-      LatticeTransition transition;
-      transition.cost = length;
-      transition.direction = primitive_direction;
-      transition.kind = primitive_kind;
-      transition.length = length;
-      transition.heading_delta = heading_delta;
-
-      const auto & end = poses.back();
-      unsigned int end_x = 0;
-      unsigned int end_y = 0;
-      if (!costmap_->worldToMap(end.x, end.y, end_x, end_y)) {
-        return transition;
-      }
-
-      transition.state = {end_x, end_y, headingIndex(end.theta)};
-      transition.samples = std::move(poses);
-      return transition;
-    };
+  const forklift_oru_planner::LatticeCore core(makeCoreOptions());
+  const auto core_primitives = core.generatePrimitives(
+    makeCoreGridAdapter(),
+    {state.x, state.y, state.theta_index});
 
   std::vector<LatticeTransition> transitions;
-  transitions.reserve(lattice_reverse_enabled_ ? 6 : 3);
-
-  const std::array<PrimitiveDirection, 2> primitive_directions = {{
-    PrimitiveDirection::FORWARD,
-    PrimitiveDirection::REVERSE
-  }};
-
-  for (const auto primitive_direction : primitive_directions) {
-    if (primitive_direction == PrimitiveDirection::REVERSE && !lattice_reverse_enabled_) {
-      continue;
-    }
-
-    const double motion_sign =
-      primitive_direction == PrimitiveDirection::FORWARD ? 1.0 : -1.0;
-
-    std::vector<LatticePose> straight_samples;
-    straight_samples.reserve(samples);
-    for (unsigned int i = 0; i < samples; ++i) {
-      const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-      const double distance = motion_sign * lattice_step_distance_ * ratio;
-      straight_samples.push_back({
-        start_x + distance * std::cos(start_theta),
-        start_y + distance * std::sin(start_theta),
-        start_theta});
-    }
-    transitions.push_back(
-      transition_from_samples(
-        std::move(straight_samples), primitive_direction, PrimitiveKind::STRAIGHT,
-        lattice_step_distance_, 0.0));
-
-    for (const double turn_sign : {1.0, -1.0}) {
-      const auto primitive_kind =
-        turn_sign > 0.0 ? PrimitiveKind::LEFT_ARC : PrimitiveKind::RIGHT_ARC;
-      std::vector<LatticePose> arc_samples;
-      arc_samples.reserve(samples);
-      for (unsigned int i = 0; i < samples; ++i) {
-        const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double delta_theta = turn_sign * lattice_arc_angle_ * ratio;
-        const double signed_radius = motion_sign * turn_sign * lattice_arc_radius_;
-        arc_samples.push_back({
-          start_x + signed_radius *
-          (std::sin(start_theta + delta_theta) - std::sin(start_theta)),
-          start_y - signed_radius *
-          (std::cos(start_theta + delta_theta) - std::cos(start_theta)),
-          normalizeAngle(start_theta + delta_theta)});
-      }
-      transitions.push_back(
-        transition_from_samples(
-          std::move(arc_samples), primitive_direction, primitive_kind,
-          lattice_arc_radius_ * lattice_arc_angle_, turn_sign * lattice_arc_angle_));
-    }
+  transitions.reserve(core_primitives.size());
+  for (const auto & primitive : core_primitives) {
+    transitions.push_back(fromCoreTransition(primitive));
   }
-
-  transitions.erase(
-    std::remove_if(
-      transitions.begin(), transitions.end(),
-      [](const LatticeTransition & transition) {
-        return transition.samples.empty();
-      }),
-    transitions.end());
   return transitions;
 }
 
@@ -815,6 +867,47 @@ bool OruGlobalPlanner::isFootprintTraversableAtPose(double wx, double wy, double
 bool OruGlobalPlanner::primitiveTraversable(const LatticeTransition & transition) const
 {
   return primitiveRejectReason(transition) == PrimitiveRejectReason::NONE;
+}
+
+bool OruGlobalPlanner::reversePrimitiveAllowedTowardGoal(
+  const LatticeState & state,
+  const Cell & goal,
+  double goal_yaw) const
+{
+  if (!lattice_reverse_requires_goal_behind_) {
+    return true;
+  }
+
+  const double theta = headingForIndex(state.theta_index);
+
+  // Terminal pivot regime: when the search start is already near the goal but the
+  // heading still has to swing a lot, the remaining maneuver is a pivot, not a
+  // back-up. Allowing reverse here lets the planner emit reverse+pivot micro-nudges
+  // that the controller cannot execute stably, so it oscillates off the goal. A pure
+  // backing maneuver (same heading) keeps its heading error below the threshold and
+  // is unaffected.
+  if (lattice_pivot_enabled_ && lattice_pivot_terminal_radius_ > 0.0) {
+    const double goal_distance = latticeGoalDistance(state, goal);
+    const double heading_error =
+      std::abs(normalizeAngle(theta - goal_yaw));
+    if (goal_distance <= lattice_pivot_terminal_radius_ &&
+      heading_error >= lattice_pivot_terminal_heading_)
+    {
+      return false;
+    }
+  }
+
+  double state_x = 0.0;
+  double state_y = 0.0;
+  double goal_x = 0.0;
+  double goal_y = 0.0;
+  costmap_->mapToWorld(state.x, state.y, state_x, state_y);
+  costmap_->mapToWorld(goal.x, goal.y, goal_x, goal_y);
+
+  const double goal_projection =
+    (goal_x - state_x) * std::cos(theta) + (goal_y - state_y) * std::sin(theta);
+
+  return goal_projection < -lattice_reverse_goal_behind_margin_;
 }
 
 OruGlobalPlanner::PrimitiveRejectReason OruGlobalPlanner::primitiveRejectReason(
@@ -1016,6 +1109,7 @@ void OruGlobalPlanner::logLatticePlanMetadata(const LatticePath & path) const
 {
   size_t forward_segments = 0;
   size_t reverse_segments = 0;
+  size_t pivot_segments = 0;
   size_t gear_switches = 0;
   PrimitiveDirection previous_direction = PrimitiveDirection::NONE;
 
@@ -1024,6 +1118,11 @@ void OruGlobalPlanner::logLatticePlanMetadata(const LatticePath & path) const
       ++forward_segments;
     } else if (transition.direction == PrimitiveDirection::REVERSE) {
       ++reverse_segments;
+    }
+    if (transition.kind == PrimitiveKind::PIVOT_LEFT ||
+      transition.kind == PrimitiveKind::PIVOT_RIGHT)
+    {
+      ++pivot_segments;
     }
 
     if (previous_direction != PrimitiveDirection::NONE &&
@@ -1038,9 +1137,9 @@ void OruGlobalPlanner::logLatticePlanMetadata(const LatticePath & path) const
   RCLCPP_INFO(
     logger_,
     "Lattice planner produced %zu states, %zu segments "
-    "(forward=%zu reverse=%zu gear_switches=%zu)",
+    "(forward=%zu reverse=%zu pivot=%zu gear_switches=%zu)",
     path.states.size(), path.transitions.size(), forward_segments, reverse_segments,
-    gear_switches);
+    pivot_segments, gear_switches);
 }
 
 unsigned int OruGlobalPlanner::headingIndex(double yaw) const

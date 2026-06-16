@@ -1,0 +1,18 @@
+# Generated for P10 Phase 1 forklift lattice smoke tests.
+# Parameters match forklift_nav2_oru_test.yaml as of 2026-06-16.
+heading_bins 16
+resolution 0.05
+step_distance 0.20
+arc_radius 0.60
+arc_angle 0.3926990817
+pivot_angle 0.3926990817
+primitive_samples 5
+rear_axle_x_offset -0.34
+primitive forward straight 0.20 0.0
+primitive forward left_arc 0.2356194490 0.3926990817
+primitive forward right_arc 0.2356194490 -0.3926990817
+primitive reverse straight 0.20 0.0
+primitive reverse left_arc 0.2356194490 0.3926990817
+primitive reverse right_arc 0.2356194490 -0.3926990817
+primitive none pivot_left 2.0 0.3926990817
+primitive none pivot_right 2.0 -0.3926990817

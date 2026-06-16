@@ -27,6 +27,13 @@ public:
     double heading_delta;
   };
 
+  struct SampleSummary
+  {
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> theta;
+  };
+
   struct SearchSummary
   {
     std::vector<unsigned int> x_cells;
@@ -53,6 +60,10 @@ public:
     planner.lattice_reverse_enabled_ = false;
     planner.lattice_reverse_cost_multiplier_ = 0.5;
     planner.lattice_gear_switch_cost_ = 1.0;
+    planner.lattice_pivot_enabled_ = false;
+    planner.lattice_pivot_angle_ = planner.lattice_arc_angle_;
+    planner.lattice_pivot_turn_cost_ = 0.35;
+    planner.lattice_rear_axle_x_offset_ = -0.34;
   }
 
   static unsigned int headingIndex(OruGlobalPlanner & planner, double yaw)
@@ -75,6 +86,11 @@ public:
     return static_cast<int>(OruGlobalPlanner::PrimitiveDirection::FORWARD);
   }
 
+  static int noneDirection()
+  {
+    return static_cast<int>(OruGlobalPlanner::PrimitiveDirection::NONE);
+  }
+
   static int reverseDirection()
   {
     return static_cast<int>(OruGlobalPlanner::PrimitiveDirection::REVERSE);
@@ -95,9 +111,30 @@ public:
     return static_cast<int>(OruGlobalPlanner::PrimitiveKind::RIGHT_ARC);
   }
 
+  static int pivotLeftKind()
+  {
+    return static_cast<int>(OruGlobalPlanner::PrimitiveKind::PIVOT_LEFT);
+  }
+
+  static int pivotRightKind()
+  {
+    return static_cast<int>(OruGlobalPlanner::PrimitiveKind::PIVOT_RIGHT);
+  }
+
   static void enableReverse(OruGlobalPlanner & planner)
   {
     planner.lattice_reverse_enabled_ = true;
+  }
+
+  static void requireGoalBehindForReverse(OruGlobalPlanner & planner)
+  {
+    planner.lattice_reverse_requires_goal_behind_ = true;
+    planner.lattice_reverse_goal_behind_margin_ = 0.05;
+  }
+
+  static void enablePivot(OruGlobalPlanner & planner)
+  {
+    planner.lattice_pivot_enabled_ = true;
   }
 
   static std::vector<Endpoint> primitiveEndpoints(OruGlobalPlanner & planner)
@@ -116,6 +153,33 @@ public:
         transition.heading_delta});
     }
     return endpoints;
+  }
+
+  static SampleSummary firstPivotSamples(OruGlobalPlanner & planner)
+  {
+    planner.lattice_pivot_enabled_ = true;
+    const auto transitions = planner.generatePrimitives({10, 10, 0});
+    SampleSummary summary;
+    for (const auto & transition : transitions) {
+      if (transition.kind != OruGlobalPlanner::PrimitiveKind::PIVOT_LEFT) {
+        continue;
+      }
+      summary.x.reserve(transition.samples.size());
+      summary.y.reserve(transition.samples.size());
+      summary.theta.reserve(transition.samples.size());
+      for (const auto & sample : transition.samples) {
+        summary.x.push_back(sample.x);
+        summary.y.push_back(sample.y);
+        summary.theta.push_back(sample.theta);
+      }
+      break;
+    }
+    return summary;
+  }
+
+  static double rearAxleXOffset(OruGlobalPlanner & planner)
+  {
+    return planner.lattice_rear_axle_x_offset_;
   }
 
   static bool straightPrimitiveTraversable(OruGlobalPlanner & planner)
@@ -195,11 +259,40 @@ public:
     return planner.latticeHeuristic({10, 10, theta_index}, {10, 10}, goal_yaw);
   }
 
+  static bool reverseAllowedTowardGoal(
+    OruGlobalPlanner & planner,
+    unsigned int goal_x,
+    unsigned int goal_y,
+    double goal_yaw = 0.0)
+  {
+    return planner.reversePrimitiveAllowedTowardGoal({20, 20, 0}, {goal_x, goal_y}, goal_yaw);
+  }
+
   static SearchSummary reverseSearchSummary(OruGlobalPlanner & planner)
   {
     planner.lattice_reverse_enabled_ = true;
     planner.lattice_goal_tolerance_ = 0.01;
     const auto path = planner.searchLattice({20, 20}, 0.0, {16, 20}, 0.0);
+
+    SearchSummary summary;
+    summary.x_cells.reserve(path.states.size());
+    summary.theta_indices.reserve(path.states.size());
+    summary.directions.reserve(path.transitions.size());
+    for (const auto & state : path.states) {
+      summary.x_cells.push_back(state.x);
+      summary.theta_indices.push_back(state.theta_index);
+    }
+    for (const auto & transition : path.transitions) {
+      summary.directions.push_back(static_cast<int>(transition.direction));
+    }
+    return summary;
+  }
+
+  static SearchSummary pivotSearchSummary(OruGlobalPlanner & planner)
+  {
+    planner.lattice_pivot_enabled_ = true;
+    planner.lattice_goal_tolerance_ = 0.01;
+    const auto path = planner.searchLattice({20, 20}, 0.0, {13, 27}, 0.5 * kPlannerTestPi);
 
     SearchSummary summary;
     summary.x_cells.reserve(path.states.size());
@@ -294,6 +387,83 @@ TEST(OruGlobalPlanner, ReversePrimitivesAreGatedAndCarryMetadata)
   EXPECT_EQ(endpoints[5].direction, OruGlobalPlannerTestAccess::reverseDirection());
   EXPECT_EQ(endpoints[5].kind, OruGlobalPlannerTestAccess::rightArcKind());
   EXPECT_DOUBLE_EQ(endpoints[5].heading_delta, -OruGlobalPlannerTestAccess::arcAngle(planner));
+}
+
+TEST(OruGlobalPlanner, ReverseGoalBehindGateBlocksForwardAndSideGoals)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::requireGoalBehindForReverse(planner);
+
+  EXPECT_FALSE(OruGlobalPlannerTestAccess::reverseAllowedTowardGoal(planner, 24, 20));
+  EXPECT_FALSE(OruGlobalPlannerTestAccess::reverseAllowedTowardGoal(planner, 20, 28));
+  EXPECT_TRUE(OruGlobalPlannerTestAccess::reverseAllowedTowardGoal(planner, 16, 20));
+}
+
+TEST(OruGlobalPlanner, TerminalPivotRegimeSuppressesReverseForGoalBehind)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::requireGoalBehindForReverse(planner);
+  OruGlobalPlannerTestAccess::enablePivot(planner);
+
+  // Goal behind (16,20) within the terminal radius: a same-heading backing maneuver
+  // (goal_yaw == state heading 0) still allows reverse, but a large remaining heading
+  // error makes it a terminal pivot and suppresses reverse so it does not pollute the
+  // terminal nudge.
+  EXPECT_TRUE(OruGlobalPlannerTestAccess::reverseAllowedTowardGoal(planner, 16, 20, 0.0));
+  EXPECT_FALSE(OruGlobalPlannerTestAccess::reverseAllowedTowardGoal(planner, 16, 20, M_PI * 0.5));
+}
+
+TEST(OruGlobalPlanner, PivotPrimitivesAreGatedAndRotateAroundRearAxle)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  EXPECT_EQ(OruGlobalPlannerTestAccess::primitiveEndpoints(planner).size(), 3u);
+
+  OruGlobalPlannerTestAccess::enablePivot(planner);
+  const auto endpoints = OruGlobalPlannerTestAccess::primitiveEndpoints(planner);
+
+  ASSERT_EQ(endpoints.size(), 5u);
+  EXPECT_EQ(endpoints[3].theta_index, 1u);
+  EXPECT_EQ(endpoints[3].direction, OruGlobalPlannerTestAccess::noneDirection());
+  EXPECT_EQ(endpoints[3].kind, OruGlobalPlannerTestAccess::pivotLeftKind());
+  EXPECT_DOUBLE_EQ(endpoints[3].heading_delta, OruGlobalPlannerTestAccess::arcAngle(planner));
+  EXPECT_EQ(endpoints[4].theta_index, 15u);
+  EXPECT_EQ(endpoints[4].direction, OruGlobalPlannerTestAccess::noneDirection());
+  EXPECT_EQ(endpoints[4].kind, OruGlobalPlannerTestAccess::pivotRightKind());
+  EXPECT_DOUBLE_EQ(endpoints[4].heading_delta, -OruGlobalPlannerTestAccess::arcAngle(planner));
+
+  const auto samples = OruGlobalPlannerTestAccess::firstPivotSamples(planner);
+  ASSERT_GE(samples.x.size(), 2u);
+  const double rear_axle_x_offset = OruGlobalPlannerTestAccess::rearAxleXOffset(planner);
+  const double rear_x_before = samples.x.front() + rear_axle_x_offset * std::cos(samples.theta.front());
+  const double rear_y_before = samples.y.front() + rear_axle_x_offset * std::sin(samples.theta.front());
+  const double rear_x_after = samples.x.back() + rear_axle_x_offset * std::cos(samples.theta.back());
+  const double rear_y_after = samples.y.back() + rear_axle_x_offset * std::sin(samples.theta.back());
+  EXPECT_NEAR(rear_x_after, rear_x_before, 1e-9);
+  EXPECT_NEAR(rear_y_after, rear_y_before, 1e-9);
+}
+
+TEST(OruGlobalPlanner, SearchCanUsePivotPrimitiveForInPlaceGoalHeading)
+{
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  const auto summary = OruGlobalPlannerTestAccess::pivotSearchSummary(planner);
+
+  ASSERT_GE(summary.theta_indices.size(), 2u);
+  EXPECT_EQ(summary.theta_indices.front(), 0u);
+  EXPECT_EQ(summary.theta_indices.back(), 4u);
+  EXPECT_FALSE(summary.directions.empty());
+  for (const auto direction : summary.directions) {
+    EXPECT_EQ(direction, OruGlobalPlannerTestAccess::noneDirection());
+  }
 }
 
 TEST(OruGlobalPlanner, SearchCanUseReversePrimitiveForGoalBehindVehicle)

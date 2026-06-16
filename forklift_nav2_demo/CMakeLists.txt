@@ -4,7 +4,7 @@ project(forklift_nav2_demo)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY launch urdf config worlds docs
+  DIRECTORY launch urdf config worlds docs behavior_trees
   DESTINATION share/${PROJECT_NAME}
 )
 

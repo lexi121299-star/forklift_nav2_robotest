@@ -34,6 +34,22 @@ ForkliftVehicleModel pivotVehicleModel()
     0.6});
 }
 
+ForkliftVehicleModel rearAxlePivotVehicleModel()
+{
+  return ForkliftVehicleModel({
+    1.2,
+    0.5 * kPi,
+    1.6,
+    1.0,
+    0.5,
+    1.0,
+    true,
+    0.5 * kPi,
+    0.03,
+    0.6,
+    -0.34});
+}
+
 geometry_msgs::msg::PoseStamped makePose(double x, double y, double yaw = 0.0)
 {
   geometry_msgs::msg::PoseStamped pose;
@@ -270,6 +286,38 @@ TEST(ForkliftMpcTrajectory, HighCurvatureCanRequestPivotSteering)
   EXPECT_NEAR(result.trajectory[1].steering_angle, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[1].state.phi, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[1].speed_limit, 1.0, 1e-9);
+}
+
+TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
+{
+  const double rear_axle_x_offset = -0.34;
+  const double rear_x = 0.66;
+  const double rear_y = 2.0;
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(1.0, 2.0, 0.0));
+  path.poses.push_back(makePose(
+      rear_x - rear_axle_x_offset * std::cos(0.5 * kPi),
+      rear_y - rear_axle_x_offset * std::sin(0.5 * kPi),
+      0.5 * kPi));
+
+  MpcTrajectoryOptions options;
+  options.detect_pivot_turns = true;
+  options.pivot_rear_axle_x_offset = rear_axle_x_offset;
+  options.max_velocity = 1.0;
+
+  const auto result = processPathToMpcTrajectory(path, rearAxlePivotVehicleModel(), options);
+
+  ASSERT_EQ(result.trajectory.size(), 2u);
+  EXPECT_EQ(result.diagnostics.pivot_motion_points, 2u);
+  EXPECT_TRUE(result.trajectory[0].pivot_motion);
+  EXPECT_TRUE(result.trajectory[1].pivot_motion);
+  EXPECT_FALSE(result.trajectory[0].reverse_motion);
+  EXPECT_FALSE(result.trajectory[1].reverse_motion);
+  EXPECT_NEAR(result.trajectory[0].state.theta, 0.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].state.theta, 0.5 * kPi, 1e-9);
+  EXPECT_NEAR(result.trajectory[0].steering_angle, 0.5 * kPi, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].steering_angle, 0.5 * kPi, 1e-9);
 }
 
 TEST(ForkliftMpcTrajectory, TrajectoryToPathUsesEstimatedYaw)

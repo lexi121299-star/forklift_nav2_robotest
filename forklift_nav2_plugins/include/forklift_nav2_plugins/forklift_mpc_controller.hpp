@@ -102,6 +102,12 @@ private:
   SafetyGateParameters safetyGateParameters() const;
   bool safetyEmergencyStopActive() const;
   bool previewHasReverseMotion(const MpcPreviewWindow & preview_window) const;
+  bool previewHasPivotMotion(const MpcPreviewWindow & preview_window) const;
+  bool pivotCommandCollisionFree(
+    const MpcState & state,
+    double velocity,
+    double steering,
+    double target_yaw) const;
   double normalizeAngle(double angle) const;
   double poseYaw(const geometry_msgs::msg::PoseStamped & pose) const;
   double distanceToPose(const MpcState & state, const geometry_msgs::msg::PoseStamped & pose) const;
@@ -140,6 +146,8 @@ private:
   double pivot_steering_tolerance_{0.03};
   double pivot_turn_radius_{0.6};
   double rear_axle_x_offset_{0.0};
+  double pivot_velocity_{0.12};
+  double pivot_yaw_tolerance_{0.05};
   double horizon_time_{1.8};
   double time_step_{0.2};
   double lookahead_distance_{1.4};

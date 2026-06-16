@@ -53,7 +53,7 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
-    default_bt_xml_filename: "navigate_w_replanning_and_recovery.xml"
+    default_bt_xml_filename: "/workspace/install_foxy/forklift_nav2_demo/share/forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml"
     bt_loop_duration: 10
     default_server_timeout: 20
     enable_groot_monitoring: True
@@ -127,6 +127,8 @@ controller_server:
       pivot_steering_tolerance: 0.03
       pivot_turn_radius: 0.6
       rear_axle_x_offset: -0.34
+      pivot_velocity: 0.12
+      pivot_yaw_tolerance: 0.05
       horizon_time: 1.8
       time_step: 0.2
       lookahead_distance: 0.9
@@ -326,7 +328,12 @@ planner_server:
       max_iterations: 0
       use_final_approach_orientation: true
       use_lattice_planner: true
-      lattice_fallback_to_astar: true
+      # v1 fail-safe: when the kinodynamic lattice search finds no path, fail cleanly
+      # (PlannerException) instead of handing a holonomic 2D-A* path to the forklift
+      # controller. A* ignores heading/kinematics, so the controller could not track it
+      # and the vehicle diverged to the wrong corner. Re-routing is deferred to P10; v1
+      # runs fixed, pre-validated routes and stops/aborts safely on planning failure.
+      lattice_fallback_to_astar: false
       lattice_heading_bins: 16
       lattice_step_distance: 0.20
       lattice_arc_radius: 0.60
@@ -339,6 +346,16 @@ planner_server:
       lattice_goal_heading_cost_multiplier: 0.25
       lattice_reverse_cost_multiplier: 3.0
       lattice_gear_switch_cost: 4.0
+      lattice_reverse_requires_goal_behind: true
+      lattice_reverse_goal_behind_margin: 0.05
+      lattice_pivot_enabled: true
+      lattice_pivot_angle: 0.3926990817
+      lattice_pivot_turn_cost: 2.0
+      lattice_rear_axle_x_offset: -0.34
+      # Near the goal with a large remaining heading error, fix heading by pivot only
+      # and suppress reverse so terminal nudges do not destabilise the controller.
+      lattice_pivot_terminal_radius: 0.6
+      lattice_pivot_terminal_heading: 0.7853981634  # pi/4 = 45 deg
 
 planner_server_rclcpp_node:
   ros__parameters:

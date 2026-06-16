@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "forklift_oru_planner/oru_lattice_core.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_costmap_2d/footprint.hpp"
 #include "nav2_costmap_2d/footprint_collision_checker.hpp"
@@ -74,7 +75,9 @@ private:
   {
     STRAIGHT,
     LEFT_ARC,
-    RIGHT_ARC
+    RIGHT_ARC,
+    PIVOT_LEFT,
+    PIVOT_RIGHT
   };
 
   struct LatticeTransition
@@ -130,6 +133,12 @@ private:
     unsigned int start_index,
     unsigned int goal_index) const;
   std::vector<LatticeTransition> generatePrimitives(const LatticeState & state) const;
+  forklift_oru_planner::PlannerOptions makeCoreOptions() const;
+  forklift_oru_planner::GridAdapter makeCoreGridAdapter() const;
+  LatticeTransition fromCoreTransition(const forklift_oru_planner::Primitive & primitive) const;
+  PrimitiveDirection fromCoreDirection(forklift_oru_planner::PrimitiveDirection direction) const;
+  PrimitiveKind fromCoreKind(forklift_oru_planner::PrimitiveKind kind) const;
+  PrimitiveRejectReason fromCoreRejectReason(forklift_oru_planner::RejectReason reason) const;
 
   bool resolveGoalCell(
     const Cell & requested_goal,
@@ -145,6 +154,10 @@ private:
   bool isFootprintTraversableAtPose(double wx, double wy, double yaw) const;
   bool primitiveTraversable(const LatticeTransition & transition) const;
   PrimitiveRejectReason primitiveRejectReason(const LatticeTransition & transition) const;
+  bool reversePrimitiveAllowedTowardGoal(
+    const LatticeState & state,
+    const Cell & goal,
+    double goal_yaw) const;
   bool isLatticeGoal(
     const LatticeState & state,
     const Cell & goal,
@@ -222,6 +235,19 @@ private:
   double lattice_goal_heading_cost_multiplier_{0.25};
   double lattice_reverse_cost_multiplier_{0.5};
   double lattice_gear_switch_cost_{1.0};
+  bool lattice_reverse_requires_goal_behind_{false};
+  double lattice_reverse_goal_behind_margin_{0.05};
+  bool lattice_pivot_enabled_{false};
+  double lattice_pivot_angle_{0.0};
+  double lattice_pivot_turn_cost_{0.35};
+  double lattice_rear_axle_x_offset_{0.0};
+  // Terminal pivot regime: near the goal but with a large remaining heading error,
+  // correct heading by pivot only and suppress reverse so it does not pollute the
+  // terminal nudge (which destabilised the controller and drove it off the goal).
+  // A pure backing maneuver (reverse_ab: same heading, goal behind) keeps reverse
+  // because its heading error stays below lattice_pivot_terminal_heading_.
+  double lattice_pivot_terminal_radius_{0.6};
+  double lattice_pivot_terminal_heading_{0.7853981634};  // pi/4 = 45 deg
 };
 
 }  // namespace forklift_nav2_plugins

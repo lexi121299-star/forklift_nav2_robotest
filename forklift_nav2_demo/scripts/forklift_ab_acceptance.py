@@ -30,12 +30,64 @@ SCENARIOS = {
         "max_reverse_samples": 0,
         "min_final_x": 0.75,
     },
+    # 从「诊断场景」升级为「硬验收门」：
+    # pivot primitive 上线后终点 90° 姿态由 pivot 执行，不允许 reverse。
     "sparse_90_turn_ab": {
         "initial": (-2.0, -0.5, 0.0),
         "goal": (-1.3, 0.2, math.pi * 0.5),
-        "timeout_sec": 120.0,
+        "timeout_sec": 140.0,
         "min_forward_samples": 1,
         "max_reverse_samples": 0,
+        "min_pivot_samples": 1,
+        "min_abs_sim_angular_z": 0.05,
+        "require_succeeded": True,
+    },
+    # 真车典型场景：沿过道前进（x 方向）到路口，pivot 90°，进侧道（y 方向）再走一段。
+    # 两条腿都足够长，接近真实仓库点位，同时验证 replanning 过程中 pivot 不退化。
+    "l_shaped_corridor_ab": {
+        "initial": (-2.0, -0.5, 0.0),
+        "goal": (-0.3, 1.2, math.pi * 0.5),
+        "timeout_sec": 180.0,
+        "min_forward_samples": 1,
+        "max_reverse_samples": 0,
+        "min_pivot_samples": 1,
+        "min_abs_sim_angular_z": 0.05,
+        "min_final_y": 0.6,
+        "require_succeeded": True,
+    },
+    # 纯后轴原地旋转：目标设在 90° pivot 的自然落点（后轴不动，base_link 走 0.48m 弧线）。
+    # offset=-0.34: 后轴 pivot 点 (-2.34,-0.5)；左转 +90° → base 落点 (-2.34,-0.16)。
+    # 只验证 pivot 链路本身，不掺 forward 段；硬门 reverse=0 / pivot>=1 / SUCCEEDED。
+    "pivot_90_left_in_place": {
+        "initial": (-2.0, -0.5, 0.0),
+        "goal": (-2.34, -0.16, math.pi * 0.5),
+        "timeout_sec": 120.0,
+        "max_reverse_samples": 0,
+        "max_forward_samples": 40,
+        "min_pivot_samples": 1,
+        "min_abs_sim_angular_z": 0.05,
+        "require_succeeded": True,
+    },
+    # 右转 −90° → base 落点 (-2.34,-0.84)。
+    "pivot_90_right_in_place": {
+        "initial": (-2.0, -0.5, 0.0),
+        "goal": (-2.34, -0.84, -math.pi * 0.5),
+        "timeout_sec": 120.0,
+        "max_reverse_samples": 0,
+        "max_forward_samples": 40,
+        "min_pivot_samples": 1,
+        "min_abs_sim_angular_z": 0.05,
+        "require_succeeded": True,
+    },
+    "pivot_90_then_forward_ab": {
+        "initial": (-2.0, -0.5, 0.0),
+        "goal": (-2.0, 0.45, math.pi * 0.5),
+        "timeout_sec": 140.0,
+        "min_forward_samples": 1,
+        "max_reverse_samples": 0,
+        "min_pivot_samples": 1,
+        "min_abs_sim_angular_z": 0.05,
+        "min_final_y": 0.05,
     },
     "reverse_ab": {
         "initial": (-2.0, -0.5, 0.0),
@@ -160,9 +212,11 @@ class AbAcceptance:
         self.sim_cmd_samples = 0
         self.forward_control_samples = 0
         self.reverse_control_samples = 0
+        self.pivot_control_samples = 0
         self.max_control_velocity = 0.0
         self.min_signed_sim_linear_x = 0.0
         self.max_signed_sim_linear_x = 0.0
+        self.max_abs_sim_angular_z = 0.0
         self.last_odom = None
         self.phase_max_control_velocity = {
             "normal": 0.0,
@@ -220,11 +274,19 @@ class AbAcceptance:
             self.forward_control_samples += 1
         if msg.reverse and not msg.forward:
             self.reverse_control_samples += 1
+        if (
+            msg.forward and
+            not msg.reverse and
+            abs(msg.steering_angle_rad) >= 1.4 and
+            abs(msg.velocity_mps) > self.zero_velocity_threshold
+        ):
+            self.pivot_control_samples += 1
 
     def on_sim_cmd(self, msg):
         self.sim_cmd_samples += 1
         self.min_signed_sim_linear_x = min(self.min_signed_sim_linear_x, msg.linear.x)
         self.max_signed_sim_linear_x = max(self.max_signed_sim_linear_x, msg.linear.x)
+        self.max_abs_sim_angular_z = max(self.max_abs_sim_angular_z, abs(msg.angular.z))
         self.phase_max_sim_linear_x[self.phase] = max(
             self.phase_max_sim_linear_x[self.phase], abs(msg.linear.x))
 
@@ -516,6 +578,16 @@ class AbAcceptance:
                     self.forward_control_samples, max_forward))
         if scenario.get("expect_negative_sim_cmd", False) and self.min_signed_sim_linear_x >= -0.01:
             errors.append("negative sim cmd velocity was not observed")
+        if self.pivot_control_samples < int(scenario.get("min_pivot_samples", 0)):
+            errors.append(
+                "pivot samples {} below min {}".format(
+                    self.pivot_control_samples, scenario.get("min_pivot_samples")))
+        min_abs_sim_angular_z = scenario.get("min_abs_sim_angular_z")
+        if min_abs_sim_angular_z is not None:
+            if self.max_abs_sim_angular_z < float(min_abs_sim_angular_z):
+                errors.append(
+                    "max abs sim angular.z {:.3f} below min {:.3f}".format(
+                        self.max_abs_sim_angular_z, float(min_abs_sim_angular_z)))
         if scenario.get("require_blocked_zero_samples", False):
             if self.phase_zero_control_samples["blocked"] == 0:
                 errors.append("zero/brake control samples while blocked were not observed")
@@ -528,6 +600,12 @@ class AbAcceptance:
                 errors.append(
                     "final odom x {:.3f} below min {:.3f}".format(
                         self.last_odom.pose.pose.position.x, float(min_final_x)))
+        min_final_y = scenario.get("min_final_y")
+        if min_final_y is not None and self.last_odom is not None:
+            if self.last_odom.pose.pose.position.y < float(min_final_y):
+                errors.append(
+                    "final odom y {:.3f} below min {:.3f}".format(
+                        self.last_odom.pose.pose.position.y, float(min_final_y)))
 
         if errors:
             for error in errors:
@@ -545,15 +623,18 @@ class AbAcceptance:
                 "{} status: {} {}".format(self.action_name, result.status, status_name))
         self.node.get_logger().info("feedback_count={}".format(self.feedback_count))
         self.node.get_logger().info(
-            "control_samples={} sim_cmd_samples={} forward={} reverse={}".format(
+            "control_samples={} sim_cmd_samples={} forward={} reverse={} pivot={}".format(
                 self.control_samples,
                 self.sim_cmd_samples,
                 self.forward_control_samples,
                 self.reverse_control_samples,
+                self.pivot_control_samples,
             ))
         self.node.get_logger().info(
-            "sim_cmd min_signed_linear_x={:.3f} max_signed_linear_x={:.3f}".format(
-                self.min_signed_sim_linear_x, self.max_signed_sim_linear_x))
+            "sim_cmd min_signed_linear_x={:.3f} max_signed_linear_x={:.3f} max_abs_angular_z={:.3f}".format(
+                self.min_signed_sim_linear_x,
+                self.max_signed_sim_linear_x,
+                self.max_abs_sim_angular_z))
         self.node.get_logger().info(
             "phase_control_max normal={:.3f} before={:.3f} blocked={:.3f} after={:.3f}".format(
                 self.phase_max_control_velocity["normal"],
