@@ -63,7 +63,7 @@ P9  真车低速联调
 [ ] P8.2  独立 safety package / 命令闸门
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
 [ ] P8.4  真车低速 safety acceptance 包
-[ ] P2.3  真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog
+[ ] P2.3  真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog（代码侧已补齐，待台架/真车验收）
 [ ] P7.1  task_manager 最小任务入口
 ```
 
@@ -238,6 +238,26 @@ ros2 topic pub /forklift/control_cmd forklift_msgs/msg/ForkliftControlCommand ..
 - 真车或仿真能发布稳定 `/odom`。
 - `tf2_echo odom base_link` 连续可查。
 - 命令超时后车辆自动停车。
+
+P2.3 执行记录（2026-06-17）：
+
+- `curtis_vehicle_interface` 已从 dry-run 日志骨架补成真实 I/O 节点；默认仍可 `dry_run:=true`
+  离线验证，`dry_run:=false can_interface:=can0` 时打开 SocketCAN。
+- 新增标准库 SocketCAN 传输层，周期发送 Curtis 控制帧 `0x203`、`0x303`、`0x403`。
+- 接收并解析 Curtis 反馈帧 `0x183`、`0x283`、`0x383`、`0x483`，发布 `/forklift/vehicle_state`、
+  `/forklift/fault_state`、`/forklift/io_state`。
+- 根据左右驱动 RPM、`drive_wheel_radius_m`、`drive_gear_ratio`、`drive_track_width_m`
+  积分发布 `/odom` 和 `odom -> base_link` TF。
+- `/forklift/set_emergency_stop` 会立即发 brake/zero 命令；`command_timeout_sec` 超时、
+  `manual/standby` 模式、非法前后退方向都会进入 brake/zero 输出。
+- 新增 `curtis_vehicle_interface.launch.py`，暴露 `dry_run`、`can_interface`、watchdog、
+  feedback timeout、odom/TF frame、轮径/齿比/轮距等真车参数。
+- 验证：Foxy docker `colcon test --packages-select forklift_vehicle_interface` 通过，14 个 pytest
+  全部通过；`colcon build --packages-select forklift_vehicle_interface --symlink-install` 通过；
+  `ros2 launch forklift_vehicle_interface curtis_vehicle_interface.launch.py --show-args` 可发现启动参数。
+- 尚未完成台架/真车实际验收：需要接真实 `can0`，确认 CAN ID/字节定义与实车一致，标定轮径、
+  齿比和驱动轮距，验证 `/odom` 与 `tf2_echo odom base_link` 连续稳定，并实测急停/watchdog
+  能让底盘停车。
 
 ## 5. P3: 固定控制接口和车辆模型
 
@@ -954,6 +974,20 @@ P8.4 最低标准：
 - keepout 区、地图边缘、掉落风险区域不允许继续行驶。
 - safety 日志和诊断能说明停车、限速、等待、失败的原因，便于真车低速复盘。
 
+### P8.2 / P8.3 / P8.4 区别速查
+
+三者在安全这条线的不同层：P8.2 是“建闸门”（架构/机制），P8.3 是“动态障碍行为”，P8.4 是“在真车上证明它安全”（验收/标定）。
+
+| | **P8.2 独立 safety / command gate** | **P8.4 真车低速 safety acceptance** |
+|---|---|---|
+| 本质 | **机制层**：把命令收进一个独立安全闸 | **验收+标定层**：在真车上跑出来、调参数 |
+| 交付物 | 独立 `forklift_safety` package / 命令闸节点 | 真车低速验收包 + 标定好的保护区参数 |
+| 核心内容 | ① 所有运动命令（controller / task_manager / 手动 / **recovery**）都必须过闸；② **recovery command adapter**：只白名单低速、短时、可解释的 recovery（wait、清代价图重试、受限 pivot/backoff），转成受限 `ForkliftControlCommand`；③ 急停锁命令、watchdog、命令超时/车辆故障/定位丢失/costmap 异常即停；④ 不允许 Nav2 裸 `/cmd_vel` 直接进底盘 | ① **速度相关保护区**：越快前/后保护距离越大；② 前进/倒车**不同保护区**（倒车重点护车尾+叉臂）；③ footprint 覆盖车体+叉臂+安全余量；④ keepout / 地图边缘 / 掉落区禁行；⑤ safety 日志能解释每次停/限速/等待/失败 |
+| 在哪验证 | 仿真/台架即可（架构正确性） | **必须在真车低速实跑**签收 |
+| 一句话 | “任何命令都别想绕过安全层进底盘” | “在真车上把保护区调对、并证明它真停得住” |
+
+> 顺序：P8.2（建闸）→ P8.3（动态障碍等待/重规划/简单绕行行为）→ P8.4（真车把保护区标定+签收）。P8.2 是 P8.4 的前提——没有统一闸门，P8.4 没法保证所有命令（尤其 recovery）都受保护。
+
 P8.1 到 P7.1 之间的推荐顺序：
 
 ```text
@@ -1320,7 +1354,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] P1.2 定义 ForkliftControlCommand / ForkliftVehicleState
 [x] P2.1 创建 forklift_vehicle_interface
 [x] P2.2 写仿真 bridge: ForkliftControlCommand -> cmd_vel
-[ ] P2.3 真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog
+[ ] P2.3 真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog（代码侧已补齐，待台架/真车验收）
 [x] P3.1 写 forklift_vehicle_model
 [x] P4.1 把 ORU State / Control 概念移入 ForkliftMpcController
 [x] P4.2 把 Path 转成内部 Trajectory
@@ -1481,6 +1515,22 @@ constraint_extract / 几何约束：
 - `moving_actor_gazebo`、`gazebo_plugin_actor_collision`、`iliad_base_simulation` 更偏 ROS1/Gazebo actor 仿真环境。
 - `iliad_goal_manager`、`iliad_init_pose_manager` 和未来 `forklift_task_manager + Nav2 actions` 有部分职责重叠，不作为当前主线入口。
 - 只有当后续明确要做人群附近通行策略、人车交互安全指标或动态人行为预测时，再从 `iliad/` 里选模块参考或局部迁移。
+
+### 和「真实完整 ORU」的差距速查
+
+前提：P10 做的是 **clean-room ORU-style**，**不是直接拷上游 `navigation_oru` 源码**——本地那份 LICENSE 是 `CC BY-NC-SA 4.0`（非商业），不能直接用，所以按其思路重写。因此“差距”指**能力差距**，不是“还没 copy 完”。
+
+当前已有：P10 Phase 0–4 落地的 clean-room ORU lattice **核心**（16 heading、forward/reverse/pivot primitive、swept footprint 碰撞、hybrid heuristic、ARA* 搜索）；控制器是 **sampled predictive controller**。距完整 ORU 还差五块：
+
+| ORU 组件 | 现状 | 差距 | 计划 |
+|---|---|---|---|
+| **motion planner** | clean-room lattice 核心（Phase 0–4），但 Phase 5 还没过门；长双腿 L 形单次自主规划仍偶发发散 | 更丰富 primitive 集（多曲率/多长度）、primitive 生成器、lookup table/cache、更成熟搜索 | **P10 Phase 1–6**（进行中） |
+| **QP-MPC 控制器** | 有 ORU State/Control 概念、preview、预处理的**采样式**控制器 | 不是完整 ORU `qpProblem/qpConstraints/qpOASES` | **P12**，且**仅当**采样控制器在真车低速不够稳才上 |
+| **trajectory processor / path smoother** | controller 内部轻量预处理 | 完整 `orunav_trajectory_processor` + `orunav_path_smoother`（ACADO 约束优化） | **P11**，ACADO 依赖重，不作第一步 |
+| **constraint_extract / 几何约束** | 无 | 从 costmap 提可行 corridor、更严格叉臂/车尾碰撞、给 smoother/MPC 边界约束（保持障碍余量而不只是“不撞”） | **P11** |
+| vehicle_execution / coordinator / rviz / debug / iliad human-aware | 不移 | ORU 自己的任务执行/多车协调/调试，与我们 task_manager+Nav2 职责重叠；单车 v1 不需要 | 只参考，不移 |
+
+**对 v1 的实际影响**：差的这些**都不是 v1 上车前置**。v1 已定调走 Option A（路点分解，不靠在线自主规划），所以 planner 完整度不足用“已验证原子段”绕开，QP-MPC / smoother / constraint_extract 全部 P11/P12、低速够用就不上。即：离“完整 ORU”还有 **P10（planner）+ P11（smoother/约束）+ P12（QP-MPC）** 三大步；离“v1 上车”只差上车前那几个硬门。完整 ORU 是“把第一版做扎实之后的事”。
 
 P8.4 / P7.1 之后的建议 ORU 后续顺序：
 
