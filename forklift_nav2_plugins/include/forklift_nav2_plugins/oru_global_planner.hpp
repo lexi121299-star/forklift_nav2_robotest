@@ -185,6 +185,10 @@ private:
   double latticeGoalDistance(const LatticeState & state, const Cell & goal) const;
   void logLatticeStats(const LatticeSearchStats & stats, const char * result) const;
   void logLatticePlanMetadata(const LatticePath & path) const;
+  bool buildDirectPivotPath(
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal,
+    nav_msgs::msg::Path & path) const;
 
   nav_msgs::msg::Path buildPath(
     const std::vector<Cell> & cells,

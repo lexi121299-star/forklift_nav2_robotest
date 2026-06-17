@@ -270,17 +270,18 @@ class AbAcceptance:
             self.phase_max_control_velocity[self.phase], abs(msg.velocity_mps))
         if abs(msg.velocity_mps) <= self.zero_velocity_threshold:
             self.phase_zero_control_samples[self.phase] += 1
-        if msg.forward and not msg.reverse:
-            self.forward_control_samples += 1
-        if msg.reverse and not msg.forward:
-            self.reverse_control_samples += 1
-        if (
+        pivot_command = (
             msg.forward and
             not msg.reverse and
             abs(msg.steering_angle_rad) >= 1.4 and
             abs(msg.velocity_mps) > self.zero_velocity_threshold
-        ):
+        )
+        if pivot_command:
             self.pivot_control_samples += 1
+        elif msg.forward and not msg.reverse:
+            self.forward_control_samples += 1
+        elif msg.reverse and not msg.forward:
+            self.reverse_control_samples += 1
 
     def on_sim_cmd(self, msg):
         self.sim_cmd_samples += 1

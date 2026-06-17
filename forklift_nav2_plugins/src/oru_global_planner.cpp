@@ -324,6 +324,11 @@ nav_msgs::msg::Path OruGlobalPlanner::createPlan(
   }
 
   if (use_lattice_planner_) {
+    nav_msgs::msg::Path direct_pivot_path;
+    if (buildDirectPivotPath(start, goal, direct_pivot_path)) {
+      return direct_pivot_path;
+    }
+
     const auto lattice_path = searchLattice(planning_start_cell, start_yaw, goal_cell, goal_yaw);
     if (!lattice_path.states.empty()) {
       logLatticePlanMetadata(lattice_path);
@@ -1267,6 +1272,105 @@ nav_msgs::msg::Path OruGlobalPlanner::buildLatticePath(
   }
 
   return path;
+}
+
+bool OruGlobalPlanner::buildDirectPivotPath(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path & path) const
+{
+  if (!lattice_pivot_enabled_ || std::abs(lattice_rear_axle_x_offset_) < 1e-6) {
+    return false;
+  }
+
+  const double start_yaw = tf2::getYaw(start.pose.orientation);
+  const double goal_yaw = tf2::getYaw(goal.pose.orientation);
+  const double heading_delta = normalizeAngle(goal_yaw - start_yaw);
+  const double heading_error = std::abs(heading_delta);
+  if (heading_error < lattice_pivot_terminal_heading_) {
+    return false;
+  }
+
+  const double start_rear_x =
+    start.pose.position.x + lattice_rear_axle_x_offset_ * std::cos(start_yaw);
+  const double start_rear_y =
+    start.pose.position.y + lattice_rear_axle_x_offset_ * std::sin(start_yaw);
+  const double goal_rear_x =
+    goal.pose.position.x + lattice_rear_axle_x_offset_ * std::cos(goal_yaw);
+  const double goal_rear_y =
+    goal.pose.position.y + lattice_rear_axle_x_offset_ * std::sin(goal_yaw);
+  const double rear_axle_error =
+    std::hypot(goal_rear_x - start_rear_x, goal_rear_y - start_rear_y);
+  const double rear_axle_tolerance =
+    std::max(0.08, costmap_ ? costmap_->getResolution() * 1.5 : 0.08);
+  if (rear_axle_error > rear_axle_tolerance) {
+    return false;
+  }
+
+  const double direct_distance =
+    std::hypot(
+    goal.pose.position.x - start.pose.position.x,
+    goal.pose.position.y - start.pose.position.y);
+  const double max_pivot_chord =
+    2.0 * std::abs(lattice_rear_axle_x_offset_) * std::sin(std::min(M_PI, heading_error) * 0.5);
+  if (direct_distance > max_pivot_chord + rear_axle_tolerance) {
+    return false;
+  }
+
+  const double sample_angle = std::min(0.20, std::max(0.05, lattice_pivot_angle_ * 0.5));
+  const auto sample_count =
+    static_cast<std::size_t>(std::max(2.0, std::ceil(heading_error / sample_angle)));
+
+  std::vector<geometry_msgs::msg::PoseStamped> poses;
+  poses.reserve(sample_count + 1);
+  for (std::size_t i = 0; i <= sample_count; ++i) {
+    const double ratio = static_cast<double>(i) / static_cast<double>(sample_count);
+    const double yaw = normalizeAngle(start_yaw + heading_delta * ratio);
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = global_frame_;
+    pose.pose.position.x = start_rear_x - lattice_rear_axle_x_offset_ * std::cos(yaw);
+    pose.pose.position.y = start_rear_y - lattice_rear_axle_x_offset_ * std::sin(yaw);
+    pose.pose.position.z = start.pose.position.z;
+    pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(yaw);
+
+    unsigned int map_x = 0;
+    unsigned int map_y = 0;
+    if (!costmap_->worldToMap(pose.pose.position.x, pose.pose.position.y, map_x, map_y) ||
+      !isTraversable(map_x, map_y) ||
+      !isFootprintTraversableAtPose(pose.pose.position.x, pose.pose.position.y, yaw))
+    {
+      RCLCPP_DEBUG(
+        logger_,
+        "Direct terminal pivot rejected at sample %zu/%zu",
+        i, sample_count);
+      return false;
+    }
+
+    poses.push_back(pose);
+  }
+
+  poses.front().pose.position = start.pose.position;
+  poses.front().pose.orientation = start.pose.orientation;
+  poses.back().pose.position = goal.pose.position;
+  poses.back().pose.orientation = goal.pose.orientation;
+
+  auto node = node_.lock();
+  if (!node) {
+    throw nav2_core::PlannerException("Unable to lock lifecycle node while building pivot path");
+  }
+
+  path.header.frame_id = global_frame_;
+  path.header.stamp = node->now();
+  for (auto & pose : poses) {
+    pose.header = path.header;
+    path.poses.push_back(pose);
+  }
+
+  RCLCPP_INFO(
+    logger_,
+    "Direct terminal pivot path produced %zu poses heading_delta=%.3f rear_axle_error=%.3f",
+    path.poses.size(), heading_delta, rear_axle_error);
+  return true;
 }
 
 }  // namespace forklift_nav2_plugins

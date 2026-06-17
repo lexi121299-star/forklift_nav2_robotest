@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    OpaqueFunction,
     RegisterEventHandler,
     SetEnvironmentVariable,
     TimerAction,
@@ -14,17 +15,43 @@ from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+import yaml
+
+
+def default_bt_xml_from_params(params_file, nav2_bt_navigator_share):
+    fallback = os.path.join(
+        nav2_bt_navigator_share,
+        'behavior_trees',
+        'navigate_w_replanning_and_recovery.xml')
+
+    try:
+        with open(params_file, 'r') as stream:
+            params = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError):
+        return fallback
+
+    bt_params = params.get('bt_navigator', {}).get('ros__parameters', {})
+    bt_xml = bt_params.get('default_bt_xml_filename')
+    if not bt_xml:
+        return fallback
+
+    if os.path.isabs(bt_xml):
+        return bt_xml
+
+    return os.path.join(nav2_bt_navigator_share, 'behavior_trees', bt_xml)
 
 
 def generate_launch_description():
     package_share = get_package_share_directory('forklift_nav2_demo')
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
+    nav2_bt_navigator_share = get_package_share_directory('nav2_bt_navigator')
     turtlebot3_navigation_share = get_package_share_directory('turtlebot3_navigation2')
 
     map_file = LaunchConfiguration('map')
     nav2_params_file = LaunchConfiguration('nav2_params_file')
     use_rviz = LaunchConfiguration('use_rviz')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    autostart = LaunchConfiguration('autostart')
     nav2_start_delay = LaunchConfiguration('nav2_start_delay')
     gazebo_gui = LaunchConfiguration('gazebo_gui')
     use_sim_command_bridge = LaunchConfiguration('use_sim_command_bridge')
@@ -69,16 +96,26 @@ def generate_launch_description():
         }.items(),
     )
 
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_bringup_share, 'launch', 'bringup_launch.py')),
-        launch_arguments={
-            'map': map_file,
-            'params_file': nav2_params_file,
-            'use_sim_time': use_sim_time,
-            'use_composition': use_composition,
-        }.items(),
-    )
+    def launch_nav2(context, *args, **kwargs):
+        params_file = nav2_params_file.perform(context)
+        default_bt_xml = default_bt_xml_from_params(
+            params_file,
+            nav2_bt_navigator_share)
+
+        return [IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(nav2_bringup_share, 'launch', 'bringup_launch.py')),
+            launch_arguments={
+                'map': map_file,
+                'params_file': nav2_params_file,
+                'use_sim_time': use_sim_time,
+                'autostart': autostart,
+                'use_composition': use_composition,
+                'default_bt_xml_filename': default_bt_xml,
+            }.items(),
+        )]
+
+    nav2_launch = OpaqueFunction(function=launch_nav2)
 
     rviz = Node(
         package='rviz2',
@@ -116,6 +153,7 @@ def generate_launch_description():
                 package_share, 'config', 'forklift_nav2.yaml'),
             description='Nav2 parameter file.'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('autostart', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'nav2_start_delay',

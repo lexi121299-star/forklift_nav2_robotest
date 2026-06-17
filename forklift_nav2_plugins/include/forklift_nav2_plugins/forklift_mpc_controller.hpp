@@ -155,6 +155,9 @@ private:
   double yaw_goal_tolerance_{0.35};
   double transform_tolerance_{0.2};
   double terminal_slowdown_distance_{0.6};
+  bool goal_latch_enabled_{true};
+  double goal_latch_xy_tolerance_{0.25};
+  double goal_latch_yaw_tolerance_{0.30};
 
   int velocity_samples_{6};
   int steering_samples_{9};
@@ -194,6 +197,15 @@ private:
 
   double speed_limit_{0.0};
   double last_steering_angle_{0.0};
+
+  // Terminal latch: once the robot is within the goal latch tolerances, hold a
+  // full stop and ignore further commands until a new goal arrives. Prevents the
+  // post-arrival re-planning/grind that drifts the forklift off the goal.
+  bool goal_latched_{false};
+  bool has_last_goal_{false};
+  double last_goal_x_{0.0};
+  double last_goal_y_{0.0};
+  double last_goal_yaw_{0.0};
 
   bool publish_control_cmd_{false};
   std::string control_cmd_topic_{"/forklift/control_cmd"};

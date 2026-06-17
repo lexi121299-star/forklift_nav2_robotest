@@ -1618,24 +1618,54 @@ Phase 4 gate：
 Phase 5 gate：
 
 - 配置仍使用 `GridBased` / `forklift_nav2_plugins/OruGlobalPlanner`，实现已切到新 core。
-- 新增 `forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml`，配置指向该 BT，
-  目标是 plan-once 后交给 `ForkliftMpcController` 跟踪。
-- Headless Gazebo gate 已实跑 `forward_ab`。结果：planner 初始 plan 成功，例如
-  `Lattice search succeeded: expanded=16 generated=120 accepted=15 ...`，并输出全 forward path；
-  controller 开始执行并产生 forward command；但 Foxy BT 在 FollowPath 运行中仍重新 tick
-  `ComputePathToPose`，中间位姿 footprint 被 costmap 判 blocked 后 planner 抛异常，BT 进入 recovery，
-  取消 FollowPath，最终 `/navigate_to_pose status: 6 ABORTED`。
-- 复测过三版 BT：`Sequence`、`PipelineSequence + RateController(hz=0.001)`、
-  `PipelineSequence + DistanceController(distance=1000.0)`，install 侧 XML 已确认更新；
-  Foxy 运行态仍会重复调用 planner。因此 Phase 5 的 monolithic `NavigateToPose` gate 未通过。
-- 最后一轮 `forward_ab` 失败指标：`control_samples=50 sim_cmd_samples=1252 forward=50 reverse=0 pivot=0`，
-  `odom_final x=-0.207 y=-0.545`，状态 `ABORTED`。失败根因不是 core 初始规划失败，而是 Nav2 Foxy
-  BT/action 执行层未形成真正 plan-once，导致在线重规划取消有效初始路径。
+- 已新增 `forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml`，并在
+  `forklift_nav2_plugins` 中加入 BT 插件：`ForkliftPlanOnceSequence` 只允许
+  `ComputePathToPose` 成功 tick 一次，随后保持 `FollowPath` RUNNING，解决 Foxy 默认
+  `PipelineSequence` 持续重规划导致的 FollowPath 被取消问题。
+- `forklift_navigation.launch.py` 已支持 `autostart` 参数，并从所选 YAML 读取
+  `bt_navigator.default_bt_xml_filename` 后传给 `nav2_bringup`，避免 Foxy wrapper launch
+  覆盖为默认 BT。
+- `ForkliftMpcController` 已改为使用 latest TF 查询 path pose，并修复 pivot preview window：
+  pivot 执行中选择预览窗口内最后一个 pivot target，避免围绕中间 pivot 点反复变号。
+- `forward_ab` 已实跑通过：`/navigate_to_pose status: 4 SUCCEEDED`，
+  `control_samples=96 sim_cmd_samples=278 forward=96 reverse=0 pivot=0`，
+  `odom_final x=1.239 y=-0.288`，`ab_acceptance=PASS scenario=forward_ab`。
+- 为终端原地转向加入直接 rear-axle pivot path：当起终点后轴点在容差内重合、heading
+  delta 足够大且 footprint sample 全可通行时，planner 直接生成终端 pivot 路径。
+- `pivot_90_right_in_place` 已跑到 Nav2 成功并产生纯仿真 pivot：
+  `status: 4 SUCCEEDED`，`control_samples=71 sim_cmd_samples=196 forward=71 reverse=0 pivot=71`，
+  `sim_cmd max_signed_linear_x=0.000 max_abs_angular_z=0.200`，
+  `odom_final x=-2.245 y=-0.837`。这一轮失败点不是 Nav2 执行，而是验收脚本把
+  `forward=true && steering≈±pi/2` 的 pivot command 同时计入 forward samples。
+- `forklift_ab_acceptance.py` 已修正计数顺序：先识别 pivot command，pivot 不再累计到
+  `forward_control_samples`。修正后尚未完成一次干净复跑，因此 `pivot_90_right_in_place`
+  gate 目前仍标记为未最终通过。
+- 试过把 `pivot_velocity` 从 `0.12` 提到 `0.30`，结论是会导致过冲/进展失败并触发 forward
+  fallback；已回退到 `0.12`，后续不应沿这条方向继续调。
 
 当前结论：
 
-- Phase 0→4 已通过代码和单测验收；Phase 5 集成已接线并暴露了新的运行态 blocker。
-- 继续要过 `l_shaped_corridor_ab` 3 连 PASS，下一步不应再调 primitive 成本；应先把执行层改成真正 plan-once：
-  方案 A 是新增一个小 BT control/decorator node，只 tick `ComputePathToPose` 一次并保持 `FollowPath` RUNNING；
-  方案 B 是在 acceptance/task-manager 侧拆成显式 `ComputePathToPose` 一次 + `FollowPath` action，而不是走
-  `NavigateToPose` 默认 BT tick loop。
+- Phase 0→4 已通过代码和单测验收，并已提交为
+  `974a90d Implement P10 ORU lattice core migration`。
+- Phase 5 已解决两个主要运行态问题：Foxy BT 反复重规划问题、pivot 跟踪目标点变号问题；
+  `forward_ab` 已 PASS。
+- Phase 5 还没有最终过门。当前最新状态是：`pivot_90_right_in_place` 在 Nav2/controller
+  层已经能成功完成 pivot，但验收脚本修正后还缺一次干净复跑确认；其它场景还未完成连续验收。
+
+剩余问题 / 复盘清单：
+
+- 需要在修正后的 acceptance 脚本上复跑 `pivot_90_right_in_place`，确认不再因为 pivot 被误计为
+  forward 而失败。
+- 需要继续跑 `pivot_90_left_in_place`、`sparse_90_turn_ab`、`pivot_90_then_forward_ab`，
+  最后跑核心门 `l_shaped_corridor_ab` 3 连 PASS。
+- Foxy `recoveries_server` 在 lifecycle configure 阶段仍有不稳定崩溃：
+  `failed to send response...`。当前工作方法是 `autostart:=false` 启动，只手动
+  configure/activate `/map_server`、`/amcl`、`/planner_server`、`/controller_server`、
+  `/bt_navigator`，并且 BT 暂时不使用 `Wait` recovery action。后续要决定是保留这个
+  P10 专用 bringup 路径，还是继续修 recoveries lifecycle。
+- 需要在最新 BT 插件、controller、planner、acceptance 脚本和配置修改后重跑
+  `forklift_oru_planner` / `forklift_nav2_plugins` gtest，再跑完整
+  `./scripts/foxy_colcon_test.sh`。
+- `forklift_nav2_demo/docs/lattice_planner_design.docx` 是本轮发现的未跟踪文件，当前不纳入
+  P10 代码提交，避免把无关二进制文档混进最终 commit。
+- 最终完成 Phase 5 后，还需要补一次文档结论、整理未跟踪/待提交文件，并提交第二个 commit。

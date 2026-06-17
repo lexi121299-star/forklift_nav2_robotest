@@ -53,13 +53,14 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
-    default_bt_xml_filename: "/workspace/install_foxy/forklift_nav2_demo/share/forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml"
+    default_bt_xml_filename: "/workspace/install/forklift_nav2_demo/share/forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml"
     bt_loop_duration: 10
     default_server_timeout: 20
     enable_groot_monitoring: True
     groot_zmq_publisher_port: 1666
     groot_zmq_server_port: 1667
     plugin_lib_names:
+    - forklift_nav2_plugins
     - nav2_compute_path_to_pose_action_bt_node
     - nav2_follow_path_action_bt_node
     - nav2_back_up_action_bt_node
@@ -109,7 +110,9 @@ controller_server:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      # Kept aligned with FollowPath.goal_latch_yaw_tolerance so that when the
+      # controller latches a stop the BT also reports the goal as reached.
+      yaw_goal_tolerance: 0.30
 
     # Forklift MPC controller parameters
     FollowPath:
@@ -136,13 +139,19 @@ controller_server:
       yaw_goal_tolerance: 0.25
       transform_tolerance: 0.2
       terminal_slowdown_distance: 0.6
+      # Terminal latch: once within both tolerances of the goal, stop and stay
+      # stopped (no re-solve/drift) until a new goal arrives. Keep
+      # goal_latch_yaw_tolerance aligned with general_goal_checker.yaw_goal_tolerance.
+      goal_latch_enabled: true
+      goal_latch_xy_tolerance: 0.25
+      goal_latch_yaw_tolerance: 0.30
       velocity_samples: 8
       steering_samples: 11
       preview_window_points: 10
       allow_reverse: true
       use_mpc_solver: true
       use_collision_check: true
-      allow_unknown: false
+      allow_unknown: true
       preprocess_path: true
       respect_reverse_path_orientation: true
       trajectory_resample_spacing: 0.10
@@ -242,10 +251,10 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: True
-      footprint: "[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]"
+      footprint: "[[0.50, 0.35], [0.50, -0.35], [-0.70, -0.35], [-0.70, 0.35]]"
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
+      plugins: ["static_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -315,7 +324,7 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "forklift_nav2_plugins/OruGlobalPlanner"
-      allow_unknown: false
+      allow_unknown: true
       use_diagonal: true
       prevent_corner_cutting: true
       use_footprint_collision_check: true
@@ -324,7 +333,7 @@ planner_server:
       cost_travel_multiplier: 2.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
-      goal_tolerance: 0.5
+      goal_tolerance: 1.5
       max_iterations: 0
       use_final_approach_orientation: true
       use_lattice_planner: true

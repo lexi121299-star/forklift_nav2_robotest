@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(behaviortree_cpp_v3 REQUIRED)
 find_package(forklift_msgs REQUIRED)
 find_package(forklift_oru_planner REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -21,6 +22,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 set(dependencies
+  behaviortree_cpp_v3
   forklift_msgs
   forklift_oru_planner
   geometry_msgs
@@ -42,6 +44,7 @@ add_library(${PROJECT_NAME} SHARED
   src/forklift_mpc_solver.cpp
   src/forklift_mpc_types.cpp
   src/forklift_mpc_trajectory.cpp
+  src/forklift_run_once_until_halt_bt_node.cpp
   src/forklift_safety_gate.cpp
   src/forklift_vehicle_model.cpp
   src/oru_global_planner.cpp
@@ -54,6 +57,7 @@ target_include_directories(${PROJECT_NAME}
 )
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
+target_compile_definitions(${PROJECT_NAME} PRIVATE BT_PLUGIN_EXPORT)
 ament_target_dependencies(${PROJECT_NAME} ${dependencies})
 
 pluginlib_export_plugin_description_file(nav2_core plugins.xml)

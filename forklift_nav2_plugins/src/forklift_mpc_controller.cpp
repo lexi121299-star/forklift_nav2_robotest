@@ -88,6 +88,14 @@ void ForkliftMpcController::configure(
     node, name_ + ".terminal_slowdown_distance",
     rclcpp::ParameterValue(terminal_slowdown_distance_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".goal_latch_enabled", rclcpp::ParameterValue(goal_latch_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".goal_latch_xy_tolerance",
+    rclcpp::ParameterValue(goal_latch_xy_tolerance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".goal_latch_yaw_tolerance",
+    rclcpp::ParameterValue(goal_latch_yaw_tolerance_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".velocity_samples", rclcpp::ParameterValue(velocity_samples_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".steering_samples", rclcpp::ParameterValue(steering_samples_));
@@ -188,6 +196,9 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".yaw_goal_tolerance", yaw_goal_tolerance_);
   node->get_parameter(name_ + ".transform_tolerance", transform_tolerance_);
   node->get_parameter(name_ + ".terminal_slowdown_distance", terminal_slowdown_distance_);
+  node->get_parameter(name_ + ".goal_latch_enabled", goal_latch_enabled_);
+  node->get_parameter(name_ + ".goal_latch_xy_tolerance", goal_latch_xy_tolerance_);
+  node->get_parameter(name_ + ".goal_latch_yaw_tolerance", goal_latch_yaw_tolerance_);
   node->get_parameter(name_ + ".velocity_samples", velocity_samples_);
   node->get_parameter(name_ + ".steering_samples", steering_samples_);
   node->get_parameter(name_ + ".preview_window_points", preview_window_points_);
@@ -262,6 +273,8 @@ void ForkliftMpcController::configure(
   yaw_goal_tolerance_ = std::max(0.01, yaw_goal_tolerance_);
   transform_tolerance_ = std::max(0.01, transform_tolerance_);
   terminal_slowdown_distance_ = std::max(xy_goal_tolerance_, terminal_slowdown_distance_);
+  goal_latch_xy_tolerance_ = std::max(0.01, goal_latch_xy_tolerance_);
+  goal_latch_yaw_tolerance_ = std::max(0.01, goal_latch_yaw_tolerance_);
   velocity_samples_ = std::max(2, velocity_samples_);
   steering_samples_ = std::max(3, steering_samples_);
   preview_window_points_ = std::max(1, preview_window_points_);
@@ -327,6 +340,8 @@ void ForkliftMpcController::cleanup()
 
 void ForkliftMpcController::activate()
 {
+  goal_latched_ = false;
+  has_last_goal_ = false;
   if (control_cmd_pub_) {
     control_cmd_pub_->on_activate();
   }
@@ -342,6 +357,26 @@ void ForkliftMpcController::deactivate()
 void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
+
+  // Release the terminal latch whenever a genuinely new goal arrives so the
+  // controller can drive again; keep it engaged if the same goal is re-sent.
+  if (!path.poses.empty()) {
+    const auto & goal_pose = path.poses.back();
+    const double goal_x = goal_pose.pose.position.x;
+    const double goal_y = goal_pose.pose.position.y;
+    const double goal_yaw = poseYaw(goal_pose);
+    const bool goal_changed = !has_last_goal_ ||
+      std::hypot(goal_x - last_goal_x_, goal_y - last_goal_y_) > goal_latch_xy_tolerance_ ||
+      std::abs(normalizeAngle(goal_yaw - last_goal_yaw_)) > goal_latch_yaw_tolerance_;
+    if (goal_changed) {
+      goal_latched_ = false;
+      last_goal_x_ = goal_x;
+      last_goal_y_ = goal_y;
+      last_goal_yaw_ = goal_yaw;
+      has_last_goal_ = true;
+    }
+  }
+
   const auto result =
     processPathToMpcTrajectory(global_plan_, vehicle_model_, trajectoryOptions(max_velocity_));
   global_trajectory_ = result.trajectory;
@@ -448,6 +483,29 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     return zeroCommand(pose);
   }
 
+  // Terminal latch: once the forklift is "close enough" in both position and
+  // heading, stop and stay stopped for this goal. Without the latch the MPC
+  // keeps re-solving near the path end and grinds/drifts off the goal because a
+  // forklift cannot rotate in place to close a small residual heading error.
+  if (goal_latch_enabled_) {
+    const bool within_latch =
+      goal_distance <= goal_latch_xy_tolerance_ &&
+      goal_heading_error <= goal_latch_yaw_tolerance_;
+    if (goal_latched_ || within_latch) {
+      if (!goal_latched_) {
+        goal_latched_ = true;
+        RCLCPP_INFO(
+          logger_,
+          "Goal latch engaged: distance=%.3f (<=%.3f) heading_error=%.3f (<=%.3f); "
+          "holding stop until a new goal",
+          goal_distance, goal_latch_xy_tolerance_,
+          goal_heading_error, goal_latch_yaw_tolerance_);
+      }
+      publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+      return zeroCommand(pose);
+    }
+  }
+
   const double requested_max_velocity =
     speed_limit_ > 0.0 ? std::min(max_velocity_, speed_limit_) : max_velocity_;
 
@@ -460,9 +518,6 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       }
       target_yaw = point.state.theta;
       found_pivot_target = true;
-      if (std::abs(normalizeAngle(target_yaw - current_state.theta)) > pivot_yaw_tolerance_) {
-        break;
-      }
     }
 
     const double heading_error = normalizeAngle(target_yaw - current_state.theta);
@@ -681,12 +736,16 @@ bool ForkliftMpcController::transformPose(
 {
   if (in_pose.header.frame_id == target_frame) {
     out_pose = in_pose;
+    out_pose.header.stamp = clock_->now();
     return true;
   }
 
   try {
+    auto lookup_pose = in_pose;
+    lookup_pose.header.stamp = rclcpp::Time(0, 0, clock_->get_clock_type());
     out_pose = tf_->transform(
-      in_pose, target_frame, tf2::durationFromSec(transform_tolerance_));
+      lookup_pose, target_frame, tf2::durationFromSec(transform_tolerance_));
+    out_pose.header.stamp = clock_->now();
     return true;
   } catch (const tf2::TransformException & ex) {
     RCLCPP_WARN_THROTTLE(
