@@ -1,0 +1,180 @@
+# 叉车实车测试参数调节指南 (Real-Vehicle Tuning Guide)
+
+面向 ROS2 Foxy + Nav2 的叉车导航栈。本文把"现场看到的现象 → 该改哪个参数 → 在哪个文件第几行 → 往哪个方向调 → 副作用"串起来,方便上车时快速调参。
+
+- 主配置(实车 / Foxy):`forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml`
+- 镜像配置(需同步保持一致):`forklift_nav2_demo/config/forklift_nav2_oru_test.yaml`
+- 控制器源码(部分行为只在代码里,见各节标注):`forklift_nav2_plugins/src/forklift_mpc_controller.cpp`
+
+> **生效方式**:这些都是 yaml 参数,**改完不用 colcon 编译**,但 costmap / 控制器在 `configure` 时读参数,所以要**重启导航栈**(或对应节点 deactivate→cleanup→configure→activate)才生效。控制器逻辑改动(`.cpp`)才需要 `colcon build`。
+
+> **实车 vs 仿真**:上车时务必 `use_sim_command_bridge:=false`,不要起 sim 桥;一切运动走 `/forklift/control_cmd`(`publish_control_cmd: true`)。详见第 8 节。
+
+---
+
+## 1. 症状 → 参数 速查表
+
+| 现场现象 | 先调这个 | 文件:行 | 方向 |
+|---|---|---|---|
+| **走廊/路口看着够宽但规划说过不去、贴边不敢走**（costmap 边界太大） | `footprint`（local 与 global 要一致且贴合真车） | 本文件 §2.1 | 缩小到真车实际尺寸 |
+| 同上，离墙总是留太大空隙 | `inflation_radius` / `cost_scaling_factor` | §2.2 / §2.3 | 减小 radius / 增大 scaling |
+| 直角转弯转不过去、原地磨 | `lattice_arc_radius` / pivot 系列 | §3 | 减小转弯半径、确认 pivot 打开 |
+| 障碍物没进全局路径、不绕 | global `obstacle_layer` + 感知距离 | §4 | 已加层；放大 `obstacle_max_range` |
+| 车太快/太慢、起步顿挫 | `max_velocity` / 加速度 / 平滑 | §5 | 按场地调 |
+| 到点附近反复修正、飘 | goal 容差 + 终点锁存 latch | §6 | 放宽容差 / 调 latch |
+| 离障碍物多远开始减速/急停 | safety gate 距离 | §7 | 按车速与制动距离 |
+
+---
+
+## 2. 「costmap 边界太大 / 走廊太窄」——footprint 与膨胀（重点）
+
+车实际能过，但规划器认为过不去，几乎都是 **footprint 太大** 或 **inflation 太厚**。两者叠加决定了"车在代价图里占多大"。
+
+### 2.1 footprint（**第一优先级**）
+
+代价图用 footprint 多边形做碰撞检查；footprint 越大，可行走廊越窄。
+
+- local_costmap footprint：[`forklift_nav2_oru_test_foxy.yaml:200`](../config/forklift_nav2_oru_test_foxy.yaml#L200)
+  当前 `[[0.843,0.58],[0.843,-0.58],[-2.043,-0.58],[-2.043,0.58]]` → **约 2.89 m 长 × 1.16 m 宽**
+- global_costmap footprint：[`forklift_nav2_oru_test_foxy.yaml:254`](../config/forklift_nav2_oru_test_foxy.yaml#L254)
+  当前 `[[0.50,0.35],[0.50,-0.35],[-0.70,-0.35],[-0.70,0.35]]` → **约 1.2 m 长 × 0.7 m 宽**
+
+> ⚠️ **两个 footprint 不一致**，而且 local 那个明显偏大（约 2.9 m 长）。这正是"边界太大"的主因：局部代价图按一台 2.9 m 长的车做避障，自然贴边不敢走、转弯走廊不够。
+
+**怎么改：**
+1. 实测真车轮廓（含货叉前伸、护顶架、车尾），以 `base_link`（后轴中心）为原点：
+   - 车头方向（+x）最大伸出 = 前边界
+   - 车尾方向（-x）最大伸出 = 后边界（负值）
+   - 半宽 = 侧边界
+2. **local 与 global 用同一个 footprint**，避免一边敢走一边不敢走。
+3. 多边形顶点顺序：前左 → 前右 → 后右 → 后左。例如真车 1.2 m × 0.7 m、后轴在中心略偏后：
+   ```yaml
+   footprint: "[[0.50, 0.35], [0.50, -0.35], [-0.70, -0.35], [-0.70, 0.35]]"
+   ```
+4. footprint 要和 `rear_axle_x_offset: -0.34`（控制器/规划器，[`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) / [`:367`](../config/forklift_nav2_oru_test_foxy.yaml#L367)）的坐标系一致——都以 `base_link` 为基准。
+
+**副作用**：footprint 调太小会真的蹭墙/蹭货架，留 5–10 cm 安全余量即可，剩下的安全裕度交给 inflation。
+
+### 2.2 inflation_radius（第二优先级）
+
+在 footprint 外再"膨胀"一圈高代价区，让路径离障碍物有余量。半径越大，离墙越远、窄通道越容易被判死。
+
+- local：[`forklift_nav2_oru_test_foxy.yaml:204`](../config/forklift_nav2_oru_test_foxy.yaml#L204) → `0.65`
+- global：[`forklift_nav2_oru_test_foxy.yaml:298`](../config/forklift_nav2_oru_test_foxy.yaml#L298) → `0.65`
+
+**经验值**：`inflation_radius ≈ 车体内切半径 + 期望离墙余量`。叉车半宽约 0.35 m，想离墙 ~0.1–0.2 m，则 `0.45~0.55` 往往就够；当前 0.65 偏保守，窄通道里会显得"边界太大"。
+
+**怎么改**：窄通道过不去 → 先把 `inflation_radius` 从 0.65 往下调到 0.45–0.50，local/global 一起改、保持一致。
+
+### 2.3 cost_scaling_factor
+
+膨胀区内代价的衰减速度。值越大，高代价集中在贴近障碍物处，路径更敢靠近；值越小，代价"摊得更平更远"，路径更躲。
+
+- local [`:205`](../config/forklift_nav2_oru_test_foxy.yaml#L205) / global [`:297`](../config/forklift_nav2_oru_test_foxy.yaml#L297) → `5.0`
+
+**怎么改**：想让车更敢贴近通过窄口，**增大** `cost_scaling_factor`（如 5→8）；想更躲着走则减小。配合 `inflation_radius` 一起看。
+
+### 2.4 costmap 分辨率
+
+[`:199`](../config/forklift_nav2_oru_test_foxy.yaml#L199)（local）/ §global 同名 → `0.05`（5 cm/格）。
+
+分辨率越细，转角/窄口判得越准（少把能过的地方判死），但 CPU 占用上升。0.05 一般够用；实车 CPU 紧张可临时用 0.075，精度要求高可降到 0.025。
+
+---
+
+## 3. 转弯能力（直角转弯 / pivot）
+
+车"能转但规划不让转"或"原地磨"，看这几个：
+
+**规划器（lattice，[`planner_server` 段](../config/forklift_nav2_oru_test_foxy.yaml#L329)）**
+- `lattice_arc_radius: 0.60`（[`:352`](../config/forklift_nav2_oru_test_foxy.yaml#L352)）——lattice 弧线基元半径。真车最小转弯半径更小就可减小它，转弯更紧。
+- `lattice_pivot_enabled: true`（[`:364`](../config/forklift_nav2_oru_test_foxy.yaml#L364)）、`lattice_pivot_angle`（[`:365`](../config/forklift_nav2_oru_test_foxy.yaml#L365)）——原地/小半径转向基元开关与步进角，直角转弯依赖它。
+- `lattice_turn_cost_multiplier` / `lattice_pivot_turn_cost`——转弯代价，调高则规划器更不爱转（偏直），调低更爱转。
+
+**控制器（pivot 执行，[`FollowPath` 段](../config/forklift_nav2_oru_test_foxy.yaml#L118)）**
+- `allow_pivot_turn: true`（[`:128`](../config/forklift_nav2_oru_test_foxy.yaml#L128)）——必须开。
+- `pivot_turn_radius: 0.6`（[`:131`](../config/forklift_nav2_oru_test_foxy.yaml#L131)）、`pivot_velocity: 0.12`（[`:133`](../config/forklift_nav2_oru_test_foxy.yaml#L133)）、`pivot_yaw_tolerance: 0.05`（[`:134`](../config/forklift_nav2_oru_test_foxy.yaml#L134)）——pivot 半径、速度、停止航向误差。
+- `max_steering_angle: 1.5708`（[`:124`](../config/forklift_nav2_oru_test_foxy.yaml#L124)，即 90°）——后轴 pivot 靠打满转向实现。
+- `minimum_turning_radius: 0.0`（[`:161`](../config/forklift_nav2_oru_test_foxy.yaml#L161)）——0 表示不额外限制，靠 pivot/转向上限决定。
+
+> 注意：`lattice_arc_radius`（规划）与 `pivot_turn_radius`（执行）要物理自洽——规划出的弧/原地转，控制器得能真转出来。两边一起调。
+
+---
+
+## 4. 障碍物检测范围（plan-once 的限制）
+
+global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_oru_test_foxy.yaml#L257)），全局规划会绕开**发 goal 那一刻、且在激光近距离内**被看到的障碍物。
+
+- `obstacle_max_range: 2.5`、`raytrace_max_range: 3.0`（local voxel：[`:232`](../config/forklift_nav2_oru_test_foxy.yaml#L232)；global obstacle：[`:268`](../config/forklift_nav2_oru_test_foxy.yaml#L268)）
+
+**当前为 plan-once（只规划一次、不重规划）**：
+- 只有发 goal 时障碍物在 ~2.5 m 内才会进全局路径被绕开；
+- 路途中途冒出来的障碍物不会改全局路径——局部代价图能看到它，控制器有碰撞检查（`use_collision_check`）会**停住但不绕**。
+
+**想更早看到障碍物**：放大 `obstacle_max_range`（如 2.5→4.0）和 `raytrace_max_range`（如 3.0→5.0），并确保激光本身量程够。
+**想要真正动态绕障**：需要换成"周期重规划"的 BT（本次未做，属设计取舍）。
+
+---
+
+## 5. 速度 / 加速度 / 平滑（[`FollowPath` 段](../config/forklift_nav2_oru_test_foxy.yaml#L118)）
+
+实车第一次跑务必**先把速度压低**再逐步放开。
+
+- `max_velocity: 0.45`（[`:121`](../config/forklift_nav2_oru_test_foxy.yaml#L121)）——前进上限 m/s，首测建议先降到 0.2–0.3。
+- `max_reverse_velocity: 0.15`（[`:123`](../config/forklift_nav2_oru_test_foxy.yaml#L123)）、`allow_reverse: true`（[`:151`](../config/forklift_nav2_oru_test_foxy.yaml#L151)）。
+- `min_velocity: 0.06`（[`:122`](../config/forklift_nav2_oru_test_foxy.yaml#L122)）——最低爬行速度。
+- `max_acceleration: 0.5`（[`:126`](../config/forklift_nav2_oru_test_foxy.yaml#L126)）——起步/刹车顿挫就减小。
+- `curvature_slowdown_enabled: true`（[`:162`](../config/forklift_nav2_oru_test_foxy.yaml#L162)）+ `curvature_slowdown_lateral_accel: 0.12`（[`:163`](../config/forklift_nav2_oru_test_foxy.yaml#L163)）——弯道自动减速，过弯发飘就调小 lateral_accel。
+- `control_cmd_accel_time` / `control_cmd_decel_time: 0.3`（[`:181`](../config/forklift_nav2_oru_test_foxy.yaml#L181)）——下发给车的加/减速时间常数，决定指令平顺度。
+
+---
+
+## 6. 到点行为（容差 + 终点锁存 latch）
+
+- 全局到点判定 `general_goal_checker`：`xy_goal_tolerance: 0.25`（[`:112`](../config/forklift_nav2_oru_test_foxy.yaml#L112)）、`yaw_goal_tolerance: 0.30`（[`:115`](../config/forklift_nav2_oru_test_foxy.yaml#L115)）。
+- 控制器侧 `xy_goal_tolerance: 0.08` / `yaw_goal_tolerance: 0.25`（[`:138`](../config/forklift_nav2_oru_test_foxy.yaml#L138)）。
+- **终点锁存（防止到点后反复修正/飘）**：[`:145`](../config/forklift_nav2_oru_test_foxy.yaml#L145)
+  - `goal_latch_enabled: true`
+  - `goal_latch_xy_tolerance: 0.25`、`goal_latch_yaw_tolerance: 0.30`
+  - 一旦进入容差就锁死停车，直到来新 goal；新 goal 目标明显移开（>2×容差）会自动解锁（自愈逻辑见 `forklift_mpc_controller.cpp` `computeVelocityCommands`）。
+
+**怎么改**：到点还在小幅磨 → 适当放宽 `goal_latch_*` / `general_goal_checker` 容差；停得太早不到位 → 收紧。注意 `goal_latch_yaw_tolerance` 与 `general_goal_checker.yaw_goal_tolerance` 要保持一致，否则会出现"锁停了但 BT 不判成功"。
+
+---
+
+## 7. 安全门 Safety Gate（[`FollowPath` 段](../config/forklift_nav2_oru_test_foxy.yaml#L165)）
+
+按真车制动距离设置，宁可保守。
+
+- `safety_gate_enabled: true`（[`:165`](../config/forklift_nav2_oru_test_foxy.yaml#L165)）
+- `safety_stop_distance: 0.55`（[`:167`](../config/forklift_nav2_oru_test_foxy.yaml#L167)）——前方障碍到此距离急停。
+- `safety_slowdown_distance: 1.25`（[`:168`](../config/forklift_nav2_oru_test_foxy.yaml#L168)）——开始减速距离。
+- `safety_min_speed: 0.05`（[`:169`](../config/forklift_nav2_oru_test_foxy.yaml#L169)）。
+- `safety_emergency_stop_active: false`（[`:166`](../config/forklift_nav2_oru_test_foxy.yaml#L166)）——置 true 可强制急停（调试/急停联动用）。
+
+车重/速度大 → 增大 stop/slowdown 距离。
+
+---
+
+## 8. 实车 bring-up 检查清单（一切走 vehicle command）
+
+1. `use_sim_command_bridge:=false`——**不要**起 sim 桥（桥只是仿真把 `/forklift/control_cmd` 翻成 `/cmd_vel` 喂 Gazebo）。
+2. 不要设置 `twist_fallback_topic`（保持空）——这是唯一能让系统消费 `/cmd_vel` 的开关。
+3. `publish_control_cmd: true`（[`:179`](../config/forklift_nav2_oru_test_foxy.yaml#L179)）、`control_cmd_topic: "/forklift/control_cmd"`（[`:180`](../config/forklift_nav2_oru_test_foxy.yaml#L180)）。
+4. 起 `curtis_vehicle_interface` 消费 `/forklift/control_cmd`（编码 Curtis CAN）。
+5. 所有运动（含 pivot 直角转弯）都以 `ForkliftControlCommand` 下发，**BT 里没有 Spin/BackUp 类指令**，恢复行为只清代价图。
+6. 真车上 `/cmd_vel` 无人订阅（Nav2 接口要求控制器返回 `TwistStamped`，那是死端口，不影响）。
+
+---
+
+## 9. 调参流程建议
+
+1. **先标定 footprint**（§2.1）——量真车、local/global 统一。这一步解决大多数"边界太大"。
+2. **再调 inflation**（§2.2/2.3）——窄通道过不去就减 `inflation_radius`、增 `cost_scaling_factor`。
+3. **压低速度**（§5）跑通整条路线，确认不蹭不撞。
+4. **调转弯**（§3）——直角/路口实测，规划与执行的转弯半径自洽。
+5. **调到点与 latch**（§6）——终点不飘、判定成功。
+6. **设安全门**（§7）按制动距离。
+7. 逐步放开速度到目标值。
+
+> 每次只改一类参数、改完重启栈、单点验证，避免多变量纠缠。local/global 同名参数记得一起改、保持一致。两份 config（foxy 与 base）也要同步。
