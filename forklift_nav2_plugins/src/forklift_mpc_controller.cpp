@@ -491,6 +491,24 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     const bool within_latch =
       goal_distance <= goal_latch_xy_tolerance_ &&
       goal_heading_error <= goal_latch_yaw_tolerance_;
+    // Self-heal: if the target has clearly moved away (a new goal was sent), drop
+    // the latch here so we drive again even if setPlan's goal-change detection
+    // missed it. Using 2x the latch tolerances as the release threshold keeps the
+    // latch sticky against localization jitter while a real new goal (meters away)
+    // always clears it. Without this, a stuck latch never resumes ("won't move on
+    // the next goal").
+    if (goal_latched_ &&
+      (goal_distance > 2.0 * goal_latch_xy_tolerance_ ||
+       goal_heading_error > 2.0 * goal_latch_yaw_tolerance_))
+    {
+      goal_latched_ = false;
+      RCLCPP_INFO(
+        logger_,
+        "Goal latch released: distance=%.3f (> %.3f) or heading_error=%.3f (> %.3f); "
+        "target moved, resuming control",
+        goal_distance, 2.0 * goal_latch_xy_tolerance_,
+        goal_heading_error, 2.0 * goal_latch_yaw_tolerance_);
+    }
     if (goal_latched_ || within_latch) {
       if (!goal_latched_) {
         goal_latched_ = true;
