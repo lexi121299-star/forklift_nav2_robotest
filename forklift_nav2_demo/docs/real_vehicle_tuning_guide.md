@@ -10,6 +10,8 @@
 
 > **实车 vs 仿真**:上车时务必 `use_sim_command_bridge:=false`,不要起 sim 桥;一切运动走 `/forklift/control_cmd`(`publish_control_cmd: true`)。详见第 8 节。
 
+> **DDS 中间件**:镜像默认已切到 **CycloneDDS**(Foxy FastRTPS 在 `autostart` 启动时会间歇性崩掉随机 lifecycle 节点)。Docker 怎么改、ARM 注意事项、回退方式见 **第 10 节**——上车前必读。
+
 ---
 
 ## 1. 症状 → 参数 速查表
@@ -158,6 +160,7 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 
 ## 8. 实车 bring-up 检查清单（一切走 vehicle command）
 
+0. **DDS 必须是 CycloneDDS**（`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`）——否则 FastRTPS 会在 `autostart` 启动时间歇性崩掉随机 lifecycle 节点（amcl/bt_navigator/recoveries）。镜像与改法见 §10。
 1. `use_sim_command_bridge:=false`——**不要**起 sim 桥（桥只是仿真把 `/forklift/control_cmd` 翻成 `/cmd_vel` 喂 Gazebo）。
 2. 不要设置 `twist_fallback_topic`（保持空）——这是唯一能让系统消费 `/cmd_vel` 的开关。
 3. `publish_control_cmd: true`（[`:179`](../config/forklift_nav2_oru_test_foxy.yaml#L179)）、`control_cmd_topic: "/forklift/control_cmd"`（[`:180`](../config/forklift_nav2_oru_test_foxy.yaml#L180)）。
@@ -178,3 +181,75 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 7. 逐步放开速度到目标值。
 
 > 每次只改一类参数、改完重启栈、单点验证，避免多变量纠缠。local/global 同名参数记得一起改、保持一致。两份 config（foxy 与 base）也要同步。
+
+---
+
+## 10. DDS 中间件：必须用 CycloneDDS（Docker 镜像怎么改）
+
+**这是上车前的硬约束，不是调优项。**
+
+### 10.1 为什么
+
+Foxy 默认的 **FastRTPS** 在 Nav2 `autostart` 启动那一波并发 `configure/activate` 服务调用里有一个**间歇性竞态**：某个 lifecycle 节点回复生命周期服务时崩溃，报
+
+```
+what(): failed to send response: client will not receive response,
+  at .../rmw-fastrtps-shared-cpp-1.3.2/src/rmw_response.cpp:127
+```
+
+崩的是**随机节点**（实测命中过 `amcl`、`bt_navigator`、`recoveries_server`），谁在那一刻输掉竞争就崩谁。`amcl` 崩 = 定位没了，`bt_navigator` 崩 = 整个导航不可用——**在实车上是安全/可用性事故**。
+
+> 这跟仿真无关：崩在 DDS 服务握手层，跟 Gazebo/传感器数据完全无关，**仿真和实车都会出现**。换 **CycloneDDS** 后该竞态消失。
+
+本机实测（同一镜像、同一 `forklift_nav2_oru_test_foxy.yaml`、反复 `autostart:=true` 拉起整套 Nav2）：
+
+| RMW | 崩溃 / 总次数 |
+|---|---|
+| FastRTPS | 2 / 22（~9%，间歇） |
+| **CycloneDDS** | **0 / 34** |
+
+且 CycloneDDS 下 `autostart:=true` 完整拉起（含 `recoveries_server`）+ `forward_ab` A-B 验收 `ab_acceptance=PASS`，导航行为不受影响。复现脚本：[`scripts/recoveries_bringup_campaign.sh`](../../scripts/recoveries_bringup_campaign.sh)。
+
+### 10.2 Docker 镜像怎么改（[`docker/foxy/Dockerfile`](../../docker/foxy/Dockerfile)）
+
+仓库里的镜像**已经改好**，新建/重建镜像即生效。改了两处：
+
+1. **装 CycloneDDS 的 rmw 包**——在 apt 安装列表里加一行（FastRTPS 那行保留，留作一行回退）：
+
+   ```dockerfile
+   ros-foxy-rmw-cyclonedds-cpp \
+   ros-foxy-rmw-fastrtps-cpp \
+   ```
+
+2. **把默认 RMW 设为 CycloneDDS**——改 `ENV`：
+
+   ```dockerfile
+   ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+   ```
+
+重建镜像：`bash scripts/foxy_docker_build.sh`（或 `docker build -f docker/foxy/Dockerfile -t forklift-nav2:foxy .`）。
+
+> **临时验证**（不重建镜像、只在运行中的容器里试）：
+> `apt-get update && apt-get install -y ros-foxy-rmw-cyclonedds-cpp`，
+> 然后启动前 `export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`。
+> 注意容器重启/重建会丢，**正式落地必须改 Dockerfile**。
+
+### 10.3 ARM 实车注意
+
+- `ros-foxy-rmw-cyclonedds-cpp` **有 arm64（aarch64）官方 deb**，官方 `ros:foxy` 基础镜像本身是 multi-arch，arm64 上同样一行 apt 即可，无需源码编译。
+- 车上确认 `uname -m` 是 `aarch64`（ROS 2 不支持 32 位 `armv7l`），且镜像架构与车一致。
+- Foxy 已 EOL，若 apt 报找不到包，切到 ROS snapshot 源，arm64 的包仍在。
+- **多容器跑 ROS 节点时**（如导航、传感器驱动分容器）：CycloneDDS 默认走共享内存+多播，跨容器要么 `--network host`，要么用 `CYCLONEDDS_URI` 指定网卡/走单播。单容器跑整套栈无此问题。
+
+### 10.4 切换 / 回退
+
+RMW 是**运行时**经环境变量选的，**不用重新 colcon 编译**：
+
+```bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp   # 默认（推荐）
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp     # 一行回退
+```
+
+`forklift_navigation.launch.py` 还提供 `rmw_implementation:=...` 参数，会一并传给 Gazebo / Nav2 / RViz / 辅助节点，保证整条链路用同一个 RMW（**全栈必须统一，混用 RMW 节点之间不通信**）。
+
+> 用了 CycloneDDS 后，就**不再需要**之前 `autostart:=false` + 手动逐个 `configure/activate` 的临时规避，可以直接 `autostart:=true`，并恢复完整 recovery 链。

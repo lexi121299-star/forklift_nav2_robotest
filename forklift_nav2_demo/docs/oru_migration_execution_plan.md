@@ -1658,11 +1658,15 @@ Phase 5 gate：
   forward 而失败。
 - 需要继续跑 `pivot_90_left_in_place`、`sparse_90_turn_ab`、`pivot_90_then_forward_ab`，
   最后跑核心门 `l_shaped_corridor_ab` 3 连 PASS。
-- Foxy `recoveries_server` 在 lifecycle configure 阶段仍有不稳定崩溃：
-  `failed to send response...`。当前工作方法是 `autostart:=false` 启动，只手动
-  configure/activate `/map_server`、`/amcl`、`/planner_server`、`/controller_server`、
-  `/bt_navigator`，并且 BT 暂时不使用 `Wait` recovery action。后续要决定是保留这个
-  P10 专用 bringup 路径，还是继续修 recoveries lifecycle。
+- ~~Foxy `recoveries_server` 在 lifecycle configure 阶段仍有不稳定崩溃：
+  `failed to send response...`。当前工作方法是 `autostart:=false` 启动……~~
+  **已定位并解决（2026-06-17）**：根因不是 `recoveries_server`，而是 **FastRTPS** 在
+  `autostart` 并发 `configure/activate` 服务调用里的竞态——崩的是随机 lifecycle 节点
+  （实测命中 `amcl`、`bt_navigator`、`recoveries_server`）。改用 **CycloneDDS** 后消失：
+  FastRTPS 2/22 崩溃 vs CycloneDDS 0/34，且 `autostart:=true` 完整拉起 + `forward_ab`
+  验收 PASS。镜像默认 RMW 已切到 `rmw_cyclonedds_cpp`（`docker/foxy/Dockerfile`），
+  不再需要 `autostart:=false` 手动 bringup 规避。复现脚本 `scripts/recoveries_bringup_campaign.sh`，
+  实车说明见 `real_vehicle_tuning_guide.md` §10。
 - 需要在最新 BT 插件、controller、planner、acceptance 脚本和配置修改后重跑
   `forklift_oru_planner` / `forklift_nav2_plugins` gtest，再跑完整
   `./scripts/foxy_colcon_test.sh`。
