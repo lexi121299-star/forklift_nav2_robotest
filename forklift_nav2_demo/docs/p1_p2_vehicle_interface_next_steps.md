@@ -540,6 +540,17 @@ ros2 run tf2_ros tf2_echo odom base_link
 - codec 单元测试通过 PDF 两个示例。
 - 不启动 Nav2 controller，只用 `/forklift/control_cmd` 也能驱动仿真车。
 
+### 4.4 P2.3 真车上车前必做（协议安全时序 + 限幅落点）
+
+这些来自 MK320 CANopen 协议「注意事项」，是真车 bring-up 前 `curtis_vehicle_interface` 必须实现/核对的，单独列成待办免得漏：
+
+- [ ] **velocity → drive_rpm 换算放在 gate 下游**：真车 0x203 用 `drive_rpm`(0–4000) 驱动，不是 `velocity_mps`。换算必须在 `curtis_vehicle_interface`（gate 之后）用**已限好的** `velocity_mps` 算 `drive_rpm`，否则 safety gate 的限速会被绕过。gate 侧已有 `|drive_rpm|<=max_drive_rpm`(默认 2500) 兜底。
+- [ ] **手动→自动切换先降速 0**（协议注意 1）：切到自动模式的瞬间，自动发送速度必须先为 0，防止用旧的高转速突然加速。`curtis_vehicle_interface` 在检测到 手自动(0x283 BYTE6 bit1) 切换时，强制先发 `drive_rpm=0` 再恢复。
+- [ ] **急停复位握手**（协议注意 3）：急停复位后，必须**先收到电控反馈报文**(0x283 等)，确认 软急停(BYTE6 bit2)/手刹(bit3) 已解除，才允许上位机外发控制指令。和 safety gate 的 `require_vehicle_state` + `emergency_stopped/soft_emergency_stop` 健康检查呼应，但「收到反馈才放行」的时序闭环在 vehicle_interface 做。
+- [ ] **待机 BYTE0 语义**（协议注意 6）：待机状态 `0x203 BYTE0 = 0`（bit0 使能=0 → 走 Interlock Brake）。当前 `stop_command` 置 `brake=True`(bit3) → BYTE0=0x08，是「主动 Brake Rate 刹车停」，不是协议的待机态。台架确认电控对 `enable=0 + brake=1` 的实际行为；如需真正待机用 `enable=0, brake=0`。
+- [ ] **CAN 负载率 < 50%**（协议注意 4）：控制 0x203/0x303/0x403 的发送频率，别把总线占满。
+- [ ] **双驱差速语义**（协议注意 5）：自动模式下，上位机下发的速度对应**转弯外侧轮**，内侧轮由 Curtis 控制器算。velocity→rpm 换算时按这个语义标定。
+
 ## 5. 完成后再做 ORU
 
 P1/P2 完成后，再进入 ORU 算法移植会更稳：
