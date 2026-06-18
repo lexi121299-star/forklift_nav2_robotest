@@ -2,11 +2,13 @@
 
 面向 ROS2 Foxy + Nav2 的叉车导航栈。本文把"现场看到的现象 → 该改哪个参数 → 在哪个文件第几行 → 往哪个方向调 → 副作用"串起来,方便上车时快速调参。
 
-- 主配置(实车 / Foxy):`forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml`
-- 镜像配置(需同步保持一致):`forklift_nav2_demo/config/forklift_nav2_oru_test.yaml`
+- **唯一权威配置(实车 / Foxy):`forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml`** —— 现在是 `config/` 下唯一的 Nav2 参数档,launch 默认值也已指向它。
+- 原来的 Humble / 原生并行档(`forklift_nav2_oru_test.yaml`、stock 基线 `forklift_nav2.yaml`,使用 `goal_checker_plugins` 复数、`DifferentialMotionModel` 等 Foxy 加载不了的 API)**已删除**,避免 Foxy/Humble 混淆;以后一律按 Foxy 那份改参数。历史阶段笔记里若仍引用这两个文件名,只作历史记录看。
 - 控制器源码(部分行为只在代码里,见各节标注):`forklift_nav2_plugins/src/forklift_mpc_controller.cpp`
 
-> **生效方式**:这些都是 yaml 参数,**改完不用 colcon 编译**,但 costmap / 控制器在 `configure` 时读参数,所以要**重启导航栈**(或对应节点 deactivate→cleanup→configure→activate)才生效。控制器逻辑改动(`.cpp`)才需要 `colcon build`。
+> **构建 / 测试 / 运行环境**:**一律在 Foxy docker(`forklift-nav2:foxy`)里进行**,不在宿主机原生环境编译或跑验收。构建 `colcon build --build-base build_foxy --install-base install_foxy --symlink-install`;测试 `./scripts/foxy_colcon_test.sh`。
+
+> **生效方式**:这些都是 yaml 参数,**改完不用 colcon 编译**,但 costmap / 控制器在 `configure` 时读参数,所以要**重启导航栈**(或对应节点 deactivate→cleanup→configure→activate)才生效。控制器逻辑改动(`.cpp`)才需要 `colcon build`(在 Foxy docker 内)。
 
 > **实车 vs 仿真**:上车时务必 `use_sim_command_bridge:=false`,不要起 sim 桥;一切运动走 `/forklift/control_cmd`(`publish_control_cmd: true`)。详见第 8 节。
 

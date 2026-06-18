@@ -83,6 +83,8 @@ P9  真车低速联调
 - 不把调度任务写进 controller。
 - 所有算法通过 Nav2 plugin 或独立 node 接入。
 - 每一步都保留一个能回退的配置文件。
+- **构建 / 测试 / 运行一律在 Foxy docker（`forklift-nav2:foxy`）里进行**，不在宿主机原生环境编译或跑验收：`colcon build --build-base build_foxy --install-base install_foxy --symlink-install`，跑 `./scripts/foxy_colcon_test.sh`。
+- **配置以 `forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml`（Foxy 版）为唯一权威**，现在是 `config/` 下唯一的 Nav2 参数档，`forklift_navigation.launch.py` 默认值也指向它。原 Humble/原生并行档（`forklift_nav2_oru_test.yaml`、stock 基线 `forklift_nav2.yaml`，含 `goal_checker_plugins` 复数、`DifferentialMotionModel` 等 Foxy 加载不了的 API）已删除，避免 Foxy/Humble 混淆；历史阶段笔记中残留的文件名只作历史记录。
 
 ## 2. P0: 稳定仿真基线
 
@@ -868,6 +870,66 @@ cancel_task()
 
 - task_manager 不直接发布 `/cmd_vel`。
 
+### P7 设计（边界 / 组件 / 落地节奏）
+
+> 2026-06-18 补充。结论：**做最小版 P7.1，而且 v1 现在就该做**——v1 走 Option A（路线拆成已验证原子段顺序执行），这个“按段下发 Nav2 goal 的序列器”本质就是 v1 路点序列器硬门，不是可选项。巡逻 / 充电 / 重定位是同一组件的自然扩展，后续增量加。
+
+**核心边界原则（先立规矩）**
+
+task_manager = **大脑 / 编排层**，只决定“做什么、什么顺序、失败怎么办”，向下调用别人干活：
+
+```text
+task_manager  (编排: 什么 / 何时 / 重试)
+   ├─→ Nav2 action (NavigateToPose / FollowPath)   ← 运动
+   ├─→ 安全层 (P8.2 command gate)                   ← 可随时抢占 / 急停 task_manager
+   ├─→ vehicle_interface 服务                        ← 底盘 / 充电物理握手
+   └─→ amcl 服务 / initialpose                       ← 重定位
+```
+
+硬规矩（三不）：
+
+1. **不**直接发 `/cmd_vel` 或 `ForkliftControlCommand`（运动只经 Nav2 + 安全闸）。
+2. **不**写底盘 / 充电 / CAN 协议（属 vehicle_interface）。
+3. **不**做即时急停、**不**管节点 lifecycle 重启（急停在安全层；重启在 supervisor/launch 层）。
+
+**能力归属（含本轮讨论的扩展想法）**
+
+| 能力 | 放 task_manager？ | 处理方式 |
+|---|---|---|
+| 路线分解 / 路点序列 | ✅ **核心（v1）** | task_manager 本体。route = 有序 segment 列表，每段 `单次规划 + FollowPath`，关在线重规划 |
+| 绕场循环巡逻 | ✅ | 一条 `loop: true` 的 route，数据驱动，几乎零额外代码 |
+| 充电 | ⚠️ **拆开** | 编排在此（电量低 → 去充电桩 → 对位 → **触发**充电 → 充满 → 恢复任务）；**物理充电握手**（继电器 / 充电机协议）放 vehicle_interface |
+| 重新定位 | ✅ 作为 recovery 动作 | 调 amcl `/reinitialize_global_localization` 或重发 `/initialpose`、走一小段已知图案再收敛。**“重启节点”不放这**——属 supervisor/launch |
+| 紧急停靠 | ❗ **拆开** | **即时急停（E-stop）必须在安全层 / watchdog**，独立、即时、不依赖 task_manager 活着；**“开去指定车位安全停靠”**（可控停车）可做成 task_manager 任务 |
+
+> 为什么急停不能放 task_manager：急停要在 task_manager 崩了也能切断运动，它是反射不是决策。task_manager 只能“观察到 E-stop → 任务转 PAUSED”，不能是急停的执行者。
+
+**组件设计**
+
+1. 数据（纯配置，不写死代码）：
+   - `stations.yaml`：命名位姿（`A`、`charger`、`park_bay`…）。
+   - `routes.yaml`：有序 segment + 元数据，例如：
+     ```yaml
+     patrol_loop:
+       loop: true
+       segments:
+         - {to: corner_1, type: drive}
+         - {to: corner_1, type: pivot, yaw: 90}
+         - {to: corner_2, type: drive}
+     ```
+2. 状态机：`IDLE → RUNNING → (PAUSED) → SUCCEEDED / FAILED / RECOVERING`。E-stop / 安全层抢占 → 自动进 PAUSED，解除后需显式 resume。
+3. 对外接口（只发任务，不发运动指令）：action `ExecuteRoute(name, loop)`；service `pause` / `resume` / `cancel` / `go_charge` / `go_park`；topic `/task_status`（当前段、进度、状态、失败原因）。
+4. 执行器（每段）：取下一段 → 下发 Nav2 goal（单次规划 + FollowPath）→ 等结果 → 成功则下一段（loop 回首段），失败进 recovery。
+5. recovery 策略（对齐 P8.3 顺序，且都受安全闸约束）：`重试 N 次 → 重定位 → 等待 → 升级 FAILED / 请求人工`；低速 pivot/backoff 只有安全闸允许才执行。
+6. 后台监控：订 `/battery_state` 低电 → 自动排入 `go_charge` 路线；订安全层 E-stop 状态 → 任务 PAUSED。
+
+**落地节奏**
+
+- **v1 现在做（最小 P7.1）**：route 序列器 + 状态机 + start/pause/resume/cancel + 重试/失败。这就是 v1 硬门，L 路线靠它跑。
+- **紧接着**：巡逻 loop（几乎免费）、重定位 recovery。
+- **再后面**：充电编排（配合 vehicle_interface 充电握手）、可控停靠车位。
+- **永远不进 task_manager**：即时急停、CAN / 充电协议、节点重启。
+
 ## 10. P8: 建 forklift_safety
 
 当前优先级：
@@ -955,6 +1017,14 @@ P8.2 最低标准：
 - 急停输入能锁住运动命令，解除后需要明确状态恢复。
 - command timeout、vehicle fault、localization lost、costmap 数据异常时停车。
 - 继续保留 controller-side 限速/停车作为可回退保护，不把安全完全交给 planner。
+
+P8.2 剩余缺口（架构已落地 ≈80%，达标前必须补完）：
+
+截至 2026-06-18，`forklift_safety` package + `safety_command_gate` 已提交（commit `cf177fd`），命令链路、急停服务、watchdog、命令超时/车辆故障/定位丢失即停、速度/转角限幅、recovery 白名单 adapter 都已具备。**仍差 3 项才算 P8.2 达标**：
+
+- **缺口 1 — costmap 数据异常/过期即停**：gate 目前不订阅 costmap，也不检查代价图是否过期/异常；「costmap 数据异常时停车」这条最低标准当前只由 controller-side P8.1 局部覆盖，独立 gate 未实现。
+- **缺口 2 — gate 内扫掠 footprint 碰撞检查**：扫掠 footprint collision 当前只在 controller-side P8.1，独立 gate 没有对将要下发的命令做 footprint 复核；按「所有运动命令都过闸且受 footprint 约束」的标准，gate 应独立持有这道检查（尤其 recovery / pivot / backoff 命令）。
+- **缺口 3 — Foxy docker 端到端验收记录**：尚无在 `forklift-nav2:foxy` docker 里的端到端验收记录，需覆盖：gate 起停、急停服务锁定/解除后状态恢复、recovery 白名单只放低速 wait/backoff/pivot、raw 命令超时后停车、限幅生效。验收前 P8.2 不能勾全完成（见验收清单 8.2-4/5/6）。
 
 P8.3 最低标准：
 
@@ -1180,7 +1250,7 @@ forklift_description
 ```bash
 ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
   map:=/home/pl/robotest/forklift_factory_big_map_clean.yaml \
-  nav2_params_file:=/home/pl/robotest/forklift_nav2_demo/config/forklift_nav2_oru_test.yaml \
+  nav2_params_file:=/home/pl/robotest/forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml \
   use_sim_time:=true \
   use_rviz:=false \
   gazebo_gui:=false \
@@ -1317,7 +1387,7 @@ source /home/pl/robotest/install/setup.bash
 
 ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
   map:=/home/pl/robotest/forklift_factory_big_map_clean.yaml \
-  nav2_params_file:=/home/pl/robotest/forklift_nav2_demo/config/forklift_nav2_oru_test.yaml \
+  nav2_params_file:=/home/pl/robotest/forklift_nav2_demo/config/forklift_nav2_oru_test_foxy.yaml \
   use_sim_time:=true
 ```
 
@@ -1378,7 +1448,13 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
     [ ] 6.5a-3 pivot 验收：pivot_90_left/right_in_place、pivot_90_then_forward_ab、pivot_blocked_stop、l_shaped_corridor_ab
     [ ] 6.5a-4 sparse_90_turn_ab 硬验收（reverse=0，NavigateToPose SUCCEEDED）
     [ ] 6.5a-5 三大回归：forward_ab、reverse_ab、dynamic_stop_release_ab
-[x] P8.2 独立 safety package / 命令闸门
+[~] P8.2 独立 safety package / 命令闸门（架构已落地，达标前仍差 3 项，见「P8.2 剩余缺口」）
+    [x] 8.2-1 独立 `forklift_safety` package + `safety_command_gate` 节点，命令链路改为 raw→gate→control_cmd
+    [x] 8.2-2 急停服务 + watchdog + 命令超时/车辆故障/定位丢失即停 + 速度/转角限幅
+    [x] 8.2-3 recovery command adapter：白名单低速 wait/backoff/pivot，转受限 ForkliftControlCommand
+    [ ] 8.2-4 costmap 数据异常/过期检查即停（当前 gate 未做，仅 controller 侧 P8.1 有局部停车）
+    [ ] 8.2-5 gate 内扫掠 footprint 碰撞检查（当前只在 controller-side P8.1，未在独立 gate 复核）
+    [ ] 8.2-6 Foxy docker 端到端验收记录（gate 起停、急停锁定/解除、recovery 白名单、超时停车）
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
 [ ] P8.4 真车低速 safety acceptance 包
 [ ] P7.1 task_manager 最小任务入口

@@ -185,8 +185,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'nav2_params_file',
             default_value=os.path.join(
-                package_share, 'config', 'forklift_nav2.yaml'),
-            description='Nav2 parameter file.'),
+                package_share, 'config', 'forklift_nav2_oru_test_foxy.yaml'),
+            description='Nav2 parameter file (authoritative Foxy ORU config; '
+                        'the Humble-API variants have been removed).'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('autostart', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
