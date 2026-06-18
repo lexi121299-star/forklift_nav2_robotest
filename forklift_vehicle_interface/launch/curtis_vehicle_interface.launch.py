@@ -18,6 +18,10 @@ def generate_launch_description():
     drive_wheel_radius_m = LaunchConfiguration('drive_wheel_radius_m')
     drive_gear_ratio = LaunchConfiguration('drive_gear_ratio')
     drive_track_width_m = LaunchConfiguration('drive_track_width_m')
+    drive_wheel_base_m = LaunchConfiguration('drive_wheel_base_m')
+    pivot_steering_angle_rad = LaunchConfiguration('pivot_steering_angle_rad')
+    pivot_turn_radius_m = LaunchConfiguration('pivot_turn_radius_m')
+    max_drive_rpm = LaunchConfiguration('max_drive_rpm')
 
     interface = Node(
         package='forklift_vehicle_interface',
@@ -38,6 +42,10 @@ def generate_launch_description():
             'drive_wheel_radius_m': drive_wheel_radius_m,
             'drive_gear_ratio': drive_gear_ratio,
             'drive_track_width_m': drive_track_width_m,
+            'drive_wheel_base_m': drive_wheel_base_m,
+            'pivot_steering_angle_rad': pivot_steering_angle_rad,
+            'pivot_turn_radius_m': pivot_turn_radius_m,
+            'max_drive_rpm': max_drive_rpm,
         }],
     )
 
@@ -55,5 +63,9 @@ def generate_launch_description():
         DeclareLaunchArgument('drive_wheel_radius_m', default_value='0.10'),
         DeclareLaunchArgument('drive_gear_ratio', default_value='1.0'),
         DeclareLaunchArgument('drive_track_width_m', default_value='0.70'),
+        DeclareLaunchArgument('drive_wheel_base_m', default_value='1.2'),
+        DeclareLaunchArgument('pivot_steering_angle_rad', default_value='1.5707963267948966'),
+        DeclareLaunchArgument('pivot_turn_radius_m', default_value='0.6'),
+        DeclareLaunchArgument('max_drive_rpm', default_value='2500.0'),
         interface,
     ])

@@ -22,6 +22,7 @@ from forklift_vehicle_interface.curtis_can_codec import (
     encode_0x403,
     format_frame,
 )
+from forklift_vehicle_interface.curtis_command_kinematics import drive_rpm_from_command
 from forklift_vehicle_interface.curtis_can_transport import SocketCanTransport
 from forklift_vehicle_interface.curtis_vehicle_state import CurtisFeedbackState
 
@@ -45,6 +46,10 @@ class CurtisVehicleInterface(Node):
         self.declare_parameter('drive_wheel_radius_m', 0.10)
         self.declare_parameter('drive_gear_ratio', 1.0)
         self.declare_parameter('drive_track_width_m', 0.70)
+        self.declare_parameter('drive_wheel_base_m', 1.2)
+        self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
+        self.declare_parameter('pivot_turn_radius_m', 0.6)
+        self.declare_parameter('max_drive_rpm', 2500.0)
         self.declare_parameter('max_integration_dt_sec', 0.20)
         self.declare_parameter('max_rx_frames_per_cycle', 32)
 
@@ -67,10 +72,18 @@ class CurtisVehicleInterface(Node):
         self._last_logged_tx = ''
         self._transport_error = ''
 
+        self._drive_wheel_radius_m = self._positive_param('drive_wheel_radius_m', 0.10)
+        self._drive_gear_ratio = self._positive_param('drive_gear_ratio', 1.0)
+        self._drive_track_width_m = self._positive_param('drive_track_width_m', 0.70)
+        self._drive_wheel_base_m = self._positive_param('drive_wheel_base_m', 1.2)
+        self._pivot_steering_angle_rad = self._positive_param('pivot_steering_angle_rad', math.pi / 2.0)
+        self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 0.6)
+        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2500.0)
+
         self._feedback = CurtisFeedbackState(
-            drive_wheel_radius_m=self._positive_param('drive_wheel_radius_m', 0.10),
-            drive_gear_ratio=self._positive_param('drive_gear_ratio', 1.0),
-            drive_track_width_m=self._positive_param('drive_track_width_m', 0.70),
+            drive_wheel_radius_m=self._drive_wheel_radius_m,
+            drive_gear_ratio=self._drive_gear_ratio,
+            drive_track_width_m=self._drive_track_width_m,
             max_integration_dt_sec=self._positive_param('max_integration_dt_sec', 0.20),
         )
 
@@ -248,7 +261,28 @@ class CurtisVehicleInterface(Node):
             return False
         return command.forward == command.reverse
 
+    def _derive_drive_rpm(self, command: ForkliftControlCommand) -> float:
+        """Outer drive-wheel rpm for 0x203, from the (gated) velocity + steering.
+
+        The real Curtis frame is driven by ``drive_rpm`` (0..4000), not
+        ``velocity_mps``; upstream leaves ``drive_rpm`` at 0, so the interface
+        derives it here (downstream of the safety gate) from the already speed-
+        limited ``velocity_mps`` per protocol「注意事项 5」(outer-wheel speed).
+        """
+        return drive_rpm_from_command(
+            command.velocity_mps,
+            command.steering_angle_rad,
+            wheel_base_m=self._drive_wheel_base_m,
+            track_width_m=self._drive_track_width_m,
+            wheel_radius_m=self._drive_wheel_radius_m,
+            gear_ratio=self._drive_gear_ratio,
+            pivot_steering_angle_rad=self._pivot_steering_angle_rad,
+            pivot_turn_radius_m=self._pivot_turn_radius_m,
+            max_drive_rpm=self._max_drive_rpm,
+        )
+
     def _send_command(self, command: ForkliftControlCommand, stop_reason: str) -> None:
+        command.drive_rpm = self._derive_drive_rpm(command)
         frame_203 = encode_0x203(command)
         frame_303 = encode_0x303(command)
         frame_403 = encode_0x403(command)

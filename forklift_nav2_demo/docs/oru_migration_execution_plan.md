@@ -261,6 +261,69 @@ P2.3 执行记录（2026-06-17）：
   齿比和驱动轮距，验证 `/odom` 与 `tf2_echo odom base_link` 连续稳定，并实测急停/watchdog
   能让底盘停车。
 
+### P2.3a velocity → drive_rpm 换算（双驱差速外侧轮语义）
+
+底盘确认：**两个驱动轮在前轴（双电驱差速），后面是单个万向轮**。叉臂在前。
+
+协议依据（MK320 CANopen「注意事项 5」）：
+
+> 双驱车型自动模式下，上位机下发的指令速度在转弯时，**弯心外侧轮速度与下发指令一致，内侧轮速由 CURTIS 控制器算**。
+
+即 `0x203` 的 `行驶速度`（BYTE1-2，0–4000 rpm）= **转弯外侧驱动轮的电机转速**，配合 `转向角度`（BYTE6-7）和前进/后退位；没有独立的“原地自转/角速度”指令。要让车转，唯一动力来源是驱动轮转动，所以 **pivot 也必须发非零 `drive_rpm`，`drive_rpm=0` 则车完全不动**。
+
+当前缺口（必须修，否则真车一步都走不了）：
+
+- `ForkliftMpcController::publishControlCommand` 只填 `velocity_mps` + `steering_angle`，`drive_rpm` 留默认 0；plugins 全链路 `grep drive_rpm` 零命中。
+- safety gate 只对 `drive_rpm` 做 clamp 后透传（恒为 0 → clamp 无效）。
+- `encode_0x203` **只读 `drive_rpm`、完全忽略 `velocity_mps`**，直接写进行驶速度字节。
+- 结果：仿真靠 `velocity_mps`→`/cmd_vel` 能动；真车 `0x203` 行驶速度恒为 0，**车不走也不转**。
+
+pivot 旋转中心已核对（URDF 实锤，MPC 不用改）：
+
+- `forklift_diff_drive.urdf.xacro`：左右驱动轮 joint 在 `x=-0.34`（`±wheel_separation/2=±0.38`），`front_caster` 在 `x=+0.42`；建模 `+x` 朝万向轮一侧。
+- 配置 `rear_axle_x_offset = -0.34` ⇒ **MPC pivot 点精确落在两驱动轮的差速轴中心**（命名 “rear_axle” 只是标签，几何上就是驱动轴）。差速驱动物理上唯一能实现的旋转中心就在两轮连线上，所以 MPC 绕这个点 pivot 是对的，**P2.3 不动 MPC pivot 几何**。
+- 因此差速分解就是绕这个 `-0.34` 驱动轴：pivot 时 `v_x=0`、外侧轮 `=|ω|·T/2`，与 odom 自洽。`velocity` 参考点是 base_link(0,0)，在驱动轴前方 0.34m，转弯时有小的二阶偏差，台架标定即可。
+- 注意 sim/real 前后布局相反：sim URDF 万向轮在前(+0.42)、驱动轮在后(-0.34)；真车是驱动轮在前、万向轮在后。这只影响 footprint 扫掠方向与标定，不影响差速换算本身——列为真车 bring-up 标定项，不在 P2.3 改。
+
+换算公式（落在 `curtis_vehicle_interface`，gate 下游，用已限好的 `velocity_mps`）：
+
+```text
+# 把 (velocity_mps, steering_angle) 还原成车体 twist（与 ForkliftVehicleModel 一致）
+if |steering| >= pivot_steering_angle - 1e-3 and speed > 0:   # pivot 分支
+    v_x   = 0
+    omega = speed / pivot_turn_radius
+else:                                                          # 自行车模型
+    v_x   = speed
+    omega = speed * tan(steering) / wheel_base
+
+# 差速分解（绕 x=-0.34 的驱动轴中心，即 MPC rear_axle_x_offset）
+v_left  = v_x - omega * track/2
+v_right = v_x + omega * track/2
+v_outer = max(|v_left|, |v_right|) = |v_x| + |omega|*track/2   # 外侧轮线速度
+
+# 线速度 -> 电机转速（与 odom 的 _rpm_to_mps 严格互逆）
+wheel_rpm = v_outer * 60 / (2*pi*wheel_radius)
+drive_rpm = clamp(wheel_rpm * gear_ratio, 0, max_drive_rpm)    # 方向由 forward/reverse 位给
+```
+
+落点与参数：
+
+- 纯函数 `drive_rpm_from_command(...)` 放 `curtis_command_kinematics.py`，单测覆盖；`curtis_vehicle_interface` 在 `encode_0x203` 前用它**覆盖** `drive_rpm`（上游 `drive_rpm` 不可信，恒 0）。
+- 因为用的是 gate 已限好的 `velocity_mps`，gate 限速不会被绕过；再用 `max_drive_rpm`（默认对齐 gate 的 2500）兜底，确保不超 gate 的 rpm 包络。
+- 新增接口参数：`drive_wheel_base_m`(1.2)、`pivot_steering_angle_rad`(π/2)、`pivot_turn_radius_m`(0.6)、`max_drive_rpm`(2500)；必须与 MPC/gate 同名参数保持一致。
+
+验收：
+
+- [ ] 单测：直行 `v=0.2, δ=0` → `drive_rpm = 0.2*60/(2π*0.1) ≈ 19.1`；pivot `v, δ=90°` → `drive_rpm ≈ |omega|*track/2` 对应的非零 rpm；`v=0` → `drive_rpm=0`。
+- [ ] 台架：`dry_run` 日志里转弯时 `0x203` 行驶速度非零且随转向变化；pivot 命令下行驶速度非零。
+- [ ] 与 odom 自洽：发已知 `drive_rpm` 反馈，`/odom` 速度与下发线速度量级一致。
+
+P2.3a 执行记录（2026-06-18）：公式与 `curtis_vehicle_state._rpm_to_mps` 严格互逆，pivot 按绕 `-0.34` 驱动轴的差速分解，已加单测；经 URDF 核对 MPC pivot 点本就在驱动轴中心，无需改 MPC。
+
+- 落地文件：新增 `curtis_command_kinematics.py`（纯函数 `drive_rpm_from_command`）+ `test/test_curtis_command_kinematics.py`（6 例）；`curtis_vehicle_interface` 在 `encode_0x203` 前覆盖 `drive_rpm`，新增 `drive_wheel_base_m`/`pivot_steering_angle_rad`/`pivot_turn_radius_m`/`max_drive_rpm` 参数并在 launch 暴露。
+- 验证：Foxy docker（py3.8 / pytest-4.6.9）`colcon build` + `colcon test --packages-select forklift_vehicle_interface` 通过，20 测试全过（含新增 6 例）；并把 `forklift_vehicle_interface` 加进 `scripts/foxy_colcon_test.sh` 的 `--packages-select`。
+- 遗留真车标定项：sim/real 前后布局相反（footprint 扫掠方向）、`drive_track_width_m`(real 0.70 vs sim 0.76)、`drive_wheel_radius_m`(real 0.10 vs sim 0.16) 需按实车标定。
+
 ## 5. P3: 固定控制接口和车辆模型
 
 目标：
