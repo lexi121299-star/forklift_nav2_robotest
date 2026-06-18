@@ -158,6 +158,18 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 
 车重/速度大 → 增大 stop/slowdown 距离。
 
+> §7 是 controller 内置的 P8.1 限速/急停（FollowPath 段）。它之外还有一个**独立的命令安全闸节点** `safety_command_gate`（P8.2），见 §7.1。
+
+### 7.1 独立命令安全闸 `safety_command_gate`（P8.2，`forklift_safety` 包）
+
+命令链路:`controller/recovery/手动 -> /forklift/control_cmd_raw -> safety_command_gate -> /forklift/control_cmd -> curtis_vehicle_interface`。所有运动命令都先过这个闸,做:急停服务、命令超时/车辆故障/定位丢失即停、速度/转角限幅、`drive_rpm` 限幅（`max_drive_rpm` 默认 2500）、recovery 白名单、costmap 异常即停、footprint 扫掠碰撞即停。
+
+- **真车必须保证 `/odom` 真正发进 gate**。footprint 碰撞检查要靠 `/odom`（`localization_topic`，默认 `/odom`）拿当前位姿把 footprint 摆到 costmap 上。**拿不到位姿 → gate 报 `collision pose missing` → 一直停车**（fail-closed,安全,但车会"明明没障碍却不动")。验证方法见 §8 第 7 条。
+- **costmap 默认走严档:`costmap_message_type: costmap_raw` + `costmap_topic: /local_costmap/costmap_raw` + `footprint_collision_cost_threshold: 253`**。原始 0–254 刻度下,阈值 253 表示 footprint 压到 inscribed(253)/lethal(254)/unknown(255) 就停,比之前 OccupancyGrid+100（只在真障碍格才停）**更早停、更保守**,适合上车。
+  - 要更宽松（只在真撞上才停,误停少）:`costmap_message_type:=occupancy_grid costmap_topic:=/local_costmap/costmap footprint_collision_cost_threshold:=100`。
+  - 阈值越低越严越早停;太低会在远处膨胀圈就误停。
+- costmap 缺失/超时/空/截断 → 输出停车并在 `/forklift/safety_gate/status` 写原因（`costmap missing` / `costmap timeout` / `costmap invalid: ...`）。要临时关掉这层兜底:`costmap_monitor_enabled:=false`、`collision_check_enabled:=false`（**真车不建议关**）。
+
 ---
 
 ## 8. 实车 bring-up 检查清单（一切走 vehicle command）
@@ -169,6 +181,28 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 4. 起 `curtis_vehicle_interface` 消费 `/forklift/control_cmd`（编码 Curtis CAN）。
 5. 所有运动（含 pivot 直角转弯）都以 `ForkliftControlCommand` 下发，**BT 里没有 Spin/BackUp 类指令**，恢复行为只清代价图。
 6. 真车上 `/cmd_vel` 无人订阅（Nav2 接口要求控制器返回 `TwistStamped`，那是死端口，不影响）。
+7. **确认 `/odom` 和 `/local_costmap/costmap_raw` 真进了 `safety_command_gate`**，否则 footprint 检查 fail-closed 永远停车（车"明明没障碍却不动"）。三种判断方法（Foxy docker 内，从最直接到最底层）:
+
+   **① 最直接 —— 看 gate 自己报的状态**（一边发着 raw 命令时):
+   ```bash
+   ros2 topic echo /forklift/safety_gate/status
+   ```
+   正常应为 `raw command`。出现 **`collision pose missing`** = `/odom` 没进来；出现 **`costmap missing` / `costmap timeout`** = costmap 没进来。
+
+   **② 看话题订阅者里有没有 gate:**
+   ```bash
+   ros2 topic info /odom
+   ros2 topic info /local_costmap/costmap_raw
+   ```
+   订阅者计数/列表里应能看到 `safety_command_gate`。
+
+   **③ 看 gate 节点订了哪些话题:**
+   ```bash
+   ros2 node info /safety_command_gate
+   ```
+   Subscribers 里应有 `/odom`、`/local_costmap/costmap_raw`、`/forklift/control_cmd_raw`。
+
+   > 常见坑:话题名/命名空间对不上（如 odom 实际发在 `/forklift/odom`，需用 `localization_topic:=` 指过去）；odom 节点没起；`use_sim_time` 不一致导致时间戳老（表现为状态在 `collision pose missing` 与正常之间跳）。
 
 ---
 
