@@ -256,6 +256,9 @@ P8.2 已新增独立 `forklift_safety` package：
 - recovery command adapter 订阅 `/cmd_vel`，只白名单低速 wait / backoff / pivot，并转换成受限 `ForkliftControlCommand`。
 - `forklift_navigation.launch.py` 默认启动 safety gate，sim bridge 的 legacy `/cmd_vel` fallback 默认关闭，禁止绕过闸门。
 - 接入 `/forklift_safety/set_emergency_stop`、command timeout、vehicle fault、车辆急停状态和可选 localization / vehicle-state watchdog。
+- 接入 local costmap watchdog：costmap 缺失、超时或空/尺寸为 0/截断数据会直接停车，并在 `/forklift/safety_gate/status` 写明 `costmap missing`、`costmap timeout` 或 `costmap invalid: ...`。
+- gate 内新增独立 swept footprint collision check：按 Foxy ORU local costmap footprint 采样 footprint 边界，对当前位姿和短时预测位姿做复核，raw command 与 recovery backoff/pivot 都会被这道检查拦截。
+- Foxy docker 验收记录：`forklift_safety/P8_2_FOXY_ACCEPTANCE.md`。
 - 接入 keepout / speed zone。
 - 掉边保护。
 - 与 task_manager 的 pause/resume/replan 状态联动。

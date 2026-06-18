@@ -9,8 +9,20 @@ def generate_launch_description():
     raw_command_topic = LaunchConfiguration('raw_command_topic')
     gated_command_topic = LaunchConfiguration('gated_command_topic')
     recovery_twist_topic = LaunchConfiguration('recovery_twist_topic')
+    costmap_topic = LaunchConfiguration('costmap_topic')
+    costmap_message_type = LaunchConfiguration('costmap_message_type')
     command_timeout_sec = LaunchConfiguration('command_timeout_sec')
     recovery_timeout_sec = LaunchConfiguration('recovery_timeout_sec')
+    costmap_timeout_sec = LaunchConfiguration('costmap_timeout_sec')
+    costmap_monitor_enabled = LaunchConfiguration('costmap_monitor_enabled')
+    collision_check_enabled = LaunchConfiguration('collision_check_enabled')
+    footprint = LaunchConfiguration('footprint')
+    footprint_sample_spacing = LaunchConfiguration('footprint_sample_spacing')
+    footprint_collision_cost_threshold = LaunchConfiguration(
+        'footprint_collision_cost_threshold')
+    unknown_is_collision = LaunchConfiguration('unknown_is_collision')
+    collision_check_horizon_sec = LaunchConfiguration('collision_check_horizon_sec')
+    collision_check_time_step_sec = LaunchConfiguration('collision_check_time_step_sec')
     max_forward_velocity_mps = LaunchConfiguration('max_forward_velocity_mps')
     max_reverse_velocity_mps = LaunchConfiguration('max_reverse_velocity_mps')
     max_recovery_velocity_mps = LaunchConfiguration('max_recovery_velocity_mps')
@@ -28,8 +40,21 @@ def generate_launch_description():
         DeclareLaunchArgument('raw_command_topic', default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument('gated_command_topic', default_value='/forklift/control_cmd'),
         DeclareLaunchArgument('recovery_twist_topic', default_value='/cmd_vel'),
+        DeclareLaunchArgument('costmap_topic', default_value='/local_costmap/costmap'),
+        DeclareLaunchArgument('costmap_message_type', default_value='occupancy_grid'),
         DeclareLaunchArgument('command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('recovery_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument('costmap_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument('costmap_monitor_enabled', default_value='true'),
+        DeclareLaunchArgument('collision_check_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'footprint',
+            default_value='[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'),
+        DeclareLaunchArgument('footprint_sample_spacing', default_value='0.05'),
+        DeclareLaunchArgument('footprint_collision_cost_threshold', default_value='100'),
+        DeclareLaunchArgument('unknown_is_collision', default_value='true'),
+        DeclareLaunchArgument('collision_check_horizon_sec', default_value='1.0'),
+        DeclareLaunchArgument('collision_check_time_step_sec', default_value='0.1'),
         DeclareLaunchArgument('max_forward_velocity_mps', default_value='0.45'),
         DeclareLaunchArgument('max_reverse_velocity_mps', default_value='0.15'),
         DeclareLaunchArgument('max_recovery_velocity_mps', default_value='0.10'),
@@ -54,8 +79,19 @@ def generate_launch_description():
                 'raw_command_topic': raw_command_topic,
                 'gated_command_topic': gated_command_topic,
                 'recovery_twist_topic': recovery_twist_topic,
+                'costmap_topic': costmap_topic,
+                'costmap_message_type': costmap_message_type,
                 'command_timeout_sec': command_timeout_sec,
                 'recovery_timeout_sec': recovery_timeout_sec,
+                'costmap_timeout_sec': costmap_timeout_sec,
+                'costmap_monitor_enabled': costmap_monitor_enabled,
+                'collision_check_enabled': collision_check_enabled,
+                'footprint': footprint,
+                'footprint_sample_spacing': footprint_sample_spacing,
+                'footprint_collision_cost_threshold': footprint_collision_cost_threshold,
+                'unknown_is_collision': unknown_is_collision,
+                'collision_check_horizon_sec': collision_check_horizon_sec,
+                'collision_check_time_step_sec': collision_check_time_step_sec,
                 'max_forward_velocity_mps': max_forward_velocity_mps,
                 'max_reverse_velocity_mps': max_reverse_velocity_mps,
                 'max_recovery_velocity_mps': max_recovery_velocity_mps,

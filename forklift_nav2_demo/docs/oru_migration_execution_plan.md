@@ -1448,13 +1448,13 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
     [ ] 6.5a-3 pivot 验收：pivot_90_left/right_in_place、pivot_90_then_forward_ab、pivot_blocked_stop、l_shaped_corridor_ab
     [ ] 6.5a-4 sparse_90_turn_ab 硬验收（reverse=0，NavigateToPose SUCCEEDED）
     [ ] 6.5a-5 三大回归：forward_ab、reverse_ab、dynamic_stop_release_ab
-[~] P8.2 独立 safety package / 命令闸门（架构已落地，达标前仍差 3 项，见「P8.2 剩余缺口」）
+[x] P8.2 独立 safety package / 命令闸门
     [x] 8.2-1 独立 `forklift_safety` package + `safety_command_gate` 节点，命令链路改为 raw→gate→control_cmd
     [x] 8.2-2 急停服务 + watchdog + 命令超时/车辆故障/定位丢失即停 + 速度/转角限幅
     [x] 8.2-3 recovery command adapter：白名单低速 wait/backoff/pivot，转受限 ForkliftControlCommand
-    [ ] 8.2-4 costmap 数据异常/过期检查即停（当前 gate 未做，仅 controller 侧 P8.1 有局部停车）
-    [ ] 8.2-5 gate 内扫掠 footprint 碰撞检查（当前只在 controller-side P8.1，未在独立 gate 复核）
-    [ ] 8.2-6 Foxy docker 端到端验收记录（gate 起停、急停锁定/解除、recovery 白名单、超时停车）
+    [x] 8.2-4 costmap 数据异常/过期检查即停
+    [x] 8.2-5 gate 内扫掠 footprint 碰撞检查
+    [x] 8.2-6 Foxy docker 端到端验收记录（gate 起停、急停锁定/解除、recovery 白名单、超时停车、限幅、costmap timeout、footprint collision）
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
 [ ] P8.4 真车低速 safety acceptance 包
 [ ] P7.1 task_manager 最小任务入口
@@ -1520,6 +1520,7 @@ P6.5a 上车前 rear-axle pivot primitive / stop-pivot-go acceptance
   - **下一步**：① L-shape 路点分解执行（路点序列器，每段单次规划+FollowPath，关全局在线重规划）；② P8.2 独立 safety/command gate（含 recovery 命令白名单与扫掠 footprint，把「失败/发散」彻底变「安全停」）。`l_shaped` 长双腿单次自主规划与 A* 替代（运动学合法 fallback）归 P10。
 
 - 2026-06-18（P8.2 独立 safety / command gate）：新增 `forklift_safety` package 和 `safety_command_gate` 节点，正式把运动命令链路改成 `controller/task/manual -> /forklift/control_cmd_raw -> safety gate -> /forklift/control_cmd -> vehicle_interface/sim bridge`。第一版 gate 覆盖 command watchdog、急停服务 `/forklift_safety/set_emergency_stop`、vehicle/fault/localization 可选健康检查、速度/转角限幅；同时接入 recovery command adapter，订阅 Nav2 `/cmd_vel` 后只白名单低速 wait/backoff/pivot，并转换成受限 `ForkliftControlCommand`，不再让 bridge 裸吃 `/cmd_vel`。`forklift_navigation.launch.py` 默认启动 safety gate，`bridge_twist_fallback_topic` 默认置空；ORU test 配置把 controller 输出 topic 改为 `/forklift/control_cmd_raw`，保留 controller-side P8.1 safety gate 作为回退保护。
+- 2026-06-18（P8.2 补完 8.2-4/5/6）：`safety_command_gate` 默认订阅 `/local_costmap/costmap`，支持可选 `costmap_message_type:=costmap_raw`；costmap 缺失、超时或空/截断/无效数据会输出停车命令并在 `/forklift/safety_gate/status` 说明原因。gate 内新增独立 swept footprint 复核：按 Foxy ORU local footprint 参数解析 footprint，沿当前位姿和短时预测位姿采样 footprint 边界，遇到 unknown/out-of-map/lethal cost 即停，覆盖 raw command 和 recovery wait/backoff/pivot。新增 `forklift_safety/P8_2_FOXY_ACCEPTANCE.md` 作为 Foxy docker 可复现验收记录；Foxy docker build 6 packages 通过，`./scripts/foxy_colcon_test.sh` 通过（83 tests / 0 failures，其中 `forklift_safety` 14 个 pytest）。
 
 ## 14. ORU 包迁移优先级
 

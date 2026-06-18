@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import ast
 import math
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import rclpy
 from forklift_msgs.msg import ForkliftControlCommand, ForkliftFaultState, ForkliftVehicleState
 from forklift_msgs.srv import SetEmergencyStop
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from std_msgs.msg import String
+
+try:
+    from nav2_msgs.msg import Costmap as Nav2Costmap
+except ImportError:
+    Nav2Costmap = None
+
+Point2D = Tuple[float, float]
+Pose2D = Tuple[float, float, float]
 
 
 def positive(value: float, fallback: float) -> float:
@@ -41,6 +50,221 @@ def stop_command(stamp=None) -> ForkliftControlCommand:
     command.steering_angle_rad = 0.0
     command.steering_angle_deg = 0.0
     return command
+
+
+def yaw_from_quaternion(q) -> float:
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def parse_footprint(value) -> List[Point2D]:
+    if isinstance(value, str):
+        value = ast.literal_eval(value)
+    if not isinstance(value, Sequence) or len(value) < 3:
+        raise ValueError('footprint must contain at least three [x, y] points')
+
+    footprint: List[Point2D] = []
+    for point in value:
+        if not isinstance(point, Sequence) or len(point) != 2:
+            raise ValueError('footprint points must be [x, y] pairs')
+        footprint.append((float(point[0]), float(point[1])))
+    return footprint
+
+
+def costmap_metadata(costmap: Any) -> Tuple[int, int, float, Any]:
+    if hasattr(costmap, 'info'):
+        return (
+            int(costmap.info.width),
+            int(costmap.info.height),
+            float(costmap.info.resolution),
+            costmap.info.origin,
+        )
+    metadata = costmap.metadata
+    return (
+        int(metadata.size_x),
+        int(metadata.size_y),
+        float(metadata.resolution),
+        metadata.origin,
+    )
+
+
+def costmap_error(costmap: Any) -> str:
+    width, height, resolution, _origin = costmap_metadata(costmap)
+    if width <= 0 or height <= 0:
+        return 'empty dimensions'
+    if resolution <= 0.0:
+        return 'invalid resolution'
+    expected_cells = width * height
+    if len(costmap.data) < expected_cells:
+        return f'truncated data {len(costmap.data)}/{expected_cells}'
+    return ''
+
+
+def costmap_stop_reason(
+    monitor_enabled: bool,
+    age_sec: float,
+    has_costmap: bool,
+    error: str,
+    timeout_sec: float,
+) -> str:
+    if not monitor_enabled:
+        return ''
+    if error:
+        return f'costmap invalid: {error}'
+    if not has_costmap:
+        if age_sec > timeout_sec:
+            return 'costmap missing'
+        return ''
+    if age_sec > timeout_sec:
+        return 'costmap timeout'
+    return ''
+
+
+def transform_point(point: Point2D, pose: Pose2D) -> Point2D:
+    cos_yaw = math.cos(pose[2])
+    sin_yaw = math.sin(pose[2])
+    return (
+        pose[0] + point[0] * cos_yaw - point[1] * sin_yaw,
+        pose[1] + point[0] * sin_yaw + point[1] * cos_yaw,
+    )
+
+
+def world_to_map(costmap: Any, x: float, y: float) -> Optional[Tuple[int, int]]:
+    width, height, resolution, origin = costmap_metadata(costmap)
+    yaw = yaw_from_quaternion(origin.orientation)
+    dx = x - origin.position.x
+    dy = y - origin.position.y
+    map_x = (dx * math.cos(yaw) + dy * math.sin(yaw)) / resolution
+    map_y = (-dx * math.sin(yaw) + dy * math.cos(yaw)) / resolution
+    mx = int(math.floor(map_x))
+    my = int(math.floor(map_y))
+    if mx < 0 or my < 0 or mx >= width or my >= height:
+        return None
+    return mx, my
+
+
+def cost_at_world(costmap: Any, x: float, y: float) -> Optional[int]:
+    cell = world_to_map(costmap, x, y)
+    if cell is None:
+        return None
+    mx, my = cell
+    width, _height, _resolution, _origin = costmap_metadata(costmap)
+    return int(costmap.data[my * width + mx])
+
+
+def sampled_segment_points(start: Point2D, end: Point2D, spacing: float) -> List[Point2D]:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    steps = max(1, int(math.ceil(length / positive(spacing, 0.05))))
+    return [
+        (start[0] + dx * i / steps, start[1] + dy * i / steps)
+        for i in range(steps + 1)
+    ]
+
+
+def footprint_collision_at_pose(
+    costmap: Any,
+    footprint: Sequence[Point2D],
+    pose: Pose2D,
+    sample_spacing: float,
+    cost_threshold: int,
+    unknown_is_collision: bool,
+) -> Tuple[bool, str]:
+    error = costmap_error(costmap)
+    if error:
+        return True, f'costmap invalid: {error}'
+
+    world_points = [transform_point(point, pose) for point in footprint]
+    max_cost = 0
+    for index, start in enumerate(world_points):
+        end = world_points[(index + 1) % len(world_points)]
+        for x, y in sampled_segment_points(start, end, sample_spacing):
+            cost = cost_at_world(costmap, x, y)
+            if cost is None:
+                return True, 'footprint collision: out of costmap'
+            if cost < 0:
+                if unknown_is_collision:
+                    return True, 'footprint collision: unknown costmap cell'
+                continue
+            max_cost = max(max_cost, cost)
+            if cost >= cost_threshold:
+                return True, f'footprint collision: cost {cost} >= {cost_threshold}'
+    return False, f'footprint clear: max cost {max_cost}'
+
+
+def predicted_poses_for_command(
+    initial_pose: Pose2D,
+    command: ForkliftControlCommand,
+    wheel_base: float,
+    pivot_turn_radius: float,
+    horizon_sec: float,
+    time_step_sec: float,
+    pivot_steering_angle_rad: float,
+) -> List[Pose2D]:
+    poses = [initial_pose]
+    travel_direction = direction(command)
+    if travel_direction == 0 or command.brake or not command.enable:
+        return poses
+
+    signed_velocity = travel_direction * abs(float(command.velocity_mps))
+    if abs(signed_velocity) <= 1e-6:
+        return poses
+
+    step = positive(time_step_sec, 0.1)
+    steps = max(1, int(math.ceil(positive(horizon_sec, step) / step)))
+    x, y, yaw = initial_pose
+    steering = float(command.steering_angle_rad)
+    for _ in range(steps):
+        if abs(steering) >= abs(pivot_steering_angle_rad) - 1e-3:
+            yaw_rate = math.copysign(
+                abs(signed_velocity) / positive(pivot_turn_radius, 0.6),
+                steering,
+            )
+        else:
+            yaw_rate = signed_velocity * math.tan(steering) / positive(wheel_base, 1.2)
+        x += signed_velocity * math.cos(yaw) * step
+        y += signed_velocity * math.sin(yaw) * step
+        yaw += yaw_rate * step
+        poses.append((x, y, yaw))
+    return poses
+
+
+def footprint_sweep_collision(
+    costmap: Any,
+    footprint: Sequence[Point2D],
+    initial_pose: Pose2D,
+    command: ForkliftControlCommand,
+    wheel_base: float,
+    pivot_turn_radius: float,
+    horizon_sec: float,
+    time_step_sec: float,
+    pivot_steering_angle_rad: float,
+    sample_spacing: float,
+    cost_threshold: int,
+    unknown_is_collision: bool,
+) -> Tuple[bool, str]:
+    for pose in predicted_poses_for_command(
+        initial_pose,
+        command,
+        wheel_base,
+        pivot_turn_radius,
+        horizon_sec,
+        time_step_sec,
+        pivot_steering_angle_rad,
+    ):
+        collision, reason = footprint_collision_at_pose(
+            costmap,
+            footprint,
+            pose,
+            sample_spacing,
+            cost_threshold,
+            unknown_is_collision,
+        )
+        if collision:
+            return True, reason
+    return False, 'footprint sweep clear'
 
 
 def clamp_control_command(
@@ -161,15 +385,29 @@ class SafetyCommandGate(Node):
         self.declare_parameter('vehicle_state_topic', '/forklift/vehicle_state')
         self.declare_parameter('fault_state_topic', '/forklift/fault_state')
         self.declare_parameter('localization_topic', '/odom')
+        self.declare_parameter('costmap_topic', '/local_costmap/costmap')
+        self.declare_parameter('costmap_message_type', 'occupancy_grid')
         self.declare_parameter('status_topic', '/forklift/safety_gate/status')
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('recovery_timeout_sec', 0.5)
         self.declare_parameter('vehicle_state_timeout_sec', 0.5)
         self.declare_parameter('fault_state_timeout_sec', 0.5)
         self.declare_parameter('localization_timeout_sec', 0.5)
+        self.declare_parameter('costmap_timeout_sec', 0.5)
         self.declare_parameter('require_vehicle_state', False)
         self.declare_parameter('require_fault_state', False)
         self.declare_parameter('require_localization', False)
+        self.declare_parameter('costmap_monitor_enabled', True)
+        self.declare_parameter('collision_check_enabled', True)
+        self.declare_parameter(
+            'footprint',
+            '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]',
+        )
+        self.declare_parameter('footprint_sample_spacing', 0.05)
+        self.declare_parameter('footprint_collision_cost_threshold', 100)
+        self.declare_parameter('unknown_is_collision', True)
+        self.declare_parameter('collision_check_horizon_sec', 1.0)
+        self.declare_parameter('collision_check_time_step_sec', 0.1)
         self.declare_parameter('emergency_stop_active', False)
         self.declare_parameter('allow_recovery_twist', True)
         self.declare_parameter('allow_recovery_backoff', True)
@@ -191,15 +429,42 @@ class SafetyCommandGate(Node):
         self._vehicle_state_topic = str(self.get_parameter('vehicle_state_topic').value)
         self._fault_state_topic = str(self.get_parameter('fault_state_topic').value)
         self._localization_topic = str(self.get_parameter('localization_topic').value)
+        self._costmap_topic = str(self.get_parameter('costmap_topic').value)
+        self._costmap_message_type = str(
+            self.get_parameter('costmap_message_type').value).lower()
         self._status_topic = str(self.get_parameter('status_topic').value)
         self._command_timeout_sec = self._positive_param('command_timeout_sec', 0.5)
         self._recovery_timeout_sec = self._positive_param('recovery_timeout_sec', 0.5)
         self._vehicle_state_timeout_sec = self._positive_param('vehicle_state_timeout_sec', 0.5)
         self._fault_state_timeout_sec = self._positive_param('fault_state_timeout_sec', 0.5)
         self._localization_timeout_sec = self._positive_param('localization_timeout_sec', 0.5)
+        self._costmap_timeout_sec = self._positive_param('costmap_timeout_sec', 0.5)
         self._require_vehicle_state = bool(self.get_parameter('require_vehicle_state').value)
         self._require_fault_state = bool(self.get_parameter('require_fault_state').value)
         self._require_localization = bool(self.get_parameter('require_localization').value)
+        self._costmap_monitor_enabled = bool(
+            self.get_parameter('costmap_monitor_enabled').value)
+        self._collision_check_enabled = bool(
+            self.get_parameter('collision_check_enabled').value)
+        try:
+            self._footprint = parse_footprint(self.get_parameter('footprint').value)
+        except (SyntaxError, ValueError, TypeError) as exc:
+            self.get_logger().error(f'Invalid footprint parameter: {exc}')
+            self._footprint = parse_footprint(
+                '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'
+            )
+        self._footprint_sample_spacing = self._positive_param('footprint_sample_spacing', 0.05)
+        self._footprint_collision_cost_threshold = int(
+            self.get_parameter('footprint_collision_cost_threshold').value)
+        self._unknown_is_collision = bool(self.get_parameter('unknown_is_collision').value)
+        self._collision_check_horizon_sec = self._positive_param(
+            'collision_check_horizon_sec',
+            1.0,
+        )
+        self._collision_check_time_step_sec = self._positive_param(
+            'collision_check_time_step_sec',
+            0.1,
+        )
         self._emergency_stop = bool(self.get_parameter('emergency_stop_active').value)
         self._allow_recovery_twist = bool(self.get_parameter('allow_recovery_twist').value)
         self._allow_recovery_backoff = bool(self.get_parameter('allow_recovery_backoff').value)
@@ -232,6 +497,10 @@ class SafetyCommandGate(Node):
         self._last_fault_state: Optional[ForkliftFaultState] = None
         self._last_fault_state_time = self.get_clock().now()
         self._last_localization_time = self.get_clock().now()
+        self._last_pose: Optional[Pose2D] = None
+        self._last_costmap: Optional[Any] = None
+        self._last_costmap_time = self.get_clock().now()
+        self._last_costmap_error = ''
         self._last_reason = ''
 
         self._command_pub = self.create_publisher(
@@ -247,7 +516,12 @@ class SafetyCommandGate(Node):
             10,
         )
         if self._recovery_twist_topic:
-            self.create_subscription(Twist, self._recovery_twist_topic, self._on_recovery_twist, 10)
+            self.create_subscription(
+                Twist,
+                self._recovery_twist_topic,
+                self._on_recovery_twist,
+                10,
+            )
         if self._vehicle_state_topic:
             self.create_subscription(
                 ForkliftVehicleState,
@@ -264,6 +538,27 @@ class SafetyCommandGate(Node):
             )
         if self._localization_topic:
             self.create_subscription(Odometry, self._localization_topic, self._on_localization, 10)
+        if self._costmap_topic:
+            if self._costmap_message_type in {'costmap_raw', 'nav2_costmap'}:
+                if Nav2Costmap is None:
+                    self.get_logger().error(
+                        'costmap_message_type requires nav2_msgs/Costmap, but nav2_msgs is not '
+                        'available; no costmap subscription was created.'
+                    )
+                else:
+                    self.create_subscription(
+                        Nav2Costmap,
+                        self._costmap_topic,
+                        self._on_costmap,
+                        10,
+                    )
+            else:
+                self.create_subscription(
+                    OccupancyGrid,
+                    self._costmap_topic,
+                    self._on_costmap,
+                    10,
+                )
         self.create_service(
             SetEmergencyStop,
             '/forklift_safety/set_emergency_stop',
@@ -272,7 +567,8 @@ class SafetyCommandGate(Node):
         self.create_timer(1.0 / control_rate_hz, self._on_timer)
         self.get_logger().info(
             f'safety_command_gate ready: {self._raw_command_topic} -> '
-            f'{self._gated_command_topic}, recovery={self._recovery_twist_topic or "disabled"}'
+            f'{self._gated_command_topic}, recovery={self._recovery_twist_topic or "disabled"}, '
+            f'costmap={self._costmap_topic or "disabled"}'
         )
 
     def _positive_param(self, name: str, fallback: float) -> float:
@@ -300,8 +596,20 @@ class SafetyCommandGate(Node):
         self._last_fault_state = msg
         self._last_fault_state_time = self.get_clock().now()
 
-    def _on_localization(self, _msg: Odometry) -> None:
+    def _on_localization(self, msg: Odometry) -> None:
         self._last_localization_time = self.get_clock().now()
+        pose = msg.pose.pose
+        self._last_pose = (
+            float(pose.position.x),
+            float(pose.position.y),
+            yaw_from_quaternion(pose.orientation),
+        )
+
+    def _on_costmap(self, msg: OccupancyGrid) -> None:
+        self._last_costmap_time = self.get_clock().now()
+        self._last_costmap_error = costmap_error(msg)
+        if not self._last_costmap_error:
+            self._last_costmap = msg
 
     def _on_set_emergency_stop(
         self,
@@ -345,6 +653,9 @@ class SafetyCommandGate(Node):
                 return command, 'raw stop'
             if direction(command) == 0:
                 return stop_command(stamp), 'invalid direction'
+            collision_reason = self._collision_stop_reason(command)
+            if collision_reason:
+                return stop_command(stamp), collision_reason
             return command, 'raw command'
 
         if self._allow_recovery_twist and self._last_recovery_twist is not None:
@@ -363,6 +674,9 @@ class SafetyCommandGate(Node):
                     self._allow_recovery_pivot,
                     stamp,
                 )
+                collision_reason = self._collision_stop_reason(command)
+                if collision_reason:
+                    return stop_command(stamp), collision_reason
                 return command, reason
 
         if self._last_raw_command is None:
@@ -405,7 +719,45 @@ class SafetyCommandGate(Node):
             if age > self._localization_timeout_sec:
                 return 'localization timeout'
 
+        if self._costmap_monitor_enabled:
+            age = (now - self._last_costmap_time).nanoseconds / 1e9
+            reason = costmap_stop_reason(
+                self._costmap_monitor_enabled,
+                age,
+                self._last_costmap is not None,
+                self._last_costmap_error,
+                self._costmap_timeout_sec,
+            )
+            if reason:
+                return reason
+
         return ''
+
+    def _collision_stop_reason(self, command: ForkliftControlCommand) -> str:
+        if not self._collision_check_enabled:
+            return ''
+        if not command.enable or command.brake or direction(command) == 0:
+            return ''
+        if self._last_costmap is None:
+            return ''
+        if self._last_pose is None:
+            return 'collision pose missing'
+
+        collision, reason = footprint_sweep_collision(
+            self._last_costmap,
+            self._footprint,
+            self._last_pose,
+            command,
+            self._wheel_base,
+            self._pivot_turn_radius,
+            self._collision_check_horizon_sec,
+            self._collision_check_time_step_sec,
+            self._pivot_steering_angle_rad,
+            self._footprint_sample_spacing,
+            self._footprint_collision_cost_threshold,
+            self._unknown_is_collision,
+        )
+        return reason if collision else ''
 
     def _publish_status(self, reason: str) -> None:
         status = String()
@@ -422,7 +774,12 @@ class SafetyCommandGate(Node):
             'vehicle fault',
             'invalid direction',
             'localization timeout',
+            'costmap missing',
+            'costmap timeout',
+            'collision pose missing',
         }:
+            self.get_logger().warning(f'Safety gate stopping: {reason}.')
+        elif reason.startswith('costmap invalid') or reason.startswith('footprint collision'):
             self.get_logger().warning(f'Safety gate stopping: {reason}.')
         elif reason in {'raw command', 'recovery backoff', 'recovery pivot', 'recovery forward'}:
             self.get_logger().info(f'Safety gate passing: {reason}.')
