@@ -249,11 +249,13 @@ NavigateToPose 简单 A-B
 障碍离开后继续或重新下发目标
 ```
 
-P8.2 再做独立 safety package：
+P8.2 已新增独立 `forklift_safety` package：
 
-- 独立订阅 raw control command，输出 gated command。
-- 接入 recovery command adapter，禁止真车底盘裸吃 Nav2 默认 `/cmd_vel`。
-- 接入急停硬输入或真车 safety relay。
+- `safety_command_gate` 独立订阅 `/forklift/control_cmd_raw`，输出 `/forklift/control_cmd`。
+- controller / task_manager / manual control 后续统一发 raw command，vehicle_interface / sim bridge 只消费 gated command。
+- recovery command adapter 订阅 `/cmd_vel`，只白名单低速 wait / backoff / pivot，并转换成受限 `ForkliftControlCommand`。
+- `forklift_navigation.launch.py` 默认启动 safety gate，sim bridge 的 legacy `/cmd_vel` fallback 默认关闭，禁止绕过闸门。
+- 接入 `/forklift_safety/set_emergency_stop`、command timeout、vehicle fault、车辆急停状态和可选 localization / vehicle-state watchdog。
 - 接入 keepout / speed zone。
 - 掉边保护。
 - 与 task_manager 的 pause/resume/replan 状态联动。

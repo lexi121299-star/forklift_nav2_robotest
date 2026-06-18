@@ -186,7 +186,7 @@ controller_server:
       smoothness_weight: 1.0
       velocity_reward_weight: 1.2
       publish_control_cmd: true
-      control_cmd_topic: "/forklift/control_cmd"
+      control_cmd_topic: "/forklift/control_cmd_raw"
       control_cmd_accel_time: 0.3
       control_cmd_decel_time: 0.3
 

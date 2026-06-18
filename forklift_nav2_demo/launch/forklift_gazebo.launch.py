@@ -191,8 +191,10 @@ def generate_launch_description():
             description='Gazebo command topic used by sim_command_bridge mode.'),
         DeclareLaunchArgument(
             'bridge_twist_fallback_topic',
-            default_value='/cmd_vel',
-            description='Optional Twist topic used only after /forklift/control_cmd times out.'),
+            default_value='',
+            description=(
+                'Legacy sim-only Twist fallback. Keep empty when '
+                'safety_command_gate handles recovery.')),
         DeclareLaunchArgument('bridge_twist_fallback_timeout_sec', default_value='0.5'),
         gzserver,
         gzclient,

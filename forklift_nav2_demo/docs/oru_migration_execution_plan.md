@@ -1378,7 +1378,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
     [ ] 6.5a-3 pivot 验收：pivot_90_left/right_in_place、pivot_90_then_forward_ab、pivot_blocked_stop、l_shaped_corridor_ab
     [ ] 6.5a-4 sparse_90_turn_ab 硬验收（reverse=0，NavigateToPose SUCCEEDED）
     [ ] 6.5a-5 三大回归：forward_ab、reverse_ab、dynamic_stop_release_ab
-[ ] P8.2 独立 safety package / 命令闸门
+[x] P8.2 独立 safety package / 命令闸门
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
 [ ] P8.4 真车低速 safety acceptance 包
 [ ] P7.1 task_manager 最小任务入口
@@ -1442,6 +1442,8 @@ P6.5a 上车前 rear-axle pivot primitive / stop-pivot-go acceptance
   - **v1 架构定调（Option A，已决策）**：第一版**不依赖在线自主重规划**。L-shape 等路线**拆成已验证的原子段序列**（直行 FollowPath → 原地 pivot 90° → 直行 FollowPath），每段单次规划+验证（`reverse=0`、无 fallback）后执行；动态障碍**停车/离障继续，不自己重规划**（复用已验证的 P8.1 `dynamic_stop_release_ab`）；持续挡路 → 任务等待/失败，不自主绕行。完整自主规划（单个 `NavigateToPose` 跑通长双腿 + 精细终点机动）**不是上车前置**，归 **P10** 继续移植 ORU planner。
   - **本轮落地代码**：`lattice_fallback_to_astar` 在 foxy/test 两个配置都改为 `false`——v1 fail-safe，lattice 无解时抛 `PlannerException` 干净失败，绝不把全向 A* 路径交给运动学受限的 controller（叉车不会被甩飞）。planner 抛错信息同步说明该姿态。
   - **下一步**：① L-shape 路点分解执行（路点序列器，每段单次规划+FollowPath，关全局在线重规划）；② P8.2 独立 safety/command gate（含 recovery 命令白名单与扫掠 footprint，把「失败/发散」彻底变「安全停」）。`l_shaped` 长双腿单次自主规划与 A* 替代（运动学合法 fallback）归 P10。
+
+- 2026-06-18（P8.2 独立 safety / command gate）：新增 `forklift_safety` package 和 `safety_command_gate` 节点，正式把运动命令链路改成 `controller/task/manual -> /forklift/control_cmd_raw -> safety gate -> /forklift/control_cmd -> vehicle_interface/sim bridge`。第一版 gate 覆盖 command watchdog、急停服务 `/forklift_safety/set_emergency_stop`、vehicle/fault/localization 可选健康检查、速度/转角限幅；同时接入 recovery command adapter，订阅 Nav2 `/cmd_vel` 后只白名单低速 wait/backoff/pivot，并转换成受限 `ForkliftControlCommand`，不再让 bridge 裸吃 `/cmd_vel`。`forklift_navigation.launch.py` 默认启动 safety gate，`bridge_twist_fallback_topic` 默认置空；ORU test 配置把 controller 输出 topic 改为 `/forklift/control_cmd_raw`，保留 controller-side P8.1 safety gate 作为回退保护。
 
 ## 14. ORU 包迁移优先级
 
