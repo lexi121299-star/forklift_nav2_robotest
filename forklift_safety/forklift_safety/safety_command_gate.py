@@ -267,11 +267,37 @@ def footprint_sweep_collision(
     return False, 'footprint sweep clear'
 
 
+def apply_drive_envelope(
+    command: ForkliftControlCommand,
+    max_drive_rpm: float,
+    accel_time_sec: float,
+    decel_time_sec: float,
+) -> ForkliftControlCommand:
+    """Enforce the manufacturer drive envelope on an outgoing motion command.
+
+    The real Curtis 0x203 frame drives the motor from ``drive_rpm`` (0..4000),
+    not ``velocity_mps``, so the gate must cap ``drive_rpm`` itself or its speed
+    limit is bypassed on the vehicle. Direction is carried by the forward/reverse
+    bits, so only the magnitude is clamped. ``accel_time_sec`` / ``decel_time_sec``
+    are filled with the manufacturer-recommended ramp when the upstream command
+    leaves them unset (<= 0), and otherwise left as the explicit upstream value.
+    """
+    command.drive_rpm = clamp(abs(command.drive_rpm), 0.0, max_drive_rpm)
+    if command.accel_time_sec <= 0.0:
+        command.accel_time_sec = accel_time_sec
+    if command.decel_time_sec <= 0.0:
+        command.decel_time_sec = decel_time_sec
+    return command
+
+
 def clamp_control_command(
     command: ForkliftControlCommand,
     max_forward_velocity_mps: float,
     max_reverse_velocity_mps: float,
     max_steering_angle_rad: float,
+    max_drive_rpm: float,
+    accel_time_sec: float,
+    decel_time_sec: float,
 ) -> ForkliftControlCommand:
     gated = ForkliftControlCommand()
     gated.header = command.header
@@ -295,13 +321,14 @@ def clamp_control_command(
     speed_limit = max_forward_velocity_mps if travel_direction >= 0 else max_reverse_velocity_mps
     speed = clamp(abs(command.velocity_mps), 0.0, speed_limit)
     gated.velocity_mps = speed
-    gated.drive_rpm = math.copysign(abs(command.drive_rpm), command.drive_rpm)
     gated.steering_angle_rad = clamp(
         command.steering_angle_rad,
         -max_steering_angle_rad,
         max_steering_angle_rad,
     )
     gated.steering_angle_deg = math.degrees(gated.steering_angle_rad)
+    gated.drive_rpm = command.drive_rpm
+    apply_drive_envelope(gated, max_drive_rpm, accel_time_sec, decel_time_sec)
     return gated
 
 
@@ -417,6 +444,9 @@ class SafetyCommandGate(Node):
         self.declare_parameter('max_recovery_velocity_mps', 0.10)
         self.declare_parameter('max_recovery_angular_velocity_radps', 0.30)
         self.declare_parameter('max_steering_angle_rad', math.pi / 2.0)
+        self.declare_parameter('max_drive_rpm', 2500.0)
+        self.declare_parameter('drive_accel_time_sec', 5.0)
+        self.declare_parameter('drive_decel_time_sec', 3.0)
         self.declare_parameter('wheel_base', 1.2)
         self.declare_parameter('pivot_turn_radius', 0.6)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
@@ -480,6 +510,9 @@ class SafetyCommandGate(Node):
             'max_steering_angle_rad',
             math.pi / 2.0,
         )
+        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2500.0)
+        self._drive_accel_time_sec = self._positive_param('drive_accel_time_sec', 5.0)
+        self._drive_decel_time_sec = self._positive_param('drive_decel_time_sec', 3.0)
         self._wheel_base = self._positive_param('wheel_base', 1.2)
         self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
         self._pivot_steering_angle_rad = min(
@@ -645,6 +678,9 @@ class SafetyCommandGate(Node):
                 self._max_forward_velocity_mps,
                 self._max_reverse_velocity_mps,
                 self._max_steering_angle_rad,
+                self._max_drive_rpm,
+                self._drive_accel_time_sec,
+                self._drive_decel_time_sec,
             )
             command.header.stamp = stamp
             if not self._enabled:
@@ -674,6 +710,13 @@ class SafetyCommandGate(Node):
                     self._allow_recovery_pivot,
                     stamp,
                 )
+                if command.enable and not command.brake and direction(command) != 0:
+                    apply_drive_envelope(
+                        command,
+                        self._max_drive_rpm,
+                        self._drive_accel_time_sec,
+                        self._drive_decel_time_sec,
+                    )
                 collision_reason = self._collision_stop_reason(command)
                 if collision_reason:
                     return stop_command(stamp), collision_reason

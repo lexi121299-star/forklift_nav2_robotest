@@ -1018,13 +1018,17 @@ P8.2 最低标准：
 - command timeout、vehicle fault、localization lost、costmap 数据异常时停车。
 - 继续保留 controller-side 限速/停车作为可回退保护，不把安全完全交给 planner。
 
-P8.2 剩余缺口（架构已落地 ≈80%，达标前必须补完）：
+P8.2 剩余缺口（2026-06-18 已补完 8.2-4/5/6，下列为已闭环状态 + 真车前遗留项）：
 
-截至 2026-06-18，`forklift_safety` package + `safety_command_gate` 已提交（commit `cf177fd`），命令链路、急停服务、watchdog、命令超时/车辆故障/定位丢失即停、速度/转角限幅、recovery 白名单 adapter 都已具备。**仍差 3 项才算 P8.2 达标**：
+`forklift_safety` package + `safety_command_gate` 已提交，命令链路、急停服务、watchdog、命令超时/车辆故障/定位丢失即停、速度/转角限幅、recovery 白名单 adapter、以及下面三项都已具备并在 Foxy docker 内单测通过（`forklift_safety` 14 pytest）：
 
-- **缺口 1 — costmap 数据异常/过期即停**：gate 目前不订阅 costmap，也不检查代价图是否过期/异常；「costmap 数据异常时停车」这条最低标准当前只由 controller-side P8.1 局部覆盖，独立 gate 未实现。
-- **缺口 2 — gate 内扫掠 footprint 碰撞检查**：扫掠 footprint collision 当前只在 controller-side P8.1，独立 gate 没有对将要下发的命令做 footprint 复核；按「所有运动命令都过闸且受 footprint 约束」的标准，gate 应独立持有这道检查（尤其 recovery / pivot / backoff 命令）。
-- **缺口 3 — Foxy docker 端到端验收记录**：尚无在 `forklift-nav2:foxy` docker 里的端到端验收记录，需覆盖：gate 起停、急停服务锁定/解除后状态恢复、recovery 白名单只放低速 wait/backoff/pivot、raw 命令超时后停车、限幅生效。验收前 P8.2 不能勾全完成（见验收清单 8.2-4/5/6）。
+- **缺口 1（已补完）— costmap 数据异常/过期即停**：gate 订阅 `/local_costmap/costmap`（可选 `costmap_message_type:=costmap_raw`），costmap 缺失/超时/空/截断/无效尺寸都会输出停车命令并在 `/forklift/safety_gate/status` 说明原因。
+- **缺口 2（已补完）— gate 内扫掠 footprint 碰撞检查**：gate 按 Foxy ORU footprint 参数，沿当前位姿和短时预测位姿采样 footprint 边界查 costmap，遇 unknown/出图/lethal 即停，覆盖 raw 命令与 recovery wait/backoff/pivot。
+- **缺口 3（部分）— Foxy docker 验收**：build（6 包）+ `foxy_colcon_test.sh`（83 tests / 0 failures）为实跑结果；但 footprint 碰撞停车、costmap timeout 等 live 行为目前是 `forklift_safety/P8_2_FOXY_ACCEPTANCE.md` 里的「可复现命令 + 预期输出」，**尚未实起节点抓日志**。真车前需补一次 live 端到端抓取。
+
+真车前遗留（不阻塞 P8.2 标记，但进 P8.4 前必须闭环）：
+
+- **drive_rpm 限幅**：gate 已对 `drive_rpm` 做 `|rpm|<=max_drive_rpm`（默认 2500）限幅，并把 `accel_time_sec`/`decel_time_sec` 缺省补成厂家建议值（5s/3s）。注意真车 0x203 驱动帧用的是 `drive_rpm` 不是 `velocity_mps`，所以 velocity→rpm 转换必须放在 gate **下游**（`curtis_vehicle_interface`，用已限好的 velocity_mps 算），否则限速会被绕过——归 P2.3。
 
 P8.3 最低标准：
 
@@ -1521,6 +1525,7 @@ P6.5a 上车前 rear-axle pivot primitive / stop-pivot-go acceptance
 
 - 2026-06-18（P8.2 独立 safety / command gate）：新增 `forklift_safety` package 和 `safety_command_gate` 节点，正式把运动命令链路改成 `controller/task/manual -> /forklift/control_cmd_raw -> safety gate -> /forklift/control_cmd -> vehicle_interface/sim bridge`。第一版 gate 覆盖 command watchdog、急停服务 `/forklift_safety/set_emergency_stop`、vehicle/fault/localization 可选健康检查、速度/转角限幅；同时接入 recovery command adapter，订阅 Nav2 `/cmd_vel` 后只白名单低速 wait/backoff/pivot，并转换成受限 `ForkliftControlCommand`，不再让 bridge 裸吃 `/cmd_vel`。`forklift_navigation.launch.py` 默认启动 safety gate，`bridge_twist_fallback_topic` 默认置空；ORU test 配置把 controller 输出 topic 改为 `/forklift/control_cmd_raw`，保留 controller-side P8.1 safety gate 作为回退保护。
 - 2026-06-18（P8.2 补完 8.2-4/5/6）：`safety_command_gate` 默认订阅 `/local_costmap/costmap`，支持可选 `costmap_message_type:=costmap_raw`；costmap 缺失、超时或空/截断/无效数据会输出停车命令并在 `/forklift/safety_gate/status` 说明原因。gate 内新增独立 swept footprint 复核：按 Foxy ORU local footprint 参数解析 footprint，沿当前位姿和短时预测位姿采样 footprint 边界，遇到 unknown/out-of-map/lethal cost 即停，覆盖 raw command 和 recovery wait/backoff/pivot。新增 `forklift_safety/P8_2_FOXY_ACCEPTANCE.md` 作为 Foxy docker 可复现验收记录；Foxy docker build 6 packages 通过，`./scripts/foxy_colcon_test.sh` 通过（83 tests / 0 failures，其中 `forklift_safety` 14 个 pytest）。
+- 2026-06-18（P8.2 drive 限幅修正）：发现 gate 原先只限 `velocity_mps`，而真车 Curtis 0x203 驱动帧实际用 `drive_rpm`（0..4000）做速度，限速会被绕过。`safety_command_gate` 新增 `apply_drive_envelope`：对所有下发的运动命令（raw + recovery）把 `|drive_rpm|` 限到 `max_drive_rpm`（默认 2500，厂家常用工作转速），并把 `accel_time_sec`/`decel_time_sec` 在上游未给时补成厂家建议值（默认 5s / 3s）；新增对应 launch 参数与单测（`forklift_safety` 升到 15 pytest，Foxy docker 内全过）。velocity→rpm 的换算仍必须放在 gate 下游 `curtis_vehicle_interface`，归 P2.3。
 
 ## 14. ORU 包迁移优先级
 

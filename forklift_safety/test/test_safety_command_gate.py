@@ -6,6 +6,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
 
 from forklift_safety.safety_command_gate import (
+    apply_drive_envelope,
     clamp_control_command,
     costmap_error,
     costmap_stop_reason,
@@ -66,12 +67,33 @@ def test_clamp_control_command_limits_speed_and_steering():
     command.forward = True
     command.velocity_mps = 2.0
     command.steering_angle_rad = 2.0
+    command.drive_rpm = 4000.0
 
-    gated = clamp_control_command(command, 0.45, 0.15, 1.0)
+    gated = clamp_control_command(command, 0.45, 0.15, 1.0, 2500.0, 5.0, 3.0)
 
     assert gated.velocity_mps == pytest.approx(0.45)
     assert gated.steering_angle_rad == pytest.approx(1.0)
     assert gated.steering_angle_deg == pytest.approx(math.degrees(1.0))
+    # drive_rpm is the field the real Curtis 0x203 frame drives from, so it must
+    # be capped too; manufacturer ramp times are filled when left unset.
+    assert gated.drive_rpm == pytest.approx(2500.0)
+    assert gated.accel_time_sec == pytest.approx(5.0)
+    assert gated.decel_time_sec == pytest.approx(3.0)
+
+
+def test_apply_drive_envelope_caps_rpm_and_keeps_explicit_ramp():
+    command = ForkliftControlCommand()
+    command.drive_rpm = -3200.0
+    command.accel_time_sec = 2.0
+    command.decel_time_sec = 0.0
+
+    apply_drive_envelope(command, max_drive_rpm=2500.0, accel_time_sec=5.0, decel_time_sec=3.0)
+
+    # Magnitude is clamped (direction lives in forward/reverse bits, not the sign).
+    assert command.drive_rpm == pytest.approx(2500.0)
+    # Explicit upstream accel is preserved; unset decel is filled with the default.
+    assert command.accel_time_sec == pytest.approx(2.0)
+    assert command.decel_time_sec == pytest.approx(3.0)
 
 
 def test_recovery_backoff_is_low_speed_reverse_command():

@@ -29,6 +29,9 @@ def generate_launch_description():
     max_recovery_angular_velocity_radps = LaunchConfiguration(
         'max_recovery_angular_velocity_radps')
     max_steering_angle_rad = LaunchConfiguration('max_steering_angle_rad')
+    max_drive_rpm = LaunchConfiguration('max_drive_rpm')
+    drive_accel_time_sec = LaunchConfiguration('drive_accel_time_sec')
+    drive_decel_time_sec = LaunchConfiguration('drive_decel_time_sec')
     wheel_base = LaunchConfiguration('wheel_base')
     pivot_turn_radius = LaunchConfiguration('pivot_turn_radius')
     pivot_steering_angle_rad = LaunchConfiguration('pivot_steering_angle_rad')
@@ -62,6 +65,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_steering_angle_rad',
             default_value='1.5707963267948966'),
+        DeclareLaunchArgument('max_drive_rpm', default_value='2500.0'),
+        DeclareLaunchArgument('drive_accel_time_sec', default_value='5.0'),
+        DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
         DeclareLaunchArgument('wheel_base', default_value='1.2'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
         DeclareLaunchArgument(
@@ -97,6 +103,9 @@ def generate_launch_description():
                 'max_recovery_velocity_mps': max_recovery_velocity_mps,
                 'max_recovery_angular_velocity_radps': max_recovery_angular_velocity_radps,
                 'max_steering_angle_rad': max_steering_angle_rad,
+                'max_drive_rpm': max_drive_rpm,
+                'drive_accel_time_sec': drive_accel_time_sec,
+                'drive_decel_time_sec': drive_decel_time_sec,
                 'wheel_base': wheel_base,
                 'pivot_turn_radius': pivot_turn_radius,
                 'pivot_steering_angle_rad': pivot_steering_angle_rad,
