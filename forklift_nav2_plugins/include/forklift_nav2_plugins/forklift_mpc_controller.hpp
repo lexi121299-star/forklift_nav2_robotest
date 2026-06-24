@@ -148,6 +148,13 @@ private:
   double rear_axle_x_offset_{0.0};
   double pivot_velocity_{0.12};
   double pivot_yaw_tolerance_{0.05};
+  double pivot_stop_velocity_threshold_{0.02};
+  // Stop-pivot-go latch: brake only on the approach motion BEFORE a pivot starts,
+  // then commit. Once committed we must not re-brake on the pivot's own rotation,
+  // or the gate stutters/stalls the spin (and on the real vehicle the rear-axle
+  // pivot also translates base_link, so an approach-speed gate alone can never
+  // settle mid-pivot). Reset whenever pivot motion is not active.
+  bool pivot_settled_{false};
   double horizon_time_{1.8};
   double time_step_{0.2};
   double lookahead_distance_{1.4};

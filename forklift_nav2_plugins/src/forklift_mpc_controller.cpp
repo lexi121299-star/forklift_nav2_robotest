@@ -73,6 +73,9 @@ void ForkliftMpcController::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".pivot_yaw_tolerance", rclcpp::ParameterValue(pivot_yaw_tolerance_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_stop_velocity_threshold",
+    rclcpp::ParameterValue(pivot_stop_velocity_threshold_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".horizon_time", rclcpp::ParameterValue(horizon_time_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".time_step", rclcpp::ParameterValue(time_step_));
@@ -189,6 +192,8 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".rear_axle_x_offset", rear_axle_x_offset_);
   node->get_parameter(name_ + ".pivot_velocity", pivot_velocity_);
   node->get_parameter(name_ + ".pivot_yaw_tolerance", pivot_yaw_tolerance_);
+  node->get_parameter(
+    name_ + ".pivot_stop_velocity_threshold", pivot_stop_velocity_threshold_);
   node->get_parameter(name_ + ".horizon_time", horizon_time_);
   node->get_parameter(name_ + ".time_step", time_step_);
   node->get_parameter(name_ + ".lookahead_distance", lookahead_distance_);
@@ -266,6 +271,7 @@ void ForkliftMpcController::configure(
   rear_axle_x_offset_ = vehicle_parameters.rear_axle_x_offset;
   pivot_velocity_ = std::clamp(pivot_velocity_, 0.01, max_velocity_);
   pivot_yaw_tolerance_ = std::max(0.01, pivot_yaw_tolerance_);
+  pivot_stop_velocity_threshold_ = std::max(0.0, pivot_stop_velocity_threshold_);
   horizon_time_ = std::max(0.2, horizon_time_);
   time_step_ = std::clamp(time_step_, 0.02, horizon_time_);
   lookahead_distance_ = std::max(0.1, lookahead_distance_);
@@ -453,6 +459,10 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     allow_reverse_ && max_reverse_velocity_ > 0.0 && previewHasReverseMotion(last_preview_window_);
   const bool pivot_motion_active =
     allow_pivot_turn_ && previewHasPivotMotion(last_preview_window_);
+  if (!pivot_motion_active) {
+    // Re-arm the stop-pivot-go brake for the next pivot maneuver.
+    pivot_settled_ = false;
+  }
   RCLCPP_INFO_THROTTLE(
     logger_, *clock_, 2000,
     "MPC preview window: start=%zu end=%zu points=%zu length=%.3f reverse=%s pivot=%s",
@@ -528,6 +538,24 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     speed_limit_ > 0.0 ? std::min(max_velocity_, speed_limit_) : max_velocity_;
 
   if (pivot_motion_active) {
+    // Stop-pivot-go: brake until the approach (path-tracking) motion has settled,
+    // then latch and commit to the pivot. Do NOT keep braking once committed:
+    // the pivot's own rotation (and, on the real vehicle, the rear-axle pivot's
+    // base_link translation) would otherwise re-trigger the gate every cycle and
+    // stutter/stall the spin. The latch re-arms when pivot_motion_active drops.
+    if (!pivot_settled_) {
+      const double approach_motion = std::hypot(velocity.linear.x, velocity.linear.y);
+      if (approach_motion > pivot_stop_velocity_threshold_) {
+        RCLCPP_INFO_THROTTLE(
+          logger_, *clock_, 2000,
+          "P6.5a stop-pivot-go braking before pivot: approach_motion=%.3f threshold=%.3f",
+          approach_motion, pivot_stop_velocity_threshold_);
+        publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+        return zeroCommand(pose);
+      }
+      pivot_settled_ = true;
+    }
+
     double target_yaw = current_state.theta;
     bool found_pivot_target = false;
     for (const auto & point : last_preview_window_.points) {

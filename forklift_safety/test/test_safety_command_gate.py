@@ -14,6 +14,7 @@ from forklift_safety.safety_command_gate import (
     footprint_collision_at_pose,
     footprint_sweep_collision,
     parse_footprint,
+    predicted_poses_for_command,
     recovery_command_from_twist,
     stop_command,
 )
@@ -260,6 +261,7 @@ def test_footprint_sweep_collision_checks_predicted_forward_pose():
         command,
         wheel_base=1.2,
         pivot_turn_radius=0.6,
+        rear_axle_x_offset=-0.34,
         horizon_sec=1.0,
         time_step_sec=0.2,
         pivot_steering_angle_rad=math.pi / 2.0,
@@ -287,6 +289,7 @@ def test_footprint_sweep_collision_allows_clear_backoff():
         command,
         wheel_base=1.2,
         pivot_turn_radius=0.6,
+        rear_axle_x_offset=-0.34,
         horizon_sec=1.0,
         time_step_sec=0.2,
         pivot_steering_angle_rad=math.pi / 2.0,
@@ -297,3 +300,31 @@ def test_footprint_sweep_collision_allows_clear_backoff():
 
     assert collision is False
     assert reason == 'footprint sweep clear'
+
+
+def test_pivot_prediction_keeps_rear_axle_fixed():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.forward = True
+    command.velocity_mps = 0.6
+    command.steering_angle_rad = math.pi / 2.0
+
+    poses = predicted_poses_for_command(
+        (0.0, 0.0, 0.0),
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=-0.34,
+        horizon_sec=math.pi / 2.0,
+        time_step_sec=math.pi / 2.0,
+        pivot_steering_angle_rad=math.pi / 2.0,
+    )
+
+    final_x, final_y, final_yaw = poses[-1]
+    assert final_yaw == pytest.approx(math.pi / 2.0)
+    assert final_x == pytest.approx(-0.34)
+    assert final_y == pytest.approx(0.34)
+    rear_x = final_x - 0.34 * math.cos(final_yaw)
+    rear_y = final_y - 0.34 * math.sin(final_yaw)
+    assert rear_x == pytest.approx(-0.34)
+    assert rear_y == pytest.approx(0.0)

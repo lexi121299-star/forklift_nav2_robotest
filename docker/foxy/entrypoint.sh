@@ -2,7 +2,7 @@
 set -e
 
 source /opt/ros/foxy/setup.bash
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 
 if [ -f /workspace/install_foxy/setup.bash ] && \
   [ -f /workspace/install_foxy/forklift_msgs/share/forklift_msgs/local_setup.bash ] && \

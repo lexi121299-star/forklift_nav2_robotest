@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -34,6 +35,7 @@ def generate_launch_description():
     drive_decel_time_sec = LaunchConfiguration('drive_decel_time_sec')
     wheel_base = LaunchConfiguration('wheel_base')
     pivot_turn_radius = LaunchConfiguration('pivot_turn_radius')
+    rear_axle_x_offset = LaunchConfiguration('rear_axle_x_offset')
     pivot_steering_angle_rad = LaunchConfiguration('pivot_steering_angle_rad')
     control_rate_hz = LaunchConfiguration('control_rate_hz')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -70,6 +72,7 @@ def generate_launch_description():
         DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
         DeclareLaunchArgument('wheel_base', default_value='1.4'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
+        DeclareLaunchArgument('rear_axle_x_offset', default_value='-0.34'),
         DeclareLaunchArgument(
             'pivot_steering_angle_rad',
             default_value='1.5707963267948966'),
@@ -92,7 +95,9 @@ def generate_launch_description():
                 'costmap_timeout_sec': costmap_timeout_sec,
                 'costmap_monitor_enabled': costmap_monitor_enabled,
                 'collision_check_enabled': collision_check_enabled,
-                'footprint': footprint,
+                # Foxy otherwise YAML-parses the string into a nested sequence,
+                # which launch_ros rejects as a non-uniform parameter array.
+                'footprint': ParameterValue(footprint, value_type=str),
                 'footprint_sample_spacing': footprint_sample_spacing,
                 'footprint_collision_cost_threshold': footprint_collision_cost_threshold,
                 'unknown_is_collision': unknown_is_collision,
@@ -108,6 +113,7 @@ def generate_launch_description():
                 'drive_decel_time_sec': drive_decel_time_sec,
                 'wheel_base': wheel_base,
                 'pivot_turn_radius': pivot_turn_radius,
+                'rear_axle_x_offset': rear_axle_x_offset,
                 'pivot_steering_angle_rad': pivot_steering_angle_rad,
                 'control_rate_hz': control_rate_hz,
                 'use_sim_time': use_sim_time,

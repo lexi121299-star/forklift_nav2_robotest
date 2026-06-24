@@ -199,6 +199,7 @@ def predicted_poses_for_command(
     command: ForkliftControlCommand,
     wheel_base: float,
     pivot_turn_radius: float,
+    rear_axle_x_offset: float,
     horizon_sec: float,
     time_step_sec: float,
     pivot_steering_angle_rad: float,
@@ -222,11 +223,16 @@ def predicted_poses_for_command(
                 abs(signed_velocity) / positive(pivot_turn_radius, 0.6),
                 steering,
             )
+            rear_x = x + rear_axle_x_offset * math.cos(yaw)
+            rear_y = y + rear_axle_x_offset * math.sin(yaw)
+            yaw += yaw_rate * step
+            x = rear_x - rear_axle_x_offset * math.cos(yaw)
+            y = rear_y - rear_axle_x_offset * math.sin(yaw)
         else:
             yaw_rate = signed_velocity * math.tan(steering) / positive(wheel_base, 1.2)
-        x += signed_velocity * math.cos(yaw) * step
-        y += signed_velocity * math.sin(yaw) * step
-        yaw += yaw_rate * step
+            x += signed_velocity * math.cos(yaw) * step
+            y += signed_velocity * math.sin(yaw) * step
+            yaw += yaw_rate * step
         poses.append((x, y, yaw))
     return poses
 
@@ -238,6 +244,7 @@ def footprint_sweep_collision(
     command: ForkliftControlCommand,
     wheel_base: float,
     pivot_turn_radius: float,
+    rear_axle_x_offset: float,
     horizon_sec: float,
     time_step_sec: float,
     pivot_steering_angle_rad: float,
@@ -250,6 +257,7 @@ def footprint_sweep_collision(
         command,
         wheel_base,
         pivot_turn_radius,
+        rear_axle_x_offset,
         horizon_sec,
         time_step_sec,
         pivot_steering_angle_rad,
@@ -449,6 +457,7 @@ class SafetyCommandGate(Node):
         self.declare_parameter('drive_decel_time_sec', 3.0)
         self.declare_parameter('wheel_base', 1.4)
         self.declare_parameter('pivot_turn_radius', 0.6)
+        self.declare_parameter('rear_axle_x_offset', -0.34)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('control_rate_hz', 20.0)
 
@@ -515,6 +524,9 @@ class SafetyCommandGate(Node):
         self._drive_decel_time_sec = self._positive_param('drive_decel_time_sec', 3.0)
         self._wheel_base = self._positive_param('wheel_base', 1.4)
         self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
+        self._rear_axle_x_offset = float(
+            self.get_parameter('rear_axle_x_offset').value
+        )
         self._pivot_steering_angle_rad = min(
             self._positive_param('pivot_steering_angle_rad', math.pi / 2.0),
             self._max_steering_angle_rad,
@@ -793,6 +805,7 @@ class SafetyCommandGate(Node):
             command,
             self._wheel_base,
             self._pivot_turn_radius,
+            self._rear_axle_x_offset,
             self._collision_check_horizon_sec,
             self._collision_check_time_step_sec,
             self._pivot_steering_angle_rad,

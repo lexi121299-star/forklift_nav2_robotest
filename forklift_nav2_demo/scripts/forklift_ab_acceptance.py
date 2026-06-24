@@ -89,6 +89,16 @@ SCENARIOS = {
         "min_abs_sim_angular_z": 0.05,
         "min_final_y": 0.05,
     },
+    "pivot_blocked_stop": {
+        "initial": (-2.0, -0.5, 0.0),
+        "goal": (-2.34, -0.16, math.pi * 0.5),
+        "timeout_sec": 15.0,
+        "pivot_blocked": True,
+        # Outside the initial footprint but inside the counterweight sweep for
+        # the rear-axle +90 degree pivot.
+        "obstacle": (-1.45, 0.45, 0.5),
+        "obstacle_size": (0.35, 0.35, 1.0),
+    },
     "reverse_ab": {
         "initial": (-2.0, -0.5, 0.0),
         "goal": (-2.35, -0.5, 0.0),
@@ -315,11 +325,30 @@ class AbAcceptance:
                 self.action_name))
             return 5
 
-        if scenario.get("dynamic_obstacle", False):
+        if scenario.get("pivot_blocked", False):
+            result = self.run_pivot_blocked_scenario(scenario, goal)
+        elif scenario.get("dynamic_obstacle", False):
             result = self.run_dynamic_scenario(scenario, goal)
         else:
             result = self.run_plain_scenario(scenario, goal)
         self.print_summary(result)
+
+        if scenario.get("pivot_blocked", False):
+            aborted = (
+                result is not None and
+                result.status == GoalStatus.STATUS_ABORTED
+            )
+            stopped = self.phase_zero_control_samples["blocked"] > 0
+            if aborted or stopped:
+                self.node.get_logger().info(
+                    "ab_acceptance=PASS scenario={} aborted={} zero_samples={}".format(
+                        self.scenario_name,
+                        aborted,
+                        self.phase_zero_control_samples["blocked"]))
+                return 0
+            self.node.get_logger().error(
+                "blocked pivot neither aborted nor produced a zero/brake command")
+            return 8
 
         if result is None:
             self.node.get_logger().error("{} timed out".format(self.action_name))
@@ -333,6 +362,24 @@ class AbAcceptance:
         if goal_handle is None:
             return None
         return self.wait_for_result(goal_handle.get_result_async(), scenario["timeout_sec"])
+
+    def run_pivot_blocked_scenario(self, scenario, goal):
+        if not self.wait_for_gazebo_services():
+            return None
+        if not self.spawn_obstacle(scenario):
+            return None
+        self.spin_for(2.0)
+        self.clear_costmaps()
+        self.phase = "blocked"
+        goal_handle = self.send_goal(goal)
+        if goal_handle is None:
+            return None
+        result_future = goal_handle.get_result_async()
+        result = self.wait_for_result(result_future, scenario["timeout_sec"])
+        if result is None:
+            cancel_future = goal_handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=5.0)
+        return result
 
     def run_dynamic_scenario(self, scenario, goal):
         if not self.wait_for_gazebo_services():

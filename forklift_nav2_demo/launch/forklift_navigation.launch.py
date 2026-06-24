@@ -65,6 +65,7 @@ def generate_launch_description():
     bridge_pivot_steering_tolerance_rad = LaunchConfiguration(
         'bridge_pivot_steering_tolerance_rad')
     bridge_pivot_turn_radius = LaunchConfiguration('bridge_pivot_turn_radius')
+    safety_rear_axle_x_offset = LaunchConfiguration('safety_rear_axle_x_offset')
     bridge_command_timeout_sec = LaunchConfiguration('bridge_command_timeout_sec')
     bridge_control_rate_hz = LaunchConfiguration('bridge_control_rate_hz')
     bridge_cmd_vel_topic = LaunchConfiguration('bridge_cmd_vel_topic')
@@ -147,6 +148,7 @@ def generate_launch_description():
             'max_steering_angle_rad': bridge_max_steering_angle_rad,
             'wheel_base': bridge_wheel_base,
             'pivot_turn_radius': bridge_pivot_turn_radius,
+            'rear_axle_x_offset': safety_rear_axle_x_offset,
             'pivot_steering_angle_rad': bridge_pivot_steering_angle_rad,
             'control_rate_hz': bridge_control_rate_hz,
         }.items(),
@@ -221,6 +223,7 @@ def generate_launch_description():
             default_value='1.5707963267948966'),
         DeclareLaunchArgument('bridge_pivot_steering_tolerance_rad', default_value='0.03'),
         DeclareLaunchArgument('bridge_pivot_turn_radius', default_value='0.6'),
+        DeclareLaunchArgument('safety_rear_axle_x_offset', default_value='-0.34'),
         DeclareLaunchArgument('bridge_command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('bridge_control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument(
@@ -249,7 +252,7 @@ def generate_launch_description():
             description='Seconds before warning while waiting for readiness. 0 waits silently.'),
         DeclareLaunchArgument(
             'rmw_implementation',
-            default_value='rmw_fastrtps_cpp',
+            default_value='rmw_cyclonedds_cpp',
             description='RMW implementation inherited by Gazebo, Nav2, RViz, and helper nodes.'),
         DeclareLaunchArgument(
             'use_composition',

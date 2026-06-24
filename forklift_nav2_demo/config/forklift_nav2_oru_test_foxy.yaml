@@ -132,6 +132,7 @@ controller_server:
       rear_axle_x_offset: -0.34
       pivot_velocity: 0.12
       pivot_yaw_tolerance: 0.05
+      pivot_stop_velocity_threshold: 0.02
       horizon_time: 1.8
       time_step: 0.2
       lookahead_distance: 0.9
