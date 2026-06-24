@@ -43,13 +43,14 @@ class CurtisVehicleInterface(Node):
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('base_frame_id', 'base_link')
-        self.declare_parameter('drive_wheel_radius_m', 0.10)
-        self.declare_parameter('drive_gear_ratio', 1.0)
-        self.declare_parameter('drive_track_width_m', 0.70)
-        self.declare_parameter('drive_wheel_base_m', 1.2)
+        self.declare_parameter('drive_wheel_radius_m', 0.2285)
+        self.declare_parameter('drive_gear_ratio', 26.75)
+        self.declare_parameter('drive_track_width_m', 0.937)
+        self.declare_parameter('drive_wheel_base_m', 1.4)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('pivot_turn_radius_m', 0.6)
-        self.declare_parameter('max_drive_rpm', 2500.0)
+        self.declare_parameter('max_drive_rpm', 2485.0)
+        self.declare_parameter('min_drive_rpm', 100.0)
         self.declare_parameter('max_integration_dt_sec', 0.20)
         self.declare_parameter('max_rx_frames_per_cycle', 32)
 
@@ -72,13 +73,14 @@ class CurtisVehicleInterface(Node):
         self._last_logged_tx = ''
         self._transport_error = ''
 
-        self._drive_wheel_radius_m = self._positive_param('drive_wheel_radius_m', 0.10)
-        self._drive_gear_ratio = self._positive_param('drive_gear_ratio', 1.0)
-        self._drive_track_width_m = self._positive_param('drive_track_width_m', 0.70)
-        self._drive_wheel_base_m = self._positive_param('drive_wheel_base_m', 1.2)
+        self._drive_wheel_radius_m = self._positive_param('drive_wheel_radius_m', 0.2285)
+        self._drive_gear_ratio = self._positive_param('drive_gear_ratio', 26.75)
+        self._drive_track_width_m = self._positive_param('drive_track_width_m', 0.937)
+        self._drive_wheel_base_m = self._positive_param('drive_wheel_base_m', 1.4)
         self._pivot_steering_angle_rad = self._positive_param('pivot_steering_angle_rad', math.pi / 2.0)
         self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 0.6)
-        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2500.0)
+        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2485.0)
+        self._min_drive_rpm = max(0.0, float(self.get_parameter('min_drive_rpm').value))
 
         self._feedback = CurtisFeedbackState(
             drive_wheel_radius_m=self._drive_wheel_radius_m,
@@ -279,6 +281,7 @@ class CurtisVehicleInterface(Node):
             pivot_steering_angle_rad=self._pivot_steering_angle_rad,
             pivot_turn_radius_m=self._pivot_turn_radius_m,
             max_drive_rpm=self._max_drive_rpm,
+            min_drive_rpm=self._min_drive_rpm,
         )
 
     def _send_command(self, command: ForkliftControlCommand, stop_reason: str) -> None:

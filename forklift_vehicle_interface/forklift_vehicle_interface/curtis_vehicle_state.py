@@ -29,9 +29,9 @@ class CurtisOdomState:
 
 @dataclass
 class CurtisFeedbackState:
-    drive_wheel_radius_m: float = 0.10
-    drive_gear_ratio: float = 1.0
-    drive_track_width_m: float = 0.70
+    drive_wheel_radius_m: float = 0.2285
+    drive_gear_ratio: float = 26.75
+    drive_track_width_m: float = 0.937
     max_integration_dt_sec: float = 0.20
 
     enabled: bool = False

@@ -444,10 +444,10 @@ class SafetyCommandGate(Node):
         self.declare_parameter('max_recovery_velocity_mps', 0.10)
         self.declare_parameter('max_recovery_angular_velocity_radps', 0.30)
         self.declare_parameter('max_steering_angle_rad', math.pi / 2.0)
-        self.declare_parameter('max_drive_rpm', 2500.0)
+        self.declare_parameter('max_drive_rpm', 2485.0)
         self.declare_parameter('drive_accel_time_sec', 5.0)
         self.declare_parameter('drive_decel_time_sec', 3.0)
-        self.declare_parameter('wheel_base', 1.2)
+        self.declare_parameter('wheel_base', 1.4)
         self.declare_parameter('pivot_turn_radius', 0.6)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('control_rate_hz', 20.0)
@@ -510,10 +510,10 @@ class SafetyCommandGate(Node):
             'max_steering_angle_rad',
             math.pi / 2.0,
         )
-        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2500.0)
+        self._max_drive_rpm = self._positive_param('max_drive_rpm', 2485.0)
         self._drive_accel_time_sec = self._positive_param('drive_accel_time_sec', 5.0)
         self._drive_decel_time_sec = self._positive_param('drive_decel_time_sec', 3.0)
-        self._wheel_base = self._positive_param('wheel_base', 1.2)
+        self._wheel_base = self._positive_param('wheel_base', 1.4)
         self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
         self._pivot_steering_angle_rad = min(
             self._positive_param('pivot_steering_angle_rad', math.pi / 2.0),

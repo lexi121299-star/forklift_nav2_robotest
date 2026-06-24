@@ -65,10 +65,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_steering_angle_rad',
             default_value='1.5707963267948966'),
-        DeclareLaunchArgument('max_drive_rpm', default_value='2500.0'),
+        DeclareLaunchArgument('max_drive_rpm', default_value='2485.0'),
         DeclareLaunchArgument('drive_accel_time_sec', default_value='5.0'),
         DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
-        DeclareLaunchArgument('wheel_base', default_value='1.2'),
+        DeclareLaunchArgument('wheel_base', default_value='1.4'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
         DeclareLaunchArgument(
             'pivot_steering_angle_rad',

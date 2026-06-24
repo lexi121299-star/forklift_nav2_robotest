@@ -324,6 +324,39 @@ P2.3a 执行记录（2026-06-18）：公式与 `curtis_vehicle_state._rpm_to_mps
 - 验证：Foxy docker（py3.8 / pytest-4.6.9）`colcon build` + `colcon test --packages-select forklift_vehicle_interface` 通过，20 测试全过（含新增 6 例）；并把 `forklift_vehicle_interface` 加进 `scripts/foxy_colcon_test.sh` 的 `--packages-select`。
 - 遗留真车标定项：sim/real 前后布局相反（footprint 扫掠方向）、`drive_track_width_m`(real 0.70 vs sim 0.76)、`drive_wheel_radius_m`(real 0.10 vs sim 0.16) 需按实车标定。
 
+P2.3b 整车参数标定（2026-06-18，厂家口述 + 规格图纸 `2MKC20M30LV205 平衡重式叉车20250122.PDF`）：
+
+- 拿到真值,占位默认全部替换并通过单测:
+  - `drive_gear_ratio = 26.75`（采埃孚减速比,主要部件规格表）
+  - `drive_wheel_radius_m = 0.2285`（驱动轮 φ457×178,空载名义,带载滚动半径仍需上车实测微调）
+  - `drive_track_width_m = 0.937`（图纸「轮距,驱动侧」937mm,原占位 0.70/0.76 偏小）
+  - `drive_wheel_base_m = 1.4`（图纸「轴距」1400mm,原占位 1.2）
+  - `max_drive_rpm = 2485`（厂家给运行软限速 8 km/h ⇒ 2.222 m/s × 1118 rpm/(m/s)）
+  - `min_drive_rpm = 100`（厂家:100rpm 车能稳定转,低于此电机转速会波动;`(0,floor)→floor`,0 仍为 0）
+- 交叉验证:0x203 字段满量程 4000 rpm 用 gear 26.75 + 轮径 0.2285 算 ⇒ 12.9 km/h,与铭牌「行驶速度 满/空载 12/13 km/h」吻合,反证 gear/轮径正确。8 km/h 是 AGV 运行软限速(2485 rpm),12–13 km/h 是硬件极限(≈4000 rpm)。
+- 换算系数 k = 60·gear/(2π·r) ≈ 1118 rpm/(m/s);command 与 odom `_rpm_to_mps` 仍严格互逆。
+- 落地:`curtis_command_kinematics.drive_rpm_from_command` 新增 `min_drive_rpm` 抬升逻辑 + 默认值改真值;`CurtisFeedbackState` 默认值;`curtis_vehicle_interface` 节点+launch 新增 `min_drive_rpm` 参数;`safety_command_gate` 节点+launch `max_drive_rpm 2485`、`wheel_base 1.4`。
+- 验证:Foxy docker `colcon build` + `colcon test` 通过,forklift_vehicle_interface 24 例(新增 4 例:8km/h↔2485、min_rpm 抬升/保零/不扰动高值)、forklift_safety 15 例全过。
+- 仍遗留真车标定项:带载滚动半径(图纸 φ457 是空载名义)、`min_drive_rpm` 上车下探微调、sim URDF 几何与真车不一致(见下「URDF 建模 vs 真车」)。
+
+### URDF 建模 vs 真车（2026-06-18 核对）
+
+sim URDF `forklift_nav2_demo/urdf/forklift_diff_drive.urdf.xacro` 是粗略替身,几何与真车 2MKC20M30LV205 不一致:
+
+| 量 | sim URDF | 真车规格 |
+| --- | --- | --- |
+| 驱动轮半径 | 0.16 | 0.2285（φ457） |
+| 驱动轮距 `wheel_separation` | 0.76 | 0.937 |
+| 轴距（驱动轴↔front_caster） | 0.76（-0.34↔+0.42） | 1.4（轴距） |
+| 车体宽 | 1.16 | 1.22 |
+| 整车长 | ~2.89（叉尖 -2.043↔+0.85） | 3.299 |
+
+- Gazebo diff_drive 只用 `wheel_separation`+`wheel_diameter`,所以 sim 自洽、历史 acceptance 作为**仿真**仍有效;但 controller/gate 现在按真车 0.937 轮距 / 1.4 轴距算,sim 车并没有这套几何,转向行为不会 1:1 迁移。若要用 sim 验真车参数,需同步 URDF 并重跑 acceptance。
+- safety gate footprint `[[0.843,0.58],...,[-2.043,0.58]]`（2.886×1.16）也是 sim 几何;真车 3.299×1.22,上真车前(P8.4)必须放大。
+- **转向方式已确认(2026-06-24,厂家)**:真车是**后轮转向**(规格图纸 转向电机 YDZ48400A-G45 / 齿轮箱速比 45 / 转向齿轮 110/25 / 电转向 / 转弯半径 1760mm)。原地回转的实现方式 = **把转向角打到 90°,再发驱动转速**,Curtis 内部协调两驱动轮+后轮,车**绕两个驱动轮所在轴的中心**旋转。
+  - 与现有模型一致,**无需改代码**:MPC `forklift_vehicle_model.cpp` pivot 时绕 `rear_axle_x_offset`(=驱动轴中心)旋转;`curtis_command_kinematics` pivot 时 `v_outer=ω·track/2`(驱动轮在中心 ±track/2);两边触发条件都是「转向角≥90°+给驱动速度」,且共用同一 `pivot_turn_radius`,彼此自洽。
+  - **留台架标定项**:① `pivot_turn_radius`(现 0.6,是"速度→转速"增益,非旋转中心;MPC+gate+接口三处同值,标定时一起改)—— 90° + 已知 drive rpm 量实际 °/s 反推;② 非 pivot 正常转弯走自行车模型,真车后轮转向的转向方向语义可能与前轮转向相反,台架一并验。
+
 ## 5. P3: 固定控制接口和车辆模型
 
 目标：
@@ -786,6 +819,15 @@ P6.4b 验收表：
 > - **v1 明确不支持**：窄道三点掉头、倒车入库 docking（这些需要 task_manager 在运行时 relax 掉 goal-behind guard）。
 
 ### P6.5a 上车前 rear-axle pivot primitive
+
+> **状态(2026-06-24):待做,暂缓。** 先把 P8.2(独立 safety gate)和 P8.4(真车低速 safety acceptance)收尾,再回来做 P6.5a。pivot 机制已被厂家确认(后轮转向、绕驱动轮轴中心,见 P2.3b 后「转向方式已确认」),前置不再有疑点。
+>
+> **P6.5a 待做清单(收尾,不是从零写——planner 侧 `buildDirectPivotPath`/lattice pivot primitives/terminal pivot regime/pivot_segments 已实现):**
+> 1. 唯一权威配置 `forklift_nav2_oru_test_foxy.yaml` 打开 `lattice_pivot_enabled`,并让 `lattice_rear_axle_x_offset`/`pivot_steering_angle` 与 MPC、gate 一致(指向驱动轴中心)。
+> 2. controller stop-pivot-go:识别 pivot intent → 先停/降速 → 发 pivot command → yaw 到位恢复前进(确认 forklift_mpc_controller 已覆盖,缺则补)。
+> 3. safety gate 补 pivot 扫掠 footprint 检查(车尾/配重扫掠弧)。
+> 4. 跑 acceptance(下方场景表)+ 回归 forward/reverse/dynamic;勾选 P6.4b 验收表里 `[>]` 的 three-point/narrow 项按需。
+> 5. 不动真车换算参数与 `pivot_turn_radius`(台架标定项);全程 Foxy docker。
 
 新增优先级背景：
 

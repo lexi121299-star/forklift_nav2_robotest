@@ -33,18 +33,29 @@ def drive_rpm_from_command(
     velocity_mps: float,
     steering_angle_rad: float,
     *,
-    wheel_base_m: float,
-    track_width_m: float,
-    wheel_radius_m: float,
-    gear_ratio: float = 1.0,
+    wheel_base_m: float = 1.4,
+    track_width_m: float = 0.937,
+    wheel_radius_m: float = 0.2285,
+    gear_ratio: float = 26.75,
     pivot_steering_angle_rad: float = math.pi / 2.0,
     pivot_turn_radius_m: float = 0.6,
-    max_drive_rpm: float = 2500.0,
+    max_drive_rpm: float = 2485.0,
+    min_drive_rpm: float = 100.0,
 ) -> float:
     """Return the unsigned outer-wheel motor rpm for the Curtis 0x203 frame.
 
     Travel direction is conveyed by the forward/reverse bits, so the returned
     value is a non-negative magnitude clamped to ``[0, max_drive_rpm]``.
+
+    ``min_drive_rpm`` is a stiction/instability deadband floor: the manufacturer
+    confirmed the drive runs cleanly at 100 rpm but the motor speed fluctuates
+    below that, so any commanded motion that maps under the floor is raised to it
+    (zero stays zero). This trades a small low-speed creep nonlinearity for the
+    vehicle actually moving — closed-loop odom feedback, not this command, is the
+    source of truth near the floor. Tune on the vehicle.
+
+    Geometry defaults are the real 2MKC20M30LV205 values (spec drawing + ZF gear
+    ratio 26.75, φ457 drive wheel, 937 mm drive track, 1400 mm wheelbase).
     """
 
     speed = abs(float(velocity_mps))
@@ -71,4 +82,11 @@ def drive_rpm_from_command(
 
     wheel_rpm = v_outer * 60.0 / (2.0 * math.pi * wheel_radius_m)
     drive_rpm = wheel_rpm * gear_ratio
+
+    # Raise a non-zero command up to the stiction/instability floor so the motor
+    # actually turns, then cap to the manufacturer envelope. A floor above the
+    # cap collapses to the cap.
+    floor = max(0.0, float(min_drive_rpm))
+    if drive_rpm > 1e-9 and drive_rpm < floor:
+        drive_rpm = floor
     return max(0.0, min(drive_rpm, float(max_drive_rpm)))
