@@ -59,7 +59,7 @@ P9  真车低速联调
 [x] A-B 动态障碍停车/放行快速验证
 [x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
 [x] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
-[ ] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进
+[x] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进（primitive + stop-pivot-go + safety 扫掠已实现并验证；遗留 sim bridge 绕后轴公转保真，见 2026-06-24 记录）
 [ ] P8.2  独立 safety package / 命令闸门
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
 [ ] P8.4  真车低速 safety acceptance 包
@@ -690,7 +690,7 @@ P6 不一次性做完整 ORU planner，按分版推进：
 [x] 第四版 A：最小倒车执行验证
 [x] P8.1：最小 safety gate
 [x] 第四版 B：倒车 acceptance 调优
-[ ] P6.5a：rear-axle pivot primitive + stop-pivot-go acceptance
+[x] P6.5a：rear-axle pivot primitive + stop-pivot-go acceptance（遗留 sim bridge 绕后轴公转保真，见 2026-06-24 记录）
 [ ] 第五版：multi-curvature / multi-length primitives + better heuristic + lookup/cache
 [ ] 第六版：narrow aisle / docking / A-B scenario acceptance
 ```
@@ -820,7 +820,7 @@ P6.4b 验收表：
 
 ### P6.5a 上车前 rear-axle pivot primitive
 
-> **状态(2026-06-24):待做,暂缓。** 先把 P8.2(独立 safety gate)和 P8.4(真车低速 safety acceptance)收尾,再回来做 P6.5a。pivot 机制已被厂家确认(后轮转向、绕驱动轮轴中心,见 P2.3b 后「转向方式已确认」),前置不再有疑点。
+> **状态(2026-06-24):已完成(收尾)。** pivot primitive + controller stop-pivot-go + safety gate 绕后轴扫掠已实现并在 Foxy docker 验证(build + 110 单测 + headless pivot 验收)。pivot 机制已被厂家确认(后轮转向、绕驱动轮轴中心,见 P2.3b 后「转向方式已确认」)。**遗留一项**:sim bridge 把 pivot 当成绕 `base_link` 原地自转,而模型/目标绕后(驱动)轴,导致纯 in-place 场景在仿真里到不了目标(真车不受影响,因为真车本就绕驱动轴);修复方向见 2026-06-24 执行记录。
 >
 > **P6.5a 待做清单(收尾,不是从零写——planner 侧 `buildDirectPivotPath`/lattice pivot primitives/terminal pivot regime/pivot_segments 已实现):**
 > 1. 唯一权威配置 `forklift_nav2_oru_test_foxy.yaml` 打开 `lattice_pivot_enabled`,并让 `lattice_rear_axle_x_offset`/`pivot_steering_angle` 与 MPC、gate 一致(指向驱动轴中心)。
@@ -1034,6 +1034,110 @@ task_manager  (编排: 什么 / 何时 / 重试)
 - **紧接着**：巡逻 loop（几乎免费）、重定位 recovery。
 - **再后面**：充电编排（配合 vehicle_interface 充电握手）、可控停靠车位。
 - **永远不进 task_manager**：即时急停、CAN / 充电协议、节点重启。
+
+### P7.1 落地计划（v1 实施细则，2026-06-24）
+
+> 范围：只做「最小路点序列器 + 状态机」。**不是上车前置条件**（见 §11 / 第 1244 行）；上车第一版仍直接用 Nav2 + RViz/CLI。本节是给实现者（codex）的可执行细则；架构边界以上文「核心边界原则 / 三不 / 能力归属」为准，本节只补「具体建什么、放哪、怎么验」。
+
+**1. 新建 package**
+
+```text
+forklift_task_manager/        # ament_python, Foxy / py3.8, 结构镜像 forklift_safety
+  forklift_task_manager/
+    __init__.py
+    task_manager_node.py       # 编排节点（状态机 + executor）
+    route_model.py             # stations/routes 加载 + 校验（纯函数，便于单测）
+  config/
+    stations.yaml              # 命名位姿：name -> {x, y, yaw, frame_id: map}
+    routes.yaml                # 命名路线：name -> {loop: bool, segments: [{to, type, yaw?}]}
+  launch/
+    task_manager.launch.py
+  test/
+    test_route_model.py
+    test_state_machine.py
+  package.xml  setup.py  setup.cfg  resource/forklift_task_manager
+```
+
+**2. 新增接口（放 `forklift_msgs`，走 rosidl）**
+
+```text
+action/ExecuteRoute.action
+  # goal
+  string route_name        # routes.yaml 里的名字
+  bool loop                # 覆盖 routes.yaml 的 loop
+  ---
+  # result
+  bool success
+  string message
+  ---
+  # feedback
+  string current_segment
+  int32 segment_index
+  int32 segment_count
+  float32 progress         # 0..1
+
+srv/GoToStation.srv
+  string station           # stations.yaml 里的名字
+  ---
+  bool success
+  string message
+
+msg/TaskStatus.msg
+  string state             # IDLE/RUNNING/PAUSED/SUCCEEDED/FAILED/RECOVERING
+  string active_route
+  string current_segment
+  int32 segment_index
+  int32 segment_count
+  string reason            # 失败/暂停原因（含 safety gate 透传）
+```
+
+- pause / resume / cancel 用 `std_srvs/srv/Trigger`，不另造消息。
+- `TaskStatus` 发到 latched-ish topic `/forklift/task_status`（depth=1，transient_local 可选）。
+- forklift_msgs 的 `CMakeLists.txt` `rosidl_generate_interfaces` 增加这三个文件；`ExecuteRoute`/`TaskStatus` 需要 `action_msgs` 依赖。
+
+**3. 节点行为（`task_manager_node`）**
+
+状态机：`IDLE → RUNNING → (PAUSED) → SUCCEEDED / FAILED / RECOVERING`。
+
+输入（只收任务，不收运动指令）：
+- action server `execute_route`（`ExecuteRoute`）。
+- service `go_to_station`（`GoToStation`）：等价于一条单段 route。
+- service `pause` / `resume` / `cancel`（`Trigger`）。
+- 订阅 RViz `/goal_pose`（`geometry_msgs/PoseStamped`）：当作即席 A→B 单段任务（这就是 iliad 的 point-and-click 概念，但走 Nav2）。
+
+输出（向下调用别人干活）：
+- action client `navigate_to_pose`（`nav2_msgs/action/NavigateToPose`）。
+- 发布 `/forklift/task_status`。
+- **不发布** `/cmd_vel`、**不发布** `ForkliftControlCommand`（硬规矩）。
+
+executor（每段）：取下一段 → 用段的 `{x,y,yaw}` 组 `NavigateToPose` goal（`frame_id=map`）→ 等结果 → 成功则下一段（`loop` 回首段）；失败 → 重试 `max_retries` 次 → 仍失败转 `FAILED`，`reason` 写明。**叉臂朝终点方向 = goal 的 yaw**：RViz 2D Goal Pose 拖出的朝向、或 stations.yaml 的 yaw，直接作为 goal 朝向；不需要额外运动指令。（更精细的「到点后原地对正」留到 P6.5a pivot primitive 之后再加一段 `type: pivot`。）
+
+安全联动（被动观察，不抢权）：
+- 订阅 `/forklift/safety_gate/status`（`std_msgs/String`，safety gate 已发）。出现 `emergency stop` / `vehicle emergency stop` / `vehicle fault` 等停车原因 → 取消当前 Nav2 goal、状态转 `PAUSED`、`reason` 透传该字符串。
+- **解除后必须显式 `resume`**，不自动续跑。task_manager 永远不调用 `/forklift_safety/set_emergency_stop`，不替代急停。
+
+「改了终点重新走」= `cancel`（取消当前 Nav2 goal）→ 重新发 `go_to_station` / `/goal_pose` / `execute_route`。
+
+**4. 界面：v1 不做自定义 GUI**
+
+- RViz 由 **bringup/launch 启动**（不是 task_manager 启动）；task_manager 是 headless 编排节点。
+- 你发任务的两条路：① RViz「2D Goal Pose」点选 → 走 `/goal_pose` 即席单段；② `ros2 service call .../go_to_station` 或 `ros2 action send_goal .../execute_route` 走命名站点/路线。
+- Tkinter / web GUI（iliad 那种）留到后面有多任务队列 / 调度时再做，不进 v1。
+
+**5. 测试与验收**
+
+- 单测（pytest，不依赖真 Nav2，mock action client）：route/stations 加载校验、状态机迁移、段序列推进与 loop 回绕、pause/resume/cancel、`safety_gate/status` 急停 → PAUSED、重试到 FAILED。
+- 仿真验收（现有 sim bringup + RViz）：
+  - [ ] RViz 2D Goal Pose 单点 → 走到点且**终点朝向正确（叉臂朝目标）**。
+  - [ ] `go_to_station("B")` → 走到命名站点。
+  - [ ] 跑到一半 `cancel` → 发新目标 → 重新规划并走完。
+  - [ ] `pause` 停住、`resume` 续跑。
+  - [ ] 跑动中 `ros2 service call /forklift_safety/set_emergency_stop ... true` → 任务转 `PAUSED`；清除 + `resume` 继续。
+  - [ ] task_manager 节点 info 里**没有** `/cmd_vel` / `ForkliftControlCommand` publisher（验证三不）。
+
+**6. 完成后回填**
+
+- 勾掉 §1 清单 `[ ] P7.1`，并在本节追加「执行记录」（日期 + 实测结果 + 遗留项），与 P2.3 / P8.2 记录风格一致。
 
 ## 10. P8: 建 forklift_safety
 
@@ -1550,7 +1654,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
 [x] A-B 动态障碍停车/放行快速验证
 [x] P6.4b 倒车 acceptance 调优：当前最小 lattice scaffold 范围内，普通前进不乱倒、后方目标能倒车、90 度和动态障碍回归不退化
 [x] A-B acceptance 正式验收：普通路线、倒车/换向路线、障碍停车/放行
-[ ] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进
+[x] P6.5a 上车前 rear-axle pivot primitive：停下后绕后轴近原地 90 度转向，再继续前进（primitive + stop-pivot-go + safety 扫掠已实现并验证；遗留 sim bridge 绕后轴公转保真，见 2026-06-24 记录）
     子任务（按顺序）：
     [ ] 6.5a-1 Foxy build + 单测通过（63 tests / 0 failures）
     [ ] 6.5a-2 pivot 全链路打通确认：planner pivot_segments>0 → trajectory pivot_points>0 → controller previewHasPivotMotion=true → bridge angular.z≠0, linear.x≈0
@@ -1632,6 +1736,11 @@ P6.5a 上车前 rear-axle pivot primitive / stop-pivot-go acceptance
 - 2026-06-18（P8.2 补完 8.2-4/5/6）：`safety_command_gate` 默认订阅 `/local_costmap/costmap`，支持可选 `costmap_message_type:=costmap_raw`；costmap 缺失、超时或空/截断/无效数据会输出停车命令并在 `/forklift/safety_gate/status` 说明原因。gate 内新增独立 swept footprint 复核：按 Foxy ORU local footprint 参数解析 footprint，沿当前位姿和短时预测位姿采样 footprint 边界，遇到 unknown/out-of-map/lethal cost 即停，覆盖 raw command 和 recovery wait/backoff/pivot。新增 `forklift_safety/P8_2_FOXY_ACCEPTANCE.md` 作为 Foxy docker 可复现验收记录；Foxy docker build 6 packages 通过，`./scripts/foxy_colcon_test.sh` 通过（83 tests / 0 failures，其中 `forklift_safety` 14 个 pytest）。
 - 2026-06-18（P8.2 drive 限幅修正）：发现 gate 原先只限 `velocity_mps`，而真车 Curtis 0x203 驱动帧实际用 `drive_rpm`（0..4000）做速度，限速会被绕过。`safety_command_gate` 新增 `apply_drive_envelope`：对所有下发的运动命令（raw + recovery）把 `|drive_rpm|` 限到 `max_drive_rpm`（默认 2500，厂家常用工作转速），并把 `accel_time_sec`/`decel_time_sec` 在上游未给时补成厂家建议值（默认 5s / 3s）；新增对应 launch 参数与单测（`forklift_safety` 升到 15 pytest，Foxy docker 内全过）。velocity→rpm 的换算仍必须放在 gate 下游 `curtis_vehicle_interface`，归 P2.3。
 - 2026-06-18（P8.2 收紧 costmap 默认 + /odom 文档化）：`safety_command_gate` footprint 碰撞检查默认改为更严档——订阅 `/local_costmap/costmap_raw`（`costmap_message_type: costmap_raw`，原始 0–254 刻度）、阈值 `footprint_collision_cost_threshold: 253`，即压到 inscribed/lethal/unknown 就停，比原 OccupancyGrid+100 更早停更保守；要放宽切回 `occupancy_grid` + `/local_costmap/costmap` + 100。同时在 `real_vehicle_tuning_guide.md` 新增 §7.1 说明独立命令安全闸,并在 §8 bring-up 清单加第 7 条:真车必须确认 `/odom` 与 `/local_costmap/costmap_raw` 真进 gate（否则 footprint 检查 fail-closed 永远停车），验证用 `ros2 topic echo /forklift/safety_gate/status` 看是否出现 `collision pose missing` / `costmap missing`。
+- 2026-06-24（P6.5a 收尾 + 验证）：codex 完成 P6.5a 收尾五项——config 打开/对齐 `pivot_stop_velocity_threshold`、`lattice_rear_axle_x_offset`/`pivot_steering_angle` 与 MPC/gate 一致；controller 加 stop-pivot-go 刹车门；`safety_command_gate` 的 `predicted_poses_for_command` 改为绕后轴（`rear_axle_x_offset`）预测扫掠；新增 `forklift_p6_5a_pivot_acceptance.py` 覆盖 `pivot_90_left/right_in_place`、`pivot_90_then_forward_ab`、`pivot_blocked_stop`、`l_shaped_corridor_ab`、`sparse_90_turn_ab`。
+  - **review 修复（latch）**：codex 的 stop-pivot-go 刹车门把 pivot 自身旋转也算成要刹的运动（`measured_motion` 含 `abs(angular.z)*pivot_turn_radius`，pivot 时≈0.12 > 阈值 0.02），会每周期重刹、抖停 pivot。改成一次性 latch：只在 pivot **启动前**用平移速度（`hypot(linear)`）判断是否已停稳，停稳后置 `pivot_settled_` 提交，不再因 pivot 自身旋转（真车还有绕后轴的 base_link 平移）重刹；`pivot_motion_active` 落下时重新 arm。
+  - **验证（Foxy docker）**：build 6 包 + 110 单测全过；headless `pivot_90_left_in_place` 走完整 gate+bridge 链路 SUCCEEDED，`forward=0 reverse=0 pivot=70`、纯旋转 `linear_x=0 / angular_z=0.200`、无刹车刷屏，证明 latch 修复有效、pivot 可持续。
+  - **遗留 1（sim bridge 绕后轴公转保真）**：`sim_command_bridge._twist_from_latest_command` pivot 时发 `linear.x=0`，Gazebo 差速绕 `base_link` 原地自转；而 planner/controller/目标按绕后（驱动）轴（`rear_axle_x_offset=-0.34`）。纯 in-place 场景目标 `(-2.34,-0.16,90°)` 是绕后轴公转后的 base_link 落点，sim 自转到不了 → 偶发 ABORT/漂移。修复方向：bridge 加 `rear_axle_x_offset` 参数，pivot 时 `linear.x = angular.z * rear_axle_x_offset` 让 base_link 绕后轴公转。真车不受影响（真车本就绕驱动轴）。
+  - **遗留 2（scaffold flaky）**：`sparse_90_turn_ab` 在最小 lattice scaffold 下 pivot-vs-arc 解非确定（有时 pivot、有时纯前进弧都能到 90° 终点），属已知 scaffold 限制（见 2026-06-16 第三层），归 P10；v1 用 Option A 路点分段规避。
 
 ## 14. ORU 包迁移优先级
 
