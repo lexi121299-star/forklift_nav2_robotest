@@ -97,6 +97,53 @@
 
 只挂一个激光的简单车,方案 B 够用;但**方案 A 更标准、更省心**,激光 TF 写在 URDF 里和 footprint 标定也对得上。
 
+### 1.5.5 真车改 TF 速查
+
+**只手改 base_footprint 以下的刚体静态 TF**（车身高 + 传感器安装位置）。`map→odom`（AMCL 发）和 `odom→base_footprint`（里程计源发）不在这里改。
+
+```
+map ─(AMCL)→ odom ─(里程计源)→ base_footprint ─┬→ base_link ─→ base_scan(激光)
+ 不碰            不碰(算错是odom问题)            └→ 其它传感器
+                                              ↑──── 这一段才是"改TF" ────↑
+```
+
+**改在哪**
+
+- 方式 A（URDF,推荐）:改对应 joint 的 `<origin>`——
+  - 车身高 `base_footprint→base_link`:[base_joint :15](../urdf/forklift_diff_drive.urdf.xacro#L15) `xyz="0 0 后轴离地高"`
+  - 激光位置 `base_link→base_scan`:[base_scan_joint :212](../urdf/forklift_diff_drive.urdf.xacro#L212) `xyz="前后 左右 高" rpy="roll pitch yaw"`（米 / 弧度）
+- 方式 B（无 URDF）:launch 里 `tf2_ros static_transform_publisher`,参数序 **`x y z yaw pitch roll`(先 yaw,和 URDF 的 rpy 相反——常见填错点)**。
+
+**必须盯的 6 点**
+
+1. **帧名对齐激光驱动**:URDF 里激光 link 名要 = `/scan` 的 `header.frame_id`（常见 `laser`/`laser_link`）,否则 AMCL 连不上、costmap 没激光。
+2. 以 base_link（后轴）为原点、REP-103:+x 前 / **+y 左**（最易反）/ +z 上,米。
+3. **激光朝向 rpy 最关键**:0° 没朝正前或倒装要写进 rpy;**yaw 错一点 = 整片 scan 旋转 = 像定位漂移**,倒装 = `roll=π`。AMCL 发散头号元凶。
+4. **真车 `use_sim_time:=false`**:否则 TF 时间戳对不上,报 "extrapolation into the future",全栈不动。
+5. **同一条边只能一个发布者**:别 URDF 和 static_transform_publisher 同时发同一段。
+6. z 高度对 2D 导航基本不影响,但仍按实际填。
+
+**改完怎么验（开车前）**
+
+```bash
+ros2 run tf2_tools view_frames                 # 看树连通、单根
+ros2 run tf2_ros tf2_echo base_link base_scan  # 数值对不对得上尺子
+```
+RViz:Fixed Frame=map + LaserScan,**看点云贴不贴墙线**。贴=对;错位=回查第 2/3 点。
+
+### 1.5.6 分工 / 接口约定（谁负责哪段）
+
+| 这段 | 谁负责 |
+|---|---|
+| 激光/传感器 TF 标定、`map→odom`（AMCL）、`odom→base_footprint`（里程计） | **定位 / 视觉同事** |
+| footprint、`rear_axle_x_offset`、运动学/转弯/控制参数 | **导航 / 控制（你）** |
+
+**两边的唯一接口契约 = base_link 的定义。** 你要跟定位同事讲清、并**互相确认**:
+
+1. **原点 = 后驱动/转向轴中心,+x 前、+y 左**（告诉他们这一句是主干）。
+2. ⚠️ **关键确认**:他们发的**里程计必须以这个后轴点为参考**。若他们 odom 实际算的是别的点,AMCL 会发散,现象像"定位坏了"其实是**原点不一致**——所以不能只通知,要确认一致。
+3. 即便 TF 归他们,**footprint 按后轴量、`rear_axle_x_offset=0` 仍是你的活**——这两个跟着同一个 base_link 走,别落下。
+
 ---
 
 ## 2. 「costmap 边界太大 / 走廊太窄」——footprint 与膨胀（重点）
