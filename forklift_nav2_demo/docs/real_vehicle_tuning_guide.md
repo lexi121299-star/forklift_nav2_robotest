@@ -349,6 +349,11 @@ ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
 ## 8. 实车 bring-up 检查清单（一切走 vehicle command）
 
 0. **DDS 必须是 CycloneDDS**（`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`）——否则 FastRTPS 会在 `autostart` 启动时间歇性崩掉随机 lifecycle 节点（amcl/bt_navigator/recoveries）。镜像与改法见 §10。
+0.5. ⚠️ **坐标原点一致性——上车前必须和定位同事【确认而非通知】**（详见 §1.5.6）：
+   - [ ] 双方约定 **base_link 原点 = 后驱动/转向轴中心,+x 前、+y 左**。
+   - [ ] **定位同事发的里程计 `odom→base_footprint` 确实以这个后轴点为参考**——不一致会让 AMCL 发散,现象像"定位坏了"实则原点错位。**这一条必须当面对齐,不能默认。**
+   - [ ] 你这边:footprint 已按后轴量（§2.1）、`rear_axle_x_offset` 已设（后轴上=0,controller [`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) + lattice [`:372`](../config/forklift_nav2_oru_test_foxy.yaml#L372)）。
+   - [ ] `use_sim_time:=false`、TF 树 `view_frames` 连通单根、RViz 里 scan 贴墙（§1.5.5 验证）。
 1. `use_sim_command_bridge:=false`——**不要**起 sim 桥（桥只是仿真把 `/forklift/control_cmd` 翻成 `/cmd_vel` 喂 Gazebo）。
 2. 不要设置 `twist_fallback_topic`（保持空）——这是唯一能让系统消费 `/cmd_vel` 的开关。
 3. `publish_control_cmd: true`（[`:179`](../config/forklift_nav2_oru_test_foxy.yaml#L179)）、`control_cmd_topic: "/forklift/control_cmd"`（[`:180`](../config/forklift_nav2_oru_test_foxy.yaml#L180)）。
