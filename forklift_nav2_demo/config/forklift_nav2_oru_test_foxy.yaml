@@ -351,6 +351,10 @@ planner_server:
       lattice_heading_bins: 16
       lattice_step_distance: 0.20
       lattice_arc_radius: 0.60
+      # Multi-curvature catalog. The tight/default/wide radii all terminate on
+      # the configured heading bins; the smallest radius is also used by the
+      # Reeds-Shepp analytic expansion.
+      lattice_arc_radii: [0.45, 0.60, 0.90]
       lattice_arc_angle: 0.3926990817
       lattice_primitive_samples: 5
       lattice_reverse_enabled: true
@@ -370,6 +374,18 @@ planner_server:
       # and suppress reverse so terminal nudges do not destabilise the controller.
       lattice_pivot_terminal_radius: 0.6
       lattice_pivot_terminal_heading: 0.7853981634  # pi/4 = 45 deg
+      # Reeds-Shepp goal shot. Every sample still passes costmap + footprint checks.
+      lattice_analytic_expansion_enabled: true
+      lattice_analytic_expansion_radius: 3.0
+      lattice_analytic_expansion_interval: 20
+      lattice_analytic_expansion_sample_distance: 0.05
+      # 0.0 means half a heading bin.
+      lattice_goal_heading_tolerance: 0.0
+      # Collision-checked Reeds-Shepp shortcuts; rejected shortcuts leave the
+      # original lattice segment chain untouched.
+      lattice_shortcut_smoothing_enabled: true
+      lattice_shortcut_max_lookahead: 12
+      lattice_max_iterations: 250000
 
 planner_server_rclcpp_node:
   ros__parameters:

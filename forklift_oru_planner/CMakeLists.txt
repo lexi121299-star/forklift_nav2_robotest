@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 
 add_library(${PROJECT_NAME} STATIC
   vendor/src/oru_lattice_core.cpp
+  vendor/src/reeds_shepp.cpp
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)

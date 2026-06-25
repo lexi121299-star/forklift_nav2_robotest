@@ -50,6 +50,7 @@ public:
     planner.lattice_heading_bins_ = 16;
     planner.lattice_step_distance_ = 0.20;
     planner.lattice_arc_radius_ = 0.60;
+    planner.lattice_arc_radii_ = {0.60};
     planner.lattice_arc_angle_ = 0.25 * kPlannerTestPi / 2.0;
     planner.lattice_primitive_samples_ = 5;
     planner.lethal_cost_threshold_ = nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
@@ -64,6 +65,7 @@ public:
     planner.lattice_pivot_angle_ = planner.lattice_arc_angle_;
     planner.lattice_pivot_turn_cost_ = 0.35;
     planner.lattice_rear_axle_x_offset_ = -0.34;
+    planner.lattice_analytic_expansion_enabled_ = false;
   }
 
   static unsigned int headingIndex(OruGlobalPlanner & planner, double yaw)

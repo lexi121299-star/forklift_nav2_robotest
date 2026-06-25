@@ -47,10 +47,11 @@ planner_server:
       max_iterations: 0
       use_final_approach_orientation: true
       use_lattice_planner: true
-      lattice_fallback_to_astar: true
+      lattice_fallback_to_astar: false
       lattice_heading_bins: 16
       lattice_step_distance: 0.20
       lattice_arc_radius: 0.60
+      lattice_arc_radii: [0.45, 0.60, 0.90]
       lattice_arc_angle: 0.3926990817
       lattice_primitive_samples: 5
       lattice_reverse_enabled: true
@@ -60,6 +61,14 @@ planner_server:
       lattice_goal_heading_cost_multiplier: 0.25
       lattice_reverse_cost_multiplier: 0.5
       lattice_gear_switch_cost: 1.0
+      lattice_analytic_expansion_enabled: true
+      lattice_analytic_expansion_radius: 3.0
+      lattice_analytic_expansion_interval: 20
+      lattice_analytic_expansion_sample_distance: 0.05
+      lattice_goal_heading_tolerance: 0.0
+      lattice_shortcut_smoothing_enabled: false
+      lattice_shortcut_max_lookahead: 12
+      lattice_max_iterations: 250000
 ```
 
 ## Controller Server Example

@@ -110,6 +110,8 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_arc_radius", rclcpp::ParameterValue(lattice_arc_radius_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_arc_radii", rclcpp::ParameterValue(lattice_arc_radii_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_arc_angle", rclcpp::ParameterValue(lattice_arc_angle_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_primitive_samples",
@@ -158,6 +160,30 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_pivot_terminal_heading",
     rclcpp::ParameterValue(lattice_pivot_terminal_heading_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_analytic_expansion_enabled",
+    rclcpp::ParameterValue(lattice_analytic_expansion_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_analytic_expansion_radius",
+    rclcpp::ParameterValue(lattice_analytic_expansion_radius_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_analytic_expansion_interval",
+    rclcpp::ParameterValue(static_cast<int>(lattice_analytic_expansion_interval_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_analytic_expansion_sample_distance",
+    rclcpp::ParameterValue(lattice_analytic_expansion_sample_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_goal_heading_tolerance",
+    rclcpp::ParameterValue(lattice_goal_heading_tolerance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_shortcut_smoothing_enabled",
+    rclcpp::ParameterValue(lattice_shortcut_smoothing_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_shortcut_max_lookahead",
+    rclcpp::ParameterValue(static_cast<int>(lattice_shortcut_max_lookahead_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_max_iterations",
+    rclcpp::ParameterValue(static_cast<int>(lattice_max_iterations_)));
 
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".use_diagonal", use_diagonal_);
@@ -183,6 +209,7 @@ void OruGlobalPlanner::configure(
     lattice_heading_bins > 0 ? static_cast<unsigned int>(lattice_heading_bins) : 16;
   node->get_parameter(name_ + ".lattice_step_distance", lattice_step_distance_);
   node->get_parameter(name_ + ".lattice_arc_radius", lattice_arc_radius_);
+  node->get_parameter(name_ + ".lattice_arc_radii", lattice_arc_radii_);
   node->get_parameter(name_ + ".lattice_arc_angle", lattice_arc_angle_);
   int lattice_primitive_samples = 0;
   node->get_parameter(name_ + ".lattice_primitive_samples", lattice_primitive_samples);
@@ -213,6 +240,33 @@ void OruGlobalPlanner::configure(
     name_ + ".lattice_pivot_terminal_radius", lattice_pivot_terminal_radius_);
   node->get_parameter(
     name_ + ".lattice_pivot_terminal_heading", lattice_pivot_terminal_heading_);
+  node->get_parameter(
+    name_ + ".lattice_analytic_expansion_enabled", lattice_analytic_expansion_enabled_);
+  node->get_parameter(
+    name_ + ".lattice_analytic_expansion_radius", lattice_analytic_expansion_radius_);
+  int lattice_analytic_expansion_interval = 0;
+  node->get_parameter(
+    name_ + ".lattice_analytic_expansion_interval", lattice_analytic_expansion_interval);
+  lattice_analytic_expansion_interval_ =
+    lattice_analytic_expansion_interval > 0 ?
+    static_cast<unsigned int>(lattice_analytic_expansion_interval) : 1u;
+  node->get_parameter(
+    name_ + ".lattice_analytic_expansion_sample_distance",
+    lattice_analytic_expansion_sample_distance_);
+  node->get_parameter(
+    name_ + ".lattice_goal_heading_tolerance", lattice_goal_heading_tolerance_);
+  node->get_parameter(
+    name_ + ".lattice_shortcut_smoothing_enabled", lattice_shortcut_smoothing_enabled_);
+  int lattice_shortcut_max_lookahead = 0;
+  node->get_parameter(
+    name_ + ".lattice_shortcut_max_lookahead", lattice_shortcut_max_lookahead);
+  lattice_shortcut_max_lookahead_ =
+    lattice_shortcut_max_lookahead >= 2 ?
+    static_cast<unsigned int>(lattice_shortcut_max_lookahead) : 2u;
+  int lattice_max_iterations = 0;
+  node->get_parameter(name_ + ".lattice_max_iterations", lattice_max_iterations);
+  lattice_max_iterations_ =
+    lattice_max_iterations > 0 ? static_cast<unsigned int>(lattice_max_iterations) : 0u;
 
   lethal_cost_threshold_ = std::clamp(lethal_cost_threshold_, 1, 255);
   footprint_collision_cost_threshold_ =
@@ -224,6 +278,11 @@ void OruGlobalPlanner::configure(
   lattice_heading_bins_ = std::clamp(lattice_heading_bins_, 4u, 72u);
   lattice_step_distance_ = std::clamp(lattice_step_distance_, 0.05, 2.0);
   lattice_arc_radius_ = std::clamp(lattice_arc_radius_, 0.05, 20.0);
+  lattice_arc_radii_.erase(
+    std::remove_if(
+      lattice_arc_radii_.begin(), lattice_arc_radii_.end(),
+      [](double radius) {return !std::isfinite(radius) || radius <= 0.0;}),
+    lattice_arc_radii_.end());
   lattice_arc_angle_ = std::clamp(lattice_arc_angle_, 0.01, M_PI_2);
   lattice_primitive_samples_ = std::clamp(lattice_primitive_samples_, 2u, 50u);
   lattice_goal_tolerance_ = std::clamp(lattice_goal_tolerance_, 0.0, goal_tolerance_);
@@ -242,6 +301,13 @@ void OruGlobalPlanner::configure(
   lattice_pivot_terminal_radius_ = std::max(0.0, lattice_pivot_terminal_radius_);
   lattice_pivot_terminal_heading_ = std::clamp(lattice_pivot_terminal_heading_, 0.0, M_PI);
   lattice_rear_axle_x_offset_ = std::clamp(lattice_rear_axle_x_offset_, -10.0, 10.0);
+  lattice_analytic_expansion_radius_ = std::max(0.0, lattice_analytic_expansion_radius_);
+  lattice_analytic_expansion_interval_ = std::max(1u, lattice_analytic_expansion_interval_);
+  lattice_analytic_expansion_sample_distance_ =
+    std::clamp(lattice_analytic_expansion_sample_distance_, 0.01, 0.5);
+  lattice_goal_heading_tolerance_ =
+    std::clamp(lattice_goal_heading_tolerance_, 0.0, M_PI);
+  lattice_shortcut_max_lookahead_ = std::max(2u, lattice_shortcut_max_lookahead_);
 
   RCLCPP_INFO(
     logger_,
@@ -249,7 +315,7 @@ void OruGlobalPlanner::configure(
     "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d start_tolerance=%.2f "
     "use_lattice=%s lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
     "lattice_goal_tolerance=%.2f lattice_reverse=%s reverse_requires_goal_behind=%s "
-    "lattice_pivot=%s",
+    "lattice_pivot=%s analytic_expansion=%s lattice_max_iterations=%u",
     name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false",
@@ -258,7 +324,9 @@ void OruGlobalPlanner::configure(
     lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_,
     lattice_reverse_enabled_ ? "true" : "false",
     lattice_reverse_requires_goal_behind_ ? "true" : "false",
-    lattice_pivot_enabled_ ? "true" : "false");
+    lattice_pivot_enabled_ ? "true" : "false",
+    lattice_analytic_expansion_enabled_ ? "true" : "false",
+    lattice_max_iterations_);
 }
 
 void OruGlobalPlanner::cleanup()
@@ -487,6 +555,7 @@ forklift_oru_planner::PlannerOptions OruGlobalPlanner::makeCoreOptions() const
   options.origin_y = costmap_->getOriginY();
   options.step_distance = lattice_step_distance_;
   options.arc_radius = lattice_arc_radius_;
+  options.arc_radii = lattice_arc_radii_;
   options.arc_angle = lattice_arc_angle_;
   options.primitive_samples = lattice_primitive_samples_;
   options.reverse_enabled = lattice_reverse_enabled_;
@@ -509,7 +578,14 @@ forklift_oru_planner::PlannerOptions OruGlobalPlanner::makeCoreOptions() const
   options.use_holonomic_obstacle_heuristic = true;
   options.pivot_terminal_radius = lattice_pivot_terminal_radius_;
   options.pivot_terminal_heading = lattice_pivot_terminal_heading_;
-  options.max_iterations = max_iterations_;
+  options.analytic_expansion_enabled = lattice_analytic_expansion_enabled_;
+  options.analytic_expansion_radius = lattice_analytic_expansion_radius_;
+  options.analytic_expansion_interval = lattice_analytic_expansion_interval_;
+  options.analytic_expansion_sample_distance = lattice_analytic_expansion_sample_distance_;
+  options.goal_heading_tolerance = lattice_goal_heading_tolerance_;
+  options.shortcut_smoothing_enabled = lattice_shortcut_smoothing_enabled_;
+  options.shortcut_max_lookahead = lattice_shortcut_max_lookahead_;
+  options.max_iterations = lattice_max_iterations_;
   return options;
 }
 
@@ -634,6 +710,9 @@ OruGlobalPlanner::LatticePath OruGlobalPlanner::searchLattice(
   stats.rejected_costmap = result.stats.rejected_costmap;
   stats.rejected_footprint = result.stats.rejected_footprint;
   stats.improved = result.stats.improved;
+  stats.analytic_attempted = result.stats.analytic_attempted;
+  stats.analytic_succeeded = result.stats.analytic_succeeded;
+  stats.analytic_rejected = result.stats.analytic_rejected;
   stats.best_goal_distance = result.stats.best_goal_distance;
   logLatticeStats(stats, result.succeeded ? "succeeded" : "exhausted open set");
 
@@ -1104,9 +1183,12 @@ void OruGlobalPlanner::logLatticeStats(
   RCLCPP_INFO(
     logger_,
     "Lattice search %s: expanded=%u generated=%u accepted=%u improved=%u "
-    "rejected_oob=%u rejected_costmap=%u rejected_footprint=%u best_goal_distance=%.3f",
+    "rejected_oob=%u rejected_costmap=%u rejected_footprint=%u "
+    "analytic_attempted=%u analytic_succeeded=%u analytic_rejected=%u "
+    "best_goal_distance=%.3f",
     result, stats.expanded, stats.generated, stats.accepted, stats.improved,
     stats.rejected_out_of_bounds, stats.rejected_costmap, stats.rejected_footprint,
+    stats.analytic_attempted, stats.analytic_succeeded, stats.analytic_rejected,
     stats.best_goal_distance);
 }
 
@@ -1243,21 +1325,63 @@ nav_msgs::msg::Path OruGlobalPlanner::buildLatticePath(
   path.header.frame_id = global_frame_;
   path.header.stamp = node->now();
   const auto & states = lattice_path.states;
-  path.poses.reserve(states.size());
+  std::size_t sample_count = 1;
+  for (const auto & transition : lattice_path.transitions) {
+    if (transition.samples.size() > 1) {
+      sample_count += transition.samples.size() - 1;
+    }
+  }
+  path.poses.reserve(std::max(states.size(), sample_count));
 
-  for (const auto & state : states) {
+  if (!lattice_path.transitions.empty()) {
+    bool first_sample = true;
+    for (const auto & transition : lattice_path.transitions) {
+      for (std::size_t i = 0; i < transition.samples.size(); ++i) {
+        if (!first_sample && i == 0) {
+          continue;
+        }
+        const auto & sample = transition.samples[i];
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header = path.header;
+        pose.pose.position.x = sample.x;
+        pose.pose.position.y = sample.y;
+        pose.pose.position.z = start.pose.position.z;
+        pose.pose.orientation =
+          nav2_util::geometry_utils::orientationAroundZAxis(sample.theta);
+        path.poses.push_back(std::move(pose));
+        first_sample = false;
+      }
+    }
+  } else {
+    for (const auto & state : states) {
+      double wx = 0.0;
+      double wy = 0.0;
+      costmap_->mapToWorld(state.x, state.y, wx, wy);
+
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.position.x = wx;
+      pose.pose.position.y = wy;
+      pose.pose.position.z = start.pose.position.z;
+      pose.pose.orientation =
+        nav2_util::geometry_utils::orientationAroundZAxis(headingForIndex(state.theta_index));
+      path.poses.push_back(std::move(pose));
+    }
+  }
+
+  if (path.poses.empty() && !states.empty()) {
     double wx = 0.0;
     double wy = 0.0;
-    costmap_->mapToWorld(state.x, state.y, wx, wy);
-
+    costmap_->mapToWorld(states.front().x, states.front().y, wx, wy);
     geometry_msgs::msg::PoseStamped pose;
     pose.header = path.header;
     pose.pose.position.x = wx;
     pose.pose.position.y = wy;
     pose.pose.position.z = start.pose.position.z;
     pose.pose.orientation =
-      nav2_util::geometry_utils::orientationAroundZAxis(headingForIndex(state.theta_index));
-    path.poses.push_back(pose);
+      nav2_util::geometry_utils::orientationAroundZAxis(
+      headingForIndex(states.front().theta_index));
+    path.poses.push_back(std::move(pose));
   }
 
   if (path.poses.empty()) {

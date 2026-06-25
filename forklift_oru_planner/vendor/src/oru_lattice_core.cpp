@@ -1,4 +1,5 @@
 #include "forklift_oru_planner/oru_lattice_core.hpp"
+#include "forklift_oru_planner/reeds_shepp.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,7 @@ namespace
 constexpr unsigned int kDirectionCount = 3;
 constexpr unsigned int kNoParent = std::numeric_limits<unsigned int>::max();
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kZero = 10.0 * std::numeric_limits<double>::epsilon();
 
 struct QueueNode
 {
@@ -46,12 +48,33 @@ PlannerOptions sanitize(PlannerOptions options)
   options.resolution = clampMin(options.resolution, 0.001);
   options.step_distance = std::max(0.05, std::min(2.0, options.step_distance));
   options.arc_radius = std::max(0.05, std::min(20.0, options.arc_radius));
-  options.arc_angle = std::max(0.01, std::min(kPi / 2.0, options.arc_angle));
+  const double bin_width = 2.0 * kPi / static_cast<double>(options.heading_bins);
+  const auto arc_bins = std::max(1, static_cast<int>(std::lround(options.arc_angle / bin_width)));
+  options.arc_angle = std::min(kPi / 2.0, static_cast<double>(arc_bins) * bin_width);
+  if (options.arc_radii.empty()) {
+    options.arc_radii = {
+      options.arc_radius,
+      std::min(20.0, options.arc_radius * 1.5),
+      std::min(20.0, options.arc_radius * 2.0)};
+  }
+  for (auto & radius : options.arc_radii) {
+    radius = std::max(0.05, std::min(20.0, radius));
+  }
+  options.arc_radii.push_back(options.arc_radius);
+  std::sort(options.arc_radii.begin(), options.arc_radii.end());
+  options.arc_radii.erase(
+    std::unique(
+      options.arc_radii.begin(), options.arc_radii.end(),
+      [](double lhs, double rhs) {return std::abs(lhs - rhs) < 1e-6;}),
+    options.arc_radii.end());
+  options.arc_radius = options.arc_radii.front();
   options.primitive_samples = std::max(2u, std::min(50u, options.primitive_samples));
   if (options.pivot_angle <= 0.0) {
-    options.pivot_angle = 2.0 * kPi / static_cast<double>(options.heading_bins);
+    options.pivot_angle = bin_width;
   }
-  options.pivot_angle = std::max(0.01, std::min(kPi / 2.0, options.pivot_angle));
+  const auto pivot_bins =
+    std::max(1, static_cast<int>(std::lround(options.pivot_angle / bin_width)));
+  options.pivot_angle = std::min(kPi / 2.0, static_cast<double>(pivot_bins) * bin_width);
   options.pivot_turn_cost = clampMin(options.pivot_turn_cost, 0.0);
   options.goal_tolerance = clampMin(options.goal_tolerance, 0.0);
   options.turn_cost_multiplier = clampMin(options.turn_cost_multiplier, 0.0);
@@ -63,7 +86,99 @@ PlannerOptions sanitize(PlannerOptions options)
   options.reverse_goal_behind_margin = clampMin(options.reverse_goal_behind_margin, 0.0);
   options.pivot_terminal_radius = clampMin(options.pivot_terminal_radius, 0.0);
   options.pivot_terminal_heading = std::max(0.0, std::min(kPi, options.pivot_terminal_heading));
+  options.analytic_expansion_radius = clampMin(options.analytic_expansion_radius, 0.0);
+  options.analytic_expansion_interval = std::max(1u, options.analytic_expansion_interval);
+  options.analytic_expansion_sample_distance =
+    std::max(0.01, std::min(0.5, options.analytic_expansion_sample_distance));
+  options.goal_heading_tolerance =
+    std::max(0.0, std::min(kPi, options.goal_heading_tolerance));
+  options.shortcut_max_lookahead = std::max(2u, options.shortcut_max_lookahead);
   return options;
+}
+
+PrimitiveCatalog buildPrimitiveCatalog(const PlannerOptions & options)
+{
+  PrimitiveCatalog catalog;
+  catalog.options = options;
+  const unsigned int samples = std::max(2u, options.primitive_samples);
+
+  auto add_primitive =
+    [&catalog](
+    std::vector<Pose> poses,
+    PrimitiveDirection direction,
+    PrimitiveKind kind,
+    double length,
+    double heading_delta) {
+      Primitive primitive;
+      primitive.samples = std::move(poses);
+      primitive.cost = length;
+      primitive.direction = direction;
+      primitive.kind = kind;
+      primitive.length = length;
+      primitive.heading_delta = heading_delta;
+      catalog.primitives_at_origin.push_back(std::move(primitive));
+    };
+
+  for (const auto direction :
+    {PrimitiveDirection::FORWARD, PrimitiveDirection::REVERSE})
+  {
+    if (direction == PrimitiveDirection::REVERSE && !options.reverse_enabled) {
+      continue;
+    }
+    const double motion_sign =
+      direction == PrimitiveDirection::FORWARD ? 1.0 : -1.0;
+
+    std::vector<Pose> straight;
+    straight.reserve(samples);
+    for (unsigned int i = 0; i < samples; ++i) {
+      const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+      straight.push_back({motion_sign * options.step_distance * ratio, 0.0, 0.0});
+    }
+    add_primitive(
+      std::move(straight), direction, PrimitiveKind::STRAIGHT,
+      options.step_distance, 0.0);
+
+    for (const double radius : options.arc_radii) {
+      for (const double turn_sign : {1.0, -1.0}) {
+        std::vector<Pose> arc;
+        arc.reserve(samples);
+        for (unsigned int i = 0; i < samples; ++i) {
+          const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+          const double delta_theta = turn_sign * options.arc_angle * ratio;
+          const double signed_radius = motion_sign * turn_sign * radius;
+          arc.push_back({
+              signed_radius * std::sin(delta_theta),
+              -signed_radius * (std::cos(delta_theta) - 1.0),
+              delta_theta});
+        }
+        add_primitive(
+          std::move(arc), direction,
+          turn_sign > 0.0 ? PrimitiveKind::LEFT_ARC : PrimitiveKind::RIGHT_ARC,
+          radius * options.arc_angle, turn_sign * options.arc_angle);
+      }
+    }
+  }
+
+  if (options.pivot_enabled) {
+    const double rear_x = options.rear_axle_x_offset;
+    for (const double turn_sign : {1.0, -1.0}) {
+      std::vector<Pose> pivot;
+      pivot.reserve(samples);
+      for (unsigned int i = 0; i < samples; ++i) {
+        const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
+        const double theta = turn_sign * options.pivot_angle * ratio;
+        pivot.push_back({
+            rear_x - options.rear_axle_x_offset * std::cos(theta),
+            -options.rear_axle_x_offset * std::sin(theta),
+            theta});
+      }
+      add_primitive(
+        std::move(pivot), PrimitiveDirection::NONE,
+        turn_sign > 0.0 ? PrimitiveKind::PIVOT_LEFT : PrimitiveKind::PIVOT_RIGHT,
+        options.pivot_turn_cost, turn_sign * options.pivot_angle);
+    }
+  }
+  return catalog;
 }
 
 std::vector<std::string> split(const std::string & line)
@@ -114,7 +229,8 @@ PrimitiveKind parseKind(const std::string & value)
 }  // namespace
 
 LatticeCore::LatticeCore(PlannerOptions options)
-: options_(sanitize(options))
+: options_(sanitize(options)),
+  primitive_catalog_(buildPrimitiveCatalog(options_))
 {
 }
 
@@ -174,18 +290,45 @@ PlanResult LatticeCore::plan(
     closed[current.index] = true;
     ++stats.expanded;
     const auto current_state = fromStateIndex(grid, current.index);
-    stats.best_goal_distance = std::min(stats.best_goal_distance, goalDistance(current_state, goal));
+    const double current_goal_distance = goalDistance(current_state, goal);
+    stats.best_goal_distance = std::min(stats.best_goal_distance, current_goal_distance);
     if (isGoal(current_state, goal, goal_yaw)) {
-      return reconstruct(grid, parent, arrival_transition, start_index, current.index, stats);
+      return smoothPath(
+        grid,
+        reconstruct(grid, parent, arrival_transition, start_index, current.index, stats),
+        goal_yaw);
     }
 
-    if (options_.max_iterations > 0 && ++iterations > options_.max_iterations) {
+    ++iterations;
+    if (options_.max_iterations > 0 && iterations > options_.max_iterations) {
       PlanResult result;
       result.stats = stats;
       return result;
     }
 
     const PrimitiveDirection previous_direction = directionFromStateIndex(current.index);
+    const bool try_analytic =
+      options_.analytic_expansion_enabled &&
+      (current_goal_distance <= options_.analytic_expansion_radius ||
+      iterations % options_.analytic_expansion_interval == 0u);
+    if (try_analytic) {
+      ++stats.analytic_attempted;
+      auto analytic = analyticExpansion(
+        grid, current_state, goal, goal_yaw, previous_direction);
+      if (!analytic.empty()) {
+        ++stats.analytic_succeeded;
+        auto result =
+          reconstruct(grid, parent, arrival_transition, start_index, current.index, stats);
+        for (auto & transition : analytic) {
+          result.states.push_back(transition.state);
+          result.transitions.push_back(std::move(transition));
+        }
+        result.stats = stats;
+        return smoothPath(grid, std::move(result), goal_yaw);
+      }
+      ++stats.analytic_rejected;
+    }
+
     for (const auto & primitive : generatePrimitives(grid, current_state)) {
       ++stats.generated;
       if (primitive.direction == PrimitiveDirection::REVERSE && !reverse_allowed_for_search) {
@@ -241,120 +384,32 @@ std::vector<Primitive> LatticeCore::generatePrimitives(
   mapToWorld(state.x, state.y, start_x, start_y);
 
   const double start_theta = headingForIndex(state.theta_index);
-  const unsigned int samples = std::max(2u, options_.primitive_samples);
-
-  auto transition_from_samples =
-    [this, &grid](
-    std::vector<Pose> poses,
-    PrimitiveDirection primitive_direction,
-    PrimitiveKind primitive_kind,
-    double length,
-    double heading_delta) -> Primitive {
-      Primitive primitive;
-      primitive.cost = length;
-      primitive.direction = primitive_direction;
-      primitive.kind = primitive_kind;
-      primitive.length = length;
-      primitive.heading_delta = heading_delta;
-
-      const auto & end = poses.back();
-      unsigned int end_x = 0;
-      unsigned int end_y = 0;
-      if (!worldToMap(grid, end.x, end.y, end_x, end_y)) {
-        return primitive;
-      }
-
-      primitive.state = {end_x, end_y, headingIndex(end.theta)};
-      primitive.samples = std::move(poses);
-      return primitive;
-    };
-
+  const double cosine = std::cos(start_theta);
+  const double sine = std::sin(start_theta);
   std::vector<Primitive> primitives;
-  primitives.reserve((options_.reverse_enabled ? 6 : 3) + (options_.pivot_enabled ? 2 : 0));
-
-  const std::array<PrimitiveDirection, 2> primitive_directions = {{
-    PrimitiveDirection::FORWARD,
-    PrimitiveDirection::REVERSE
-  }};
-
-  for (const auto primitive_direction : primitive_directions) {
-    if (primitive_direction == PrimitiveDirection::REVERSE && !options_.reverse_enabled) {
-      continue;
+  primitives.reserve(primitive_catalog_.primitives_at_origin.size());
+  for (const auto & origin : primitive_catalog_.primitives_at_origin) {
+    Primitive primitive = origin;
+    primitive.samples.clear();
+    primitive.samples.reserve(origin.samples.size());
+    for (const auto & sample : origin.samples) {
+      primitive.samples.push_back({
+          start_x + cosine * sample.x - sine * sample.y,
+          start_y + sine * sample.x + cosine * sample.y,
+          normalizeAngle(start_theta + sample.theta)});
     }
-
-    const double motion_sign =
-      primitive_direction == PrimitiveDirection::FORWARD ? 1.0 : -1.0;
-
-    std::vector<Pose> straight_samples;
-    straight_samples.reserve(samples);
-    for (unsigned int i = 0; i < samples; ++i) {
-      const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-      const double distance = motion_sign * options_.step_distance * ratio;
-      straight_samples.push_back({
-        start_x + distance * std::cos(start_theta),
-        start_y + distance * std::sin(start_theta),
-        start_theta});
+    const auto & end = primitive.samples.back();
+    unsigned int end_x = 0;
+    unsigned int end_y = 0;
+    if (!worldToMap(grid, end.x, end.y, end_x, end_y)) {
+      primitive.samples.clear();
+    } else {
+      primitive.state = {end_x, end_y, headingIndex(end.theta)};
     }
-    primitives.push_back(
-      transition_from_samples(
-        std::move(straight_samples), primitive_direction, PrimitiveKind::STRAIGHT,
-        options_.step_distance, 0.0));
-
-    for (const double turn_sign : {1.0, -1.0}) {
-      const auto primitive_kind =
-        turn_sign > 0.0 ? PrimitiveKind::LEFT_ARC : PrimitiveKind::RIGHT_ARC;
-      std::vector<Pose> arc_samples;
-      arc_samples.reserve(samples);
-      for (unsigned int i = 0; i < samples; ++i) {
-        const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double delta_theta = turn_sign * options_.arc_angle * ratio;
-        const double signed_radius = motion_sign * turn_sign * options_.arc_radius;
-        arc_samples.push_back({
-          start_x + signed_radius *
-          (std::sin(start_theta + delta_theta) - std::sin(start_theta)),
-          start_y - signed_radius *
-          (std::cos(start_theta + delta_theta) - std::cos(start_theta)),
-          normalizeAngle(start_theta + delta_theta)});
-      }
-      primitives.push_back(
-        transition_from_samples(
-          std::move(arc_samples), primitive_direction, primitive_kind,
-          options_.arc_radius * options_.arc_angle, turn_sign * options_.arc_angle));
+    if (!primitive.samples.empty()) {
+      primitives.push_back(std::move(primitive));
     }
   }
-
-  if (options_.pivot_enabled) {
-    const double rear_axle_x = start_x + options_.rear_axle_x_offset * std::cos(start_theta);
-    const double rear_axle_y = start_y + options_.rear_axle_x_offset * std::sin(start_theta);
-
-    for (const double turn_sign : {1.0, -1.0}) {
-      const auto primitive_kind =
-        turn_sign > 0.0 ? PrimitiveKind::PIVOT_LEFT : PrimitiveKind::PIVOT_RIGHT;
-      std::vector<Pose> pivot_samples;
-      pivot_samples.reserve(samples);
-      for (unsigned int i = 0; i < samples; ++i) {
-        const double ratio = static_cast<double>(i) / static_cast<double>(samples - 1);
-        const double delta_theta = turn_sign * options_.pivot_angle * ratio;
-        const double theta = normalizeAngle(start_theta + delta_theta);
-        pivot_samples.push_back({
-          rear_axle_x - options_.rear_axle_x_offset * std::cos(theta),
-          rear_axle_y - options_.rear_axle_x_offset * std::sin(theta),
-          theta});
-      }
-      primitives.push_back(
-        transition_from_samples(
-          std::move(pivot_samples), PrimitiveDirection::NONE, primitive_kind,
-          options_.pivot_turn_cost, turn_sign * options_.pivot_angle));
-    }
-  }
-
-  primitives.erase(
-    std::remove_if(
-      primitives.begin(), primitives.end(),
-      [](const Primitive & primitive) {
-        return primitive.samples.empty();
-      }),
-    primitives.end());
   return primitives;
 }
 
@@ -529,8 +584,213 @@ bool LatticeCore::isGoal(const State & state, const Cell & goal, double goal_yaw
 
   const double heading_error =
     std::abs(normalizeAngle(headingForIndex(state.theta_index) - goal_yaw));
-  const double heading_tolerance = kPi / static_cast<double>(options_.heading_bins);
+  const double heading_tolerance =
+    options_.goal_heading_tolerance > 0.0 ?
+    options_.goal_heading_tolerance :
+    kPi / static_cast<double>(options_.heading_bins);
   return heading_error <= heading_tolerance;
+}
+
+std::vector<Primitive> LatticeCore::analyticExpansion(
+  const GridAdapter & grid,
+  const State & state,
+  const Cell & goal,
+  double goal_yaw,
+  PrimitiveDirection previous_direction) const
+{
+  (void)previous_direction;
+  double start_x = 0.0;
+  double start_y = 0.0;
+  double goal_x = 0.0;
+  double goal_y = 0.0;
+  mapToWorld(state.x, state.y, start_x, start_y);
+  mapToWorld(goal.x, goal.y, goal_x, goal_y);
+  const double start_yaw = headingForIndex(state.theta_index);
+
+  const bool reverse_allowed =
+    options_.reverse_enabled &&
+    reverseAllowedTowardGoal(grid, state, goal, goal_yaw);
+  const auto path = reeds_shepp::shortestPath(
+    start_x, start_y, start_yaw, goal_x, goal_y, goal_yaw,
+    options_.arc_radius,
+    reverse_allowed);
+  if (!path.valid || path.total_length <= kZero) {
+    return {};
+  }
+
+  bool contains_reverse = false;
+  for (const double length : path.lengths) {
+    contains_reverse = contains_reverse || length < -kZero;
+  }
+  if (contains_reverse && !reverse_allowed) {
+    return {};
+  }
+
+  Pose current{start_x, start_y, start_yaw};
+  std::vector<Primitive> expansion;
+  expansion.reserve(path.lengths.size());
+  for (std::size_t segment_index = 0; segment_index < path.lengths.size(); ++segment_index) {
+    const double normalized_length = path.lengths[segment_index];
+    const auto segment_type = path.types[segment_index];
+    if (segment_type == reeds_shepp::SegmentType::NOP ||
+      std::abs(normalized_length) <= kZero)
+    {
+      continue;
+    }
+
+    Primitive primitive;
+    primitive.direction = normalized_length >= 0.0 ?
+      PrimitiveDirection::FORWARD : PrimitiveDirection::REVERSE;
+    primitive.kind =
+      segment_type == reeds_shepp::SegmentType::LEFT ? PrimitiveKind::LEFT_ARC :
+      segment_type == reeds_shepp::SegmentType::RIGHT ? PrimitiveKind::RIGHT_ARC :
+      PrimitiveKind::STRAIGHT;
+    const double analytic_radius = options_.arc_radius;
+    primitive.length = std::abs(normalized_length) * analytic_radius;
+    primitive.cost = primitive.length;
+    primitive.heading_delta =
+      segment_type == reeds_shepp::SegmentType::LEFT ? normalized_length :
+      segment_type == reeds_shepp::SegmentType::RIGHT ? -normalized_length : 0.0;
+
+    const unsigned int sample_count = std::max(
+      1u,
+      static_cast<unsigned int>(
+        std::ceil(primitive.length / options_.analytic_expansion_sample_distance)));
+    primitive.samples.reserve(sample_count + 1u);
+    primitive.samples.push_back(current);
+
+    const Pose segment_start = current;
+    for (unsigned int sample = 1; sample <= sample_count; ++sample) {
+      const double ratio = static_cast<double>(sample) / static_cast<double>(sample_count);
+      const double value = normalized_length * ratio;
+      Pose pose = segment_start;
+      if (segment_type == reeds_shepp::SegmentType::LEFT) {
+        pose.x += analytic_radius *
+          (std::sin(segment_start.theta + value) - std::sin(segment_start.theta));
+        pose.y += analytic_radius *
+          (-std::cos(segment_start.theta + value) + std::cos(segment_start.theta));
+        pose.theta = normalizeAngle(segment_start.theta + value);
+      } else if (segment_type == reeds_shepp::SegmentType::RIGHT) {
+        pose.x += analytic_radius *
+          (-std::sin(segment_start.theta - value) + std::sin(segment_start.theta));
+        pose.y += analytic_radius *
+          (std::cos(segment_start.theta - value) - std::cos(segment_start.theta));
+        pose.theta = normalizeAngle(segment_start.theta - value);
+      } else {
+        const double distance = value * analytic_radius;
+        pose.x += distance * std::cos(segment_start.theta);
+        pose.y += distance * std::sin(segment_start.theta);
+      }
+      primitive.samples.push_back(pose);
+    }
+
+    current = primitive.samples.back();
+    unsigned int end_x = 0;
+    unsigned int end_y = 0;
+    if (!worldToMap(grid, current.x, current.y, end_x, end_y)) {
+      return {};
+    }
+    primitive.state = {end_x, end_y, headingIndex(current.theta)};
+    if (rejectReason(grid, primitive) != RejectReason::NONE) {
+      return {};
+    }
+    expansion.push_back(std::move(primitive));
+  }
+
+  if (expansion.empty()) {
+    return {};
+  }
+  if (std::hypot(current.x - goal_x, current.y - goal_y) > 1e-5 ||
+    std::abs(normalizeAngle(current.theta - goal_yaw)) > 1e-5)
+  {
+    return {};
+  }
+
+  auto & final = expansion.back();
+  final.samples.back() = {goal_x, goal_y, normalizeAngle(goal_yaw)};
+  final.state = {goal.x, goal.y, headingIndex(goal_yaw)};
+  if (rejectReason(grid, final) != RejectReason::NONE) {
+    return {};
+  }
+  return expansion;
+}
+
+PlanResult LatticeCore::smoothPath(
+  const GridAdapter & grid,
+  PlanResult result,
+  double goal_yaw) const
+{
+  if (!options_.shortcut_smoothing_enabled || !result.succeeded ||
+    result.transitions.size() < 2 ||
+    result.states.size() != result.transitions.size() + 1)
+  {
+    return result;
+  }
+
+  PlanResult smoothed;
+  smoothed.succeeded = true;
+  smoothed.stats = result.stats;
+  smoothed.states.push_back(result.states.front());
+
+  std::size_t source = 0;
+  const std::size_t final_state = result.states.size() - 1;
+  while (source < final_state) {
+    std::size_t target = source + 1;
+    std::vector<Primitive> replacement;
+    const std::size_t furthest = std::min(
+      final_state,
+      source + static_cast<std::size_t>(options_.shortcut_max_lookahead));
+
+    for (std::size_t candidate = furthest; candidate > source + 1; --candidate) {
+      double original_length = 0.0;
+      for (std::size_t i = source; i < candidate; ++i) {
+        original_length += result.transitions[i].length;
+      }
+
+      const auto & candidate_state = result.states[candidate];
+      const double candidate_yaw =
+        candidate == final_state ? goal_yaw : headingForIndex(candidate_state.theta_index);
+      const PrimitiveDirection previous_direction =
+        smoothed.transitions.empty() ?
+        PrimitiveDirection::NONE : smoothed.transitions.back().direction;
+      auto shortcut = analyticExpansion(
+        grid,
+        smoothed.states.back(),
+        {candidate_state.x, candidate_state.y},
+        candidate_yaw,
+        previous_direction);
+      if (shortcut.empty() || shortcut.size() >= candidate - source) {
+        continue;
+      }
+
+      double shortcut_length = 0.0;
+      for (const auto & primitive : shortcut) {
+        shortcut_length += primitive.length;
+      }
+      if (shortcut_length > original_length * 1.05 + 1e-9) {
+        continue;
+      }
+
+      target = candidate;
+      replacement = std::move(shortcut);
+      break;
+    }
+
+    if (replacement.empty()) {
+      smoothed.transitions.push_back(result.transitions[source]);
+      smoothed.states.push_back(result.states[source + 1]);
+      ++source;
+      continue;
+    }
+
+    for (auto & primitive : replacement) {
+      smoothed.states.push_back(primitive.state);
+      smoothed.transitions.push_back(std::move(primitive));
+    }
+    source = target;
+  }
+
+  return smoothed;
 }
 
 std::vector<double> LatticeCore::buildHolonomicObstacleHeuristic(
@@ -565,7 +825,7 @@ std::vector<double> LatticeCore::buildHolonomicObstacleHeuristic(
 
     const unsigned int current_x = current.index % grid.width;
     const unsigned int current_y = current.index / grid.width;
-    for (const auto [dx, dy] : neighbors) {
+    for (const auto & [dx, dy] : neighbors) {
       const int next_x = static_cast<int>(current_x) + dx;
       const int next_y = static_cast<int>(current_y) + dy;
       if (!inBounds(grid, next_x, next_y)) {
@@ -703,17 +963,7 @@ PrimitiveDirection LatticeCore::directionFromStateIndex(unsigned int index) cons
 PrimitiveCatalog generateForkliftPrimitiveCatalog(const PlannerOptions & options)
 {
   const LatticeCore core(options);
-  GridAdapter grid;
-  grid.width = 200;
-  grid.height = 200;
-  grid.cell_traversable = [](unsigned int, unsigned int) {return true;};
-  grid.footprint_traversable = [](double, double, double) {return true;};
-  grid.normalized_cost = [](double, double) {return 0.0;};
-
-  PrimitiveCatalog catalog;
-  catalog.options = core.options();
-  catalog.primitives_at_origin = core.generatePrimitives(grid, {100, 100, 0});
-  return catalog;
+  return core.primitiveCatalog();
 }
 
 PrimitiveCatalog loadPrimitiveCatalog(const std::string & path)

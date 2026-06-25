@@ -114,6 +114,9 @@ private:
     unsigned int rejected_costmap{0};
     unsigned int rejected_footprint{0};
     unsigned int improved{0};
+    unsigned int analytic_attempted{0};
+    unsigned int analytic_succeeded{0};
+    unsigned int analytic_rejected{0};
     double best_goal_distance{std::numeric_limits<double>::infinity()};
   };
 
@@ -226,10 +229,11 @@ private:
   unsigned int max_iterations_{0};
 
   bool use_lattice_planner_{false};
-  bool lattice_fallback_to_astar_{true};
+  bool lattice_fallback_to_astar_{false};
   unsigned int lattice_heading_bins_{16};
   double lattice_step_distance_{0.20};
   double lattice_arc_radius_{0.60};
+  std::vector<double> lattice_arc_radii_;
   double lattice_arc_angle_{0.3926990817};
   unsigned int lattice_primitive_samples_{5};
   bool lattice_reverse_enabled_{false};
@@ -244,7 +248,7 @@ private:
   bool lattice_pivot_enabled_{false};
   double lattice_pivot_angle_{0.0};
   double lattice_pivot_turn_cost_{0.35};
-  double lattice_rear_axle_x_offset_{0.0};
+  double lattice_rear_axle_x_offset_{-0.34};
   // Terminal pivot regime: near the goal but with a large remaining heading error,
   // correct heading by pivot only and suppress reverse so it does not pollute the
   // terminal nudge (which destabilised the controller and drove it off the goal).
@@ -252,6 +256,14 @@ private:
   // because its heading error stays below lattice_pivot_terminal_heading_.
   double lattice_pivot_terminal_radius_{0.6};
   double lattice_pivot_terminal_heading_{0.7853981634};  // pi/4 = 45 deg
+  bool lattice_analytic_expansion_enabled_{true};
+  double lattice_analytic_expansion_radius_{3.0};
+  unsigned int lattice_analytic_expansion_interval_{20};
+  double lattice_analytic_expansion_sample_distance_{0.05};
+  double lattice_goal_heading_tolerance_{0.0};
+  bool lattice_shortcut_smoothing_enabled_{false};
+  unsigned int lattice_shortcut_max_lookahead_{12};
+  unsigned int lattice_max_iterations_{250000};
 };
 
 }  // namespace forklift_nav2_plugins

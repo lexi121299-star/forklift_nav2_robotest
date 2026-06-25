@@ -158,5 +158,243 @@ TEST(OruLatticeCore, SearchUsesPivotForInPlaceHeadingGoal)
   }
 }
 
+TEST(OruLatticeCore, ReedsSheppAnalyticExpansionConnectsExactGoalPose)
+{
+  auto options = makeOptions();
+  options.arc_radii = {0.45, 0.60, 0.90};
+  options.reverse_requires_goal_behind = false;
+  options.analytic_expansion_sample_distance = 0.025;
+  const LatticeCore core(options);
+
+  unsigned int footprint_checks = 0;
+  auto grid = makeGrid(100, 100);
+  grid.footprint_traversable =
+    [&footprint_checks](double, double, double) {
+      ++footprint_checks;
+      return true;
+    };
+
+  const auto expansion =
+    core.analyticExpansion(grid, {20, 20, 0}, {55, 38}, 0.5 * kPi);
+
+  ASSERT_FALSE(expansion.empty());
+  EXPECT_GT(footprint_checks, 10u);
+  EXPECT_EQ(expansion.back().state.x, 55u);
+  EXPECT_EQ(expansion.back().state.y, 38u);
+  EXPECT_EQ(expansion.back().state.theta_index, 4u);
+  EXPECT_NEAR(expansion.back().samples.back().theta, 0.5 * kPi, 1e-9);
+}
+
+TEST(OruLatticeCore, ReedsSheppAnalyticExpansionRejectsBlockedSweptPath)
+{
+  auto options = makeOptions();
+  options.reverse_requires_goal_behind = false;
+  options.analytic_expansion_sample_distance = 0.025;
+  const LatticeCore core(options);
+  auto grid = makeGrid(100, 100);
+  grid.cell_traversable = [](unsigned int x, unsigned int) {
+      return x != 35u;
+    };
+
+  const auto expansion =
+    core.analyticExpansion(grid, {20, 20, 0}, {50, 20}, 0.0);
+
+  EXPECT_TRUE(expansion.empty());
+}
+
+TEST(OruLatticeCore, AnalyticExpansionUsesForwardOnlyPathWhenReverseIsDisabled)
+{
+  auto options = makeOptions();
+  options.reverse_enabled = false;
+  options.arc_radii = {0.45, 0.60, 0.90};
+  const LatticeCore core(options);
+
+  const auto expansion =
+    core.analyticExpansion(makeGrid(100, 100), {20, 20, 0}, {55, 38}, 0.5 * kPi);
+
+  ASSERT_FALSE(expansion.empty());
+  for (const auto & primitive : expansion) {
+    EXPECT_EQ(primitive.direction, PrimitiveDirection::FORWARD);
+  }
+}
+
+TEST(OruLatticeCore, ReedsSheppExpansionReachesArbitraryGoalPoses)
+{
+  auto options = makeOptions();
+  options.arc_radii = {0.45, 0.60, 0.90};
+  options.reverse_requires_goal_behind = false;
+  const LatticeCore core(options);
+  const auto grid = makeGrid(320, 320);
+  const std::vector<std::pair<Cell, double>> goals = {
+    {{185, 170}, kPi / 3.0},
+    {{120, 180}, -0.5 * kPi},
+    {{135, 112}, 0.75 * kPi},
+    {{205, 145}, -kPi / 4.0},
+    {{155, 205}, kPi}};
+
+  for (const auto & [goal, yaw] : goals) {
+    const auto expansion =
+      core.analyticExpansion(grid, {150, 150, 0}, goal, yaw);
+    ASSERT_FALSE(expansion.empty()) <<
+      "goal=(" << goal.x << "," << goal.y << ") yaw=" << yaw;
+    EXPECT_EQ(expansion.back().state.x, goal.x);
+    EXPECT_EQ(expansion.back().state.y, goal.y);
+    EXPECT_EQ(expansion.back().state.theta_index, core.headingIndex(yaw));
+  }
+}
+
+TEST(OruLatticeCore, MultiCurvatureCatalogIsHeadingAlignedAndCostedByRadius)
+{
+  auto options = makeOptions();
+  options.reverse_enabled = false;
+  options.pivot_enabled = false;
+  options.arc_radii = {0.35, 0.60, 1.00};
+  const LatticeCore core(options);
+  const auto & catalog = core.primitiveCatalog();
+
+  ASSERT_EQ(catalog.primitives_at_origin.size(), 7u);
+  std::vector<double> observed_radii;
+  for (const auto & primitive : catalog.primitives_at_origin) {
+    if (primitive.kind == PrimitiveKind::STRAIGHT) {
+      EXPECT_NEAR(primitive.length, options.step_distance, 1e-9);
+      continue;
+    }
+    ASSERT_FALSE(primitive.samples.empty());
+    EXPECT_EQ(
+      core.headingIndex(primitive.samples.back().theta),
+      primitive.heading_delta > 0.0 ? 1u : 15u);
+    observed_radii.push_back(primitive.length / std::abs(primitive.heading_delta));
+  }
+
+  EXPECT_NE(
+    std::find_if(
+      observed_radii.begin(), observed_radii.end(),
+      [](double radius) {return std::abs(radius - 0.35) < 1e-9;}),
+    observed_radii.end());
+  EXPECT_NE(
+    std::find_if(
+      observed_radii.begin(), observed_radii.end(),
+      [](double radius) {return std::abs(radius - 1.00) < 1e-9;}),
+    observed_radii.end());
+}
+
+TEST(OruLatticeCore, TightRadiusCatalogSolvesConstrainedNinetyDegreeTurn)
+{
+  auto options = makeOptions();
+  options.reverse_enabled = false;
+  options.pivot_enabled = false;
+  options.analytic_expansion_enabled = false;
+  options.goal_tolerance = 0.06;
+  options.max_iterations = 200;
+
+  auto grid = makeGrid(90, 90);
+  const double start_x = (40.0 + 0.5) * options.resolution;
+  const double start_y = (40.0 + 0.5) * options.resolution;
+  const double tight_radius = 0.35;
+  const double circle_y = start_y + tight_radius;
+  grid.footprint_traversable =
+    [start_x, circle_y, tight_radius](double x, double y, double) {
+      return std::abs(std::hypot(x - start_x, y - circle_y) - tight_radius) < 0.075;
+    };
+
+  options.arc_radii = {0.35, 0.60, 0.90};
+  const LatticeCore multi_core(options);
+  State tight_goal{40, 40, 0};
+  for (unsigned int turn = 0; turn < 4; ++turn) {
+    const auto primitives = multi_core.generatePrimitives(grid, tight_goal);
+    const auto tight_left = std::find_if(
+      primitives.begin(), primitives.end(),
+      [](const Primitive & primitive) {
+        return primitive.direction == PrimitiveDirection::FORWARD &&
+               primitive.kind == PrimitiveKind::LEFT_ARC &&
+               std::abs(primitive.length / primitive.heading_delta - 0.35) < 1e-6;
+      });
+    ASSERT_NE(tight_left, primitives.end());
+    ASSERT_EQ(multi_core.rejectReason(grid, *tight_left), RejectReason::NONE);
+    tight_goal = tight_left->state;
+  }
+
+  options.arc_radii = {0.60};
+  const auto single_radius =
+    LatticeCore(options).plan(
+    grid, {40, 40}, 0.0, {tight_goal.x, tight_goal.y}, 0.5 * kPi);
+  EXPECT_FALSE(single_radius.succeeded);
+
+  options.arc_radii = {0.35, 0.60, 0.90};
+  const auto multi_radius =
+    LatticeCore(options).plan(
+    grid, {40, 40}, 0.0, {tight_goal.x, tight_goal.y}, 0.5 * kPi);
+  ASSERT_TRUE(multi_radius.succeeded) <<
+    "expanded=" << multi_radius.stats.expanded <<
+    " generated=" << multi_radius.stats.generated <<
+    " footprint_rejected=" << multi_radius.stats.rejected_footprint <<
+    " best_goal_distance=" << multi_radius.stats.best_goal_distance;
+  EXPECT_EQ(multi_radius.states.back().theta_index, 4u);
+}
+
+PlanResult makeStraightDetourResult()
+{
+  PlanResult result;
+  result.succeeded = true;
+  result.states = {
+    {10, 10, 0},
+    {14, 10, 0},
+    {18, 10, 0},
+    {22, 10, 0}};
+  for (std::size_t i = 1; i < result.states.size(); ++i) {
+    Primitive primitive;
+    primitive.state = result.states[i];
+    primitive.direction = PrimitiveDirection::FORWARD;
+    primitive.kind = PrimitiveKind::STRAIGHT;
+    primitive.length = 0.20;
+    primitive.cost = 0.20;
+    result.transitions.push_back(primitive);
+  }
+  return result;
+}
+
+TEST(OruLatticeCore, CollisionCheckedReedsSheppShortcutReducesSegments)
+{
+  auto options = makeOptions();
+  options.reverse_enabled = false;
+  options.shortcut_smoothing_enabled = true;
+  options.shortcut_max_lookahead = 8;
+  const LatticeCore core(options);
+
+  unsigned int footprint_checks = 0;
+  auto grid = makeGrid();
+  grid.footprint_traversable =
+    [&footprint_checks](double, double, double) {
+      ++footprint_checks;
+      return true;
+    };
+  const auto smoothed = core.smoothPath(grid, makeStraightDetourResult(), 0.0);
+
+  ASSERT_TRUE(smoothed.succeeded);
+  EXPECT_LT(smoothed.transitions.size(), 3u);
+  EXPECT_GT(footprint_checks, 2u);
+  EXPECT_EQ(smoothed.states.front().x, 10u);
+  EXPECT_EQ(smoothed.states.back().x, 22u);
+}
+
+TEST(OruLatticeCore, ReedsSheppShortcutKeepsOriginalWhenObstacleBlocksIt)
+{
+  auto options = makeOptions();
+  options.reverse_enabled = false;
+  options.shortcut_smoothing_enabled = true;
+  options.shortcut_max_lookahead = 8;
+  const LatticeCore core(options);
+  auto grid = makeGrid();
+  grid.cell_traversable = [](unsigned int x, unsigned int) {
+      return x != 16u;
+    };
+
+  const auto smoothed = core.smoothPath(grid, makeStraightDetourResult(), 0.0);
+
+  ASSERT_TRUE(smoothed.succeeded);
+  EXPECT_EQ(smoothed.transitions.size(), 3u);
+  EXPECT_EQ(smoothed.states.size(), 4u);
+}
+
 }  // namespace
 }  // namespace forklift_oru_planner

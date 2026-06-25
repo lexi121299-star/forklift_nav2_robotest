@@ -72,6 +72,7 @@ struct PlannerOptions
   double origin_y{0.0};
   double step_distance{0.20};
   double arc_radius{0.60};
+  std::vector<double> arc_radii;
   double arc_angle{0.3926990817};
   unsigned int primitive_samples{5};
   bool reverse_enabled{true};
@@ -92,7 +93,14 @@ struct PlannerOptions
   bool use_holonomic_obstacle_heuristic{true};
   double pivot_terminal_radius{0.6};
   double pivot_terminal_heading{0.7853981634};
-  unsigned int max_iterations{0};
+  bool analytic_expansion_enabled{true};
+  double analytic_expansion_radius{3.0};
+  unsigned int analytic_expansion_interval{20};
+  double analytic_expansion_sample_distance{0.05};
+  double goal_heading_tolerance{0.0};
+  bool shortcut_smoothing_enabled{false};
+  unsigned int shortcut_max_lookahead{12};
+  unsigned int max_iterations{250000};
 };
 
 struct GridAdapter
@@ -114,6 +122,9 @@ struct SearchStats
   unsigned int rejected_footprint{0};
   unsigned int improved{0};
   unsigned int holonomic_reachable_cells{0};
+  unsigned int analytic_attempted{0};
+  unsigned int analytic_succeeded{0};
+  unsigned int analytic_rejected{0};
   double best_goal_distance{std::numeric_limits<double>::infinity()};
 };
 
@@ -174,8 +185,19 @@ public:
   double normalizeAngle(double angle) const;
   double goalDistance(const State & state, const Cell & goal) const;
   bool isGoal(const State & state, const Cell & goal, double goal_yaw) const;
+  std::vector<Primitive> analyticExpansion(
+    const GridAdapter & grid,
+    const State & state,
+    const Cell & goal,
+    double goal_yaw,
+    PrimitiveDirection previous_direction = PrimitiveDirection::NONE) const;
+  PlanResult smoothPath(
+    const GridAdapter & grid,
+    PlanResult result,
+    double goal_yaw) const;
 
   const PlannerOptions & options() const {return options_;}
+  const PrimitiveCatalog & primitiveCatalog() const {return primitive_catalog_;}
 
 private:
   std::vector<double> buildHolonomicObstacleHeuristic(
@@ -205,6 +227,7 @@ private:
   PrimitiveDirection directionFromStateIndex(unsigned int index) const;
 
   PlannerOptions options_;
+  PrimitiveCatalog primitive_catalog_;
 };
 
 PrimitiveCatalog generateForkliftPrimitiveCatalog(const PlannerOptions & options);
