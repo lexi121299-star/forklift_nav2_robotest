@@ -31,6 +31,74 @@
 
 ---
 
+## 1.5 坐标系、base_link 与真车标定流程（footprint 之前必读）
+
+调 footprint / 偏移 / 转弯之前,先把坐标基准定死。否则那些数值没有参照、全是错的。
+
+### 1.5.1 坐标轴约定（ROS REP-103）
+
+- **+x = 前进**（配重端）,**−x = 后退**（货叉端）
+- **+y = 左**,−y = 右；**+z = 上**
+- **yaw 绕 +z 右手旋转**:yaw=0 时车头(+x)对齐 map 的 +x;**yaw 增大 = 逆时针 = 左转**
+
+### 1.5.2 base_link 在哪——是"基准原点",不是"几何中心"
+
+`base_link` 不是"车的中心"这个物理概念,而是**整个系统的坐标基准点**:footprint、激光 TF、里程计、`rear_axle_x_offset` **全部相对它**来量。你**自己定它在哪**,然后一切按它对齐。
+
+> **真车推荐:把 base_link 定在后驱动/转向轴中心。** 这样 `rear_axle_x_offset≈0`,运动学最干净。
+
+**仿真模型当前的几何**（diff-drive,**真车不可照搬**,见 [§1.5.4]）——各部件相对 base_link 原点的 x（m）:
+
+```
+   货叉端(−x,后)                      配重端(+x,前)
+ 货叉尖   货叉根  桅杆   驱动轴   原点   激光 脚轮 配重  车头
+ −2.043  −1.443 −0.843  −0.34    0    +0.25 +0.42 +0.73 +0.843
+   │        │     │       │       ●      │    │    │     │
+   └──footprint 后边界          base_link            footprint 前边界┘
+
+       ↑+y(左)
+        │
+  ──────●──────→ +x(前/配重)        yaw↺ 逆时针为正
+        │   base_link(此处=车身箱中心)
+       ↓−y(右)
+```
+
+注意仿真里 base_link 在**车身箱几何中心**、驱动轴在 −0.34（故 `rear_axle_x_offset:-0.34`）。footprint `[[0.843,0.58],[0.843,-0.58],[-2.043,-0.58],[-2.043,0.58]]` = 前 +0.843 / 后 −2.043（货叉尖）/ 半宽 ±0.58,**原点不在中间**（货叉往 −x 伸很长）。
+
+- `base_footprint` 是地面投影帧,**也是导航/AMCL/odom 的基准帧**（`base_frame_id: base_footprint`）;它与 `base_link` 的 **x/y 相同**,只差一个 z（车身高）。谈 footprint 时两者等价。
+
+### 1.5.3 真车标定顺序（定了 base_link 之后照着填）
+
+> 顺序不能反——base_link 没定死之前,footprint 和偏移都没有意义。
+
+| 步骤 | 做什么 | 改哪里 |
+|---|---|---|
+| **0. 定 base_link** | 放后轴中心,定了别动 | （仅约定，下面全相对它） |
+| **1. odom 对齐** | Curtis CAN / 编码器算出的位姿**必须是 base_link(后轴)这个点的**。参考点不一致 → AMCL 一动就发散。**最易忽略、最致命。** | 里程计节点（真车 odom 源） |
+| **2. 激光 TF** | 量激光相对后轴的安装位置,填进 `base_link→base_scan` 的 `origin xyz/rpy`。装反/量错 = scan 对不上地图 = 发散。**必须现场实测。** | URDF / 或 static TF（见 §1.5.4） |
+| **3. footprint** | 以后轴为原点量真车轮廓,前+x/后−x/半宽±y | local_costmap [`:201`](../config/forklift_nav2_oru_test_foxy.yaml#L201)（安全闸自动同步）+ global_costmap [`:255`](../config/forklift_nav2_oru_test_foxy.yaml#L255) |
+| **4. 运动学** | `rear_axle_x_offset`=后轴相对 base_link 的 x（base_link 在后轴则填 **0**）；`wheel_base`/转向角/最小转弯半径按真车 | controller [`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) + lattice [`:372`](../config/forklift_nav2_oru_test_foxy.yaml#L372)；转弯见 §3 |
+| **5. 静态验证** | 摆已知点 `set_initial_pose` → RViz 看 **scan 是否贴合地图墙线**（验 base_link+激光 TF）；最低速点动确认 **前进=+x、左转=yaw 增大** | 不开车先做，过了再进 §5/§3/§7 |
+
+### 1.5.4 上真车还需要 URDF 吗？
+
+**不是必须有完整 URDF,但你必须提供它负责的那几个 TF。** URDF 在本导航栈里只干三件事,其中真车只关心第 1 件:
+
+1. **发布刚体 TF 树**（经 `robot_state_publisher`）:`base_footprint→base_link→base_scan`。**AMCL/Nav2 真正消费的是这几个 TF**——尤其 `base_link→base_scan`（激光安装位置）。**这部分真车必须有。**
+2. RViz 里显示车模型——纯好看,可有可无。
+3. Gazebo 仿真插件（`<gazebo>` 段里的 diff_drive、ray 激光等）——**纯仿真,真车完全不用,要删掉。**
+
+> 其余 TF 不归 URDF:`odom→base_footprint` 由**里程计源**发,`map→odom` 由 **AMCL** 发。URDF 只补 base_footprint 以下的刚体部分。
+
+**两个选择:**
+
+- **方案 A（推荐,标准做法）**:留一份**精简 URDF**——保留 `base_footprint`/`base_link`/`base_scan` 等 link 与 joint,**删掉所有 `<gazebo>` 段**,跑 `robot_state_publisher`。好维护、RViz 还能看模型,以后加传感器也方便。
+- **方案 B（最小化）**:**完全不用 URDF**,在 launch 里用 `tf2_ros static_transform_publisher` 直接发那 2–3 个固定 TF（base_footprint→base_link、base_link→base_scan）。最省,但没车模型、传感器一多就难管。
+
+只挂一个激光的简单车,方案 B 够用;但**方案 A 更标准、更省心**,激光 TF 写在 URDF 里和 footprint 标定也对得上。
+
+---
+
 ## 2. 「costmap 边界太大 / 走廊太窄」——footprint 与膨胀（重点）
 
 车实际能过，但规划器认为过不去，几乎都是 **footprint 太大** 或 **inflation 太厚**。两者叠加决定了"车在代价图里占多大"。
