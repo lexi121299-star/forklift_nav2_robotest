@@ -27,6 +27,7 @@
 | 车太快/太慢、起步顿挫 | `max_velocity` / 加速度 / 平滑 | §5 | 按场地调 |
 | 到点附近反复修正、飘 | goal 容差 + 终点锁存 latch | §6 | 放宽容差 / 调 latch |
 | 离障碍物多远开始减速/急停 | safety gate 距离 | §7 | 按车速与制动距离 |
+| **安全闸误停 / 明明没障碍却不动**（要临时关闸先跑通） | `safety_enabled` 等 launch 参数 | §7.2 | 现场临时关、真车保持全开 |
 
 ---
 
@@ -38,24 +39,32 @@
 
 代价图用 footprint 多边形做碰撞检查；footprint 越大，可行走廊越窄。
 
-- local_costmap footprint：[`forklift_nav2_oru_test_foxy.yaml:200`](../config/forklift_nav2_oru_test_foxy.yaml#L200)
-  当前 `[[0.843,0.58],[0.843,-0.58],[-2.043,-0.58],[-2.043,0.58]]` → **约 2.89 m 长 × 1.16 m 宽**
-- global_costmap footprint：[`forklift_nav2_oru_test_foxy.yaml:254`](../config/forklift_nav2_oru_test_foxy.yaml#L254)
-  当前 `[[0.50,0.35],[0.50,-0.35],[-0.70,-0.35],[-0.70,0.35]]` → **约 1.2 m 长 × 0.7 m 宽**
+**全栈里有 3 处 footprint，但只对应 2 个"概念"：**
 
-> ⚠️ **两个 footprint 不一致**，而且 local 那个明显偏大（约 2.9 m 长）。这正是"边界太大"的主因：局部代价图按一台 2.9 m 长的车做避障，自然贴边不敢走、转弯走廊不够。
+| 概念 | 谁在用 | 在哪 | 现值 |
+|---|---|---|---|
+| **物理 footprint**（真车实际轮廓，决定避障/碰撞/安全闸） | local_costmap + 控制器碰撞检查 + **安全闸** | `forklift_nav2_oru_test_foxy.yaml:201`（local_costmap） | `[[0.843,0.58],[0.843,-0.58],[-2.043,-0.58],[-2.043,0.58]]` ≈ **2.89 m 长 × 1.16 m 宽** |
+| **规划 footprint**（全局规划用，可比物理略小以敢走窄口） | global_costmap（=lattice 规划器） | `forklift_nav2_oru_test_foxy.yaml:255`（global_costmap） | `[[0.50,0.35],[0.50,-0.35],[-0.70,-0.35],[-0.70,0.35]]` ≈ **1.2 m 长 × 0.7 m 宽** |
 
-**怎么改：**
-1. 实测真车轮廓（含货叉前伸、护顶架、车尾），以 `base_link`（后轴中心）为原点：
+> ✅ **安全闸 footprint 已自动同步**：`forklift_navigation.launch.py` 在启动时从 yaml 的 **local_costmap footprint** 读出来传给 `safety_command_gate`（见该文件 `footprint_from_params` / `launch_safety_gate`）。**所以改物理 footprint 只改 yaml local_costmap 这一行**，安全闸自动跟随，不会再出现"local 改了、安全闸还是旧值 → 误停"那个坑（上次同时缩 footprint 卡死就是这个）。
+> 需要单独给安全闸一个不同 footprint（一般不需要）：启动加 `safety_footprint:="[[...]]"` 覆盖。
+
+#### 一次性调"所有 footprint"的标准做法
+
+1. **量真车物理轮廓**（含货叉前伸、护顶架、车尾），以 `base_link`（后轴中心）为原点：
    - 车头方向（+x）最大伸出 = 前边界
    - 车尾方向（-x）最大伸出 = 后边界（负值）
    - 半宽 = 侧边界
-2. **local 与 global 用同一个 footprint**，避免一边敢走一边不敢走。
-3. 多边形顶点顺序：前左 → 前右 → 后右 → 后左。例如真车 1.2 m × 0.7 m、后轴在中心略偏后：
+   - 顶点顺序：前左 → 前右 → 后右 → 后左。
+2. **改物理 footprint → 只动 yaml local_costmap 这一行**（`:201`）。控制器碰撞检查 + 安全闸**自动用同一份**。例如真车 1.2 m × 0.7 m、后轴略偏后：
    ```yaml
    footprint: "[[0.50, 0.35], [0.50, -0.35], [-0.70, -0.35], [-0.70, 0.35]]"
    ```
-4. footprint 要和 `rear_axle_x_offset: -0.34`（控制器/规划器，[`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) / [`:367`](../config/forklift_nav2_oru_test_foxy.yaml#L367)）的坐标系一致——都以 `base_link` 为基准。
+3. **改规划 footprint → 动 yaml global_costmap 这一行**（`:255`）。
+   - 想最省事、最安全：**两处填同一个真车物理值**（规划=物理，规划出来的路控制器/安全闸一定能过）。
+   - 想在窄口更敢规划：global 可比 local 略小（如各边各收 5–10 cm），但**别小过车实际能过的极限**，否则规划出的路安全闸会拦（fail-closed）。
+4. footprint 坐标系要和 `rear_axle_x_offset: -0.34`（控制器/规划器，[`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) / [`:372`](../config/forklift_nav2_oru_test_foxy.yaml#L372)）一致——都以 `base_link` 为基准。
+5. 改完**重启导航栈**生效（yaml 参数在 `configure` 时读；安全闸 footprint 在 launch 时从 yaml 读，也必须重启整条 launch）。
 
 **副作用**：footprint 调太小会真的蹭墙/蹭货架，留 5–10 cm 安全余量即可，剩下的安全裕度交给 inflation。
 
@@ -63,8 +72,10 @@
 
 在 footprint 外再"膨胀"一圈高代价区，让路径离障碍物有余量。半径越大，离墙越远、窄通道越容易被判死。
 
-- local：[`forklift_nav2_oru_test_foxy.yaml:204`](../config/forklift_nav2_oru_test_foxy.yaml#L204) → `0.65`
-- global：[`forklift_nav2_oru_test_foxy.yaml:298`](../config/forklift_nav2_oru_test_foxy.yaml#L298) → `0.65`
+膨胀系数只在 yaml，就 **2 处**（local + global），**一次性调就是这两行一起改、保持一致**：
+
+- local `inflation_radius`：[`forklift_nav2_oru_test_foxy.yaml:205`](../config/forklift_nav2_oru_test_foxy.yaml#L205) → `0.65`
+- global `inflation_radius`：[`forklift_nav2_oru_test_foxy.yaml:303`](../config/forklift_nav2_oru_test_foxy.yaml#L303) → `0.65`
 
 **经验值**：`inflation_radius ≈ 车体内切半径 + 期望离墙余量`。叉车半宽约 0.35 m，想离墙 ~0.1–0.2 m，则 `0.45~0.55` 往往就够；当前 0.65 偏保守，窄通道里会显得"边界太大"。
 
@@ -74,7 +85,7 @@
 
 膨胀区内代价的衰减速度。值越大，高代价集中在贴近障碍物处，路径更敢靠近；值越小，代价"摊得更平更远"，路径更躲。
 
-- local [`:205`](../config/forklift_nav2_oru_test_foxy.yaml#L205) / global [`:297`](../config/forklift_nav2_oru_test_foxy.yaml#L297) → `5.0`
+- local [`:206`](../config/forklift_nav2_oru_test_foxy.yaml#L206) / global [`:302`](../config/forklift_nav2_oru_test_foxy.yaml#L302) → `5.0`
 
 **怎么改**：想让车更敢贴近通过窄口，**增大** `cost_scaling_factor`（如 5→8）；想更躲着走则减小。配合 `inflation_radius` 一起看。
 
@@ -168,7 +179,55 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 - **costmap 默认走严档:`costmap_message_type: costmap_raw` + `costmap_topic: /local_costmap/costmap_raw` + `footprint_collision_cost_threshold: 253`**。原始 0–254 刻度下,阈值 253 表示 footprint 压到 inscribed(253)/lethal(254)/unknown(255) 就停,比之前 OccupancyGrid+100（只在真障碍格才停）**更早停、更保守**,适合上车。
   - 要更宽松（只在真撞上才停,误停少）:`costmap_message_type:=occupancy_grid costmap_topic:=/local_costmap/costmap footprint_collision_cost_threshold:=100`。
   - 阈值越低越严越早停;太低会在远处膨胀圈就误停。
-- costmap 缺失/超时/空/截断 → 输出停车并在 `/forklift/safety_gate/status` 写原因（`costmap missing` / `costmap timeout` / `costmap invalid: ...`）。要临时关掉这层兜底:`costmap_monitor_enabled:=false`、`collision_check_enabled:=false`（**真车不建议关**）。
+- costmap 缺失/超时/空/截断 → 输出停车并在 `/forklift/safety_gate/status` 写原因（`costmap missing` / `costmap timeout` / `costmap invalid: ...`）。
+
+### 7.2 安全闸"挂了"的临时关闭方案（车照常能跑）
+
+> ⚠️ **仅用于现场调试**：安全闸误停（明明没障碍却一直停车 / costmap 偶发超时把车卡住 / footprint 没标定好导致误碰撞）时,用它先把车跑起来定位问题。**真车正式运行务必保持全开。**
+
+#### 默认状态 & 怎么确认当前开/关
+
+- **默认全开**：三个开关 `safety_enabled` / `safety_collision_check_enabled` / `safety_costmap_monitor_enabled` **默认值都是 `true`**。正常 `ros2 launch ... forklift_navigation.launch.py` **不带任何 `safety_*:=false`,安全闸就是满档开启**（碰撞检查 + costmap 兜底 + 限幅全在）。只有在启动命令里**显式加** `safety_*:=false` 才会关。
+- **怎么看运行中到底开没开**——看状态话题：
+  ```bash
+  ros2 topic echo /forklift/safety_gate/status
+  ```
+  | 显示 | 含义 |
+  |---|---|
+  | `raw command` | 闸**全开**且放行(正常行驶中) |
+  | `bypass` | 被 `safety_enabled:=false` **旁路**(否决全关、只剩转发+限幅) |
+  | `collision ...` / `costmap timeout` / `collision pose missing` | 闸**开着且正在拦车**(在停车) |
+  | `waiting for first command` | 闸开着、还没收到运动命令(空闲) |
+
+  另:`ros2 node info /safety_command_gate` 能看到节点在不在、订了哪些话题。
+
+这些开关已由顶层 `forklift_navigation.launch.py` 转发给安全闸（之前没转发,只在单独启动闸节点时才有效——已修）。都是 **launch 参数**,放进你的启动命令/启动脚本即可,**不用改代码、不用重新编译**。
+
+**全套档位（从"留兜底"到"全关"）：**
+
+| 现象 | 加这个 launch 参数 | 效果 |
+|---|---|---|
+| footprint 误判碰撞、贴边就停 | `safety_collision_check_enabled:=false` | 只关 footprint 扫掠碰撞否决,**其余兜底保留**（超时/急停/限幅仍在）。最克制,**首选**。 |
+| costmap 偶发超时/缺失把车卡死 | `safety_costmap_monitor_enabled:=false` | 只关 costmap 缺失/超时停车 |
+| 安全闸整体逻辑可疑、要先跑通 | `safety_enabled:=false` | **旁路模式**：闸仍在线、仍转发 `control_cmd_raw→control_cmd`、**仍做速度/rpm 限幅**,但跳过所有否决（碰撞/超时/方向）。车能正常跑,限幅保命。 |
+
+**最彻底的"全关但车还能跑"（三个一起）：**
+
+```bash
+ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
+  use_sim_command_bridge:=false \
+  safety_enabled:=false \
+  safety_collision_check_enabled:=false \
+  safety_costmap_monitor_enabled:=false
+```
+
+此时安全闸=纯转发+限幅管道,任何 costmap/footprint/定位问题都不会再停车。
+
+> **不要用 `use_safety_command_gate:=false` 来"关安全闸"**：那会**整个不启动闸节点**,于是没人把 `/forklift/control_cmd_raw` 转成 `/forklift/control_cmd`,**车反而完全不动**。要"关闭但能跑"一定用上面的 `safety_enabled:=false`（闸在线、只旁路否决）。
+
+**验证关掉生效**：`ros2 topic echo /forklift/safety_gate/status` 应显示 `bypass`（`safety_enabled:=false` 时）或 `raw command`（只关单项时）,不再是 `collision ...` / `costmap timeout`。
+
+**恢复**：去掉这些参数（默认全 `true`）重启即恢复满档安全。
 
 ---
 

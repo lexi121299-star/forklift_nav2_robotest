@@ -41,6 +41,30 @@ def default_bt_xml_from_params(params_file, nav2_bt_navigator_share):
     return os.path.join(nav2_bt_navigator_share, 'behavior_trees', bt_xml)
 
 
+def footprint_from_params(params_file):
+    """Pull the physical footprint out of the Nav2 yaml's local_costmap.
+
+    The safety gate must use the SAME physical footprint as the local costmap
+    (controller collision check). Reading it from the yaml keeps the footprint a
+    single source of truth there instead of a third hand-edited copy in the gate
+    launch file. Returns '' on any failure so the gate falls back to its own
+    default.
+    """
+    try:
+        with open(params_file, 'r') as stream:
+            params = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError):
+        return ''
+
+    lc_params = (
+        params.get('local_costmap', {})
+        .get('local_costmap', {})
+        .get('ros__parameters', {})
+    )
+    footprint = lc_params.get('footprint')
+    return footprint if isinstance(footprint, str) and footprint.strip() else ''
+
+
 def generate_launch_description():
     package_share = get_package_share_directory('forklift_nav2_demo')
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
@@ -82,6 +106,10 @@ def generate_launch_description():
     safety_max_recovery_velocity_mps = LaunchConfiguration('safety_max_recovery_velocity_mps')
     safety_max_recovery_angular_velocity_radps = LaunchConfiguration(
         'safety_max_recovery_angular_velocity_radps')
+    safety_enabled = LaunchConfiguration('safety_enabled')
+    safety_collision_check_enabled = LaunchConfiguration('safety_collision_check_enabled')
+    safety_costmap_monitor_enabled = LaunchConfiguration('safety_costmap_monitor_enabled')
+    safety_footprint = LaunchConfiguration('safety_footprint')
     sim_ready_timeout = LaunchConfiguration('sim_ready_timeout')
     rmw_implementation = LaunchConfiguration('rmw_implementation')
     use_composition = LaunchConfiguration('use_composition')
@@ -130,15 +158,18 @@ def generate_launch_description():
 
     nav2_launch = OpaqueFunction(function=launch_nav2)
 
-    safety_command_gate = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('forklift_safety'),
-                'launch',
-                'safety_command_gate.launch.py')),
-        condition=IfCondition(use_safety_command_gate),
-        launch_arguments={
+    def launch_safety_gate(context, *args, **kwargs):
+        # Footprint: explicit safety_footprint wins; else auto-sync from the
+        # yaml's local_costmap footprint; else the gate launch file's own default.
+        footprint = safety_footprint.perform(context).strip()
+        if not footprint:
+            footprint = footprint_from_params(nav2_params_file.perform(context))
+
+        launch_arguments = {
             'use_sim_time': use_sim_time,
+            'enabled': safety_enabled,
+            'collision_check_enabled': safety_collision_check_enabled,
+            'costmap_monitor_enabled': safety_costmap_monitor_enabled,
             'raw_command_topic': safety_raw_command_topic,
             'gated_command_topic': safety_gated_command_topic,
             'recovery_twist_topic': safety_recovery_twist_topic,
@@ -154,8 +185,21 @@ def generate_launch_description():
             'rear_axle_x_offset': safety_rear_axle_x_offset,
             'pivot_steering_angle_rad': bridge_pivot_steering_angle_rad,
             'control_rate_hz': bridge_control_rate_hz,
-        }.items(),
-    )
+        }
+        if footprint:
+            launch_arguments['footprint'] = footprint
+
+        return [IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('forklift_safety'),
+                    'launch',
+                    'safety_command_gate.launch.py')),
+            condition=IfCondition(use_safety_command_gate),
+            launch_arguments=launch_arguments.items(),
+        )]
+
+    safety_command_gate = OpaqueFunction(function=launch_safety_gate)
 
     rviz = Node(
         package='rviz2',
@@ -250,6 +294,32 @@ def generate_launch_description():
         DeclareLaunchArgument('safety_recovery_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('safety_max_recovery_velocity_mps', default_value='0.10'),
         DeclareLaunchArgument('safety_max_recovery_angular_velocity_radps', default_value='0.30'),
+        DeclareLaunchArgument(
+            'safety_enabled',
+            default_value='true',
+            description=(
+                'Safety gate veto master switch. false = bypass (gate still '
+                'relays /forklift/control_cmd_raw to /forklift/control_cmd and '
+                'clamps velocity/rpm, but skips collision/stop vetoes). '
+                'TEMPORARY debug use only; real vehicle keeps true.')),
+        DeclareLaunchArgument(
+            'safety_collision_check_enabled',
+            default_value='true',
+            description=(
+                'false disables the footprint-sweep collision veto only. '
+                'Real vehicle keeps true.')),
+        DeclareLaunchArgument(
+            'safety_costmap_monitor_enabled',
+            default_value='true',
+            description=(
+                'false disables the costmap missing/timeout stop. '
+                'Real vehicle keeps true.')),
+        DeclareLaunchArgument(
+            'safety_footprint',
+            default_value='',
+            description=(
+                'Override the safety gate footprint. Empty = auto-sync from the '
+                'Nav2 yaml local_costmap footprint (single source of truth).')),
         DeclareLaunchArgument(
             'sim_ready_timeout',
             default_value='0.0',
