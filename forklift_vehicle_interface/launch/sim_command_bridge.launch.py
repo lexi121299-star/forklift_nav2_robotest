@@ -13,6 +13,7 @@ def generate_launch_description():
     pivot_steering_angle_rad = LaunchConfiguration('pivot_steering_angle_rad')
     pivot_steering_tolerance_rad = LaunchConfiguration('pivot_steering_tolerance_rad')
     pivot_turn_radius = LaunchConfiguration('pivot_turn_radius')
+    pivot_angular_velocity_radps = LaunchConfiguration('pivot_angular_velocity_radps')
     command_timeout_sec = LaunchConfiguration('command_timeout_sec')
     control_rate_hz = LaunchConfiguration('control_rate_hz')
     cmd_vel_topic = LaunchConfiguration('cmd_vel_topic')
@@ -33,6 +34,7 @@ def generate_launch_description():
             'pivot_steering_angle_rad': pivot_steering_angle_rad,
             'pivot_steering_tolerance_rad': pivot_steering_tolerance_rad,
             'pivot_turn_radius': pivot_turn_radius,
+            'pivot_angular_velocity_radps': pivot_angular_velocity_radps,
             'command_timeout_sec': command_timeout_sec,
             'control_rate_hz': control_rate_hz,
             'cmd_vel_topic': cmd_vel_topic,
@@ -50,6 +52,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pivot_steering_angle_rad', default_value='1.5707963267948966'),
         DeclareLaunchArgument('pivot_steering_tolerance_rad', default_value='0.03'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
+        DeclareLaunchArgument('pivot_angular_velocity_radps', default_value='0.5'),
         DeclareLaunchArgument('command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel'),

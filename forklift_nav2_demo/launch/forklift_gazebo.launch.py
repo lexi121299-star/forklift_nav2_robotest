@@ -30,6 +30,8 @@ def generate_launch_description():
     bridge_pivot_steering_tolerance_rad = LaunchConfiguration(
         'bridge_pivot_steering_tolerance_rad')
     bridge_pivot_turn_radius = LaunchConfiguration('bridge_pivot_turn_radius')
+    bridge_pivot_angular_velocity_radps = LaunchConfiguration(
+        'bridge_pivot_angular_velocity_radps')
     bridge_command_timeout_sec = LaunchConfiguration('bridge_command_timeout_sec')
     bridge_control_rate_hz = LaunchConfiguration('bridge_control_rate_hz')
     bridge_cmd_vel_topic = LaunchConfiguration('bridge_cmd_vel_topic')
@@ -148,6 +150,7 @@ def generate_launch_description():
             'pivot_steering_angle_rad': bridge_pivot_steering_angle_rad,
             'pivot_steering_tolerance_rad': bridge_pivot_steering_tolerance_rad,
             'pivot_turn_radius': bridge_pivot_turn_radius,
+            'pivot_angular_velocity_radps': bridge_pivot_angular_velocity_radps,
             'command_timeout_sec': bridge_command_timeout_sec,
             'control_rate_hz': bridge_control_rate_hz,
             'cmd_vel_topic': bridge_cmd_vel_topic,
@@ -183,6 +186,7 @@ def generate_launch_description():
             default_value='1.5707963267948966'),
         DeclareLaunchArgument('bridge_pivot_steering_tolerance_rad', default_value='0.03'),
         DeclareLaunchArgument('bridge_pivot_turn_radius', default_value='0.6'),
+        DeclareLaunchArgument('bridge_pivot_angular_velocity_radps', default_value='0.5'),
         DeclareLaunchArgument('bridge_command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('bridge_control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument(

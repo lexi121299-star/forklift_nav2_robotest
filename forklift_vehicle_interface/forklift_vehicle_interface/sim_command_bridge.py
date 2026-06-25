@@ -28,6 +28,7 @@ class SimCommandBridge(Node):
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('pivot_steering_tolerance_rad', 0.03)
         self.declare_parameter('pivot_turn_radius', 0.6)
+        self.declare_parameter('pivot_angular_velocity_radps', 0.5)
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
@@ -53,7 +54,9 @@ class SimCommandBridge(Node):
                 self._pivot_steering_angle_rad,
             ),
         )
-        self._pivot_turn_radius = self._positive_param('pivot_turn_radius', 0.6)
+        self._pivot_angular_velocity_radps = self._positive_param(
+            'pivot_angular_velocity_radps', 0.5
+        )
         self._command_timeout_sec = self._positive_param('command_timeout_sec', 0.5)
         self._cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
         self._twist_fallback_topic = str(self.get_parameter('twist_fallback_topic').value)
@@ -157,7 +160,11 @@ class SimCommandBridge(Node):
     ) -> SetEmergencyStop.Response:
         self._emergency_stop = bool(request.emergency_stop)
         response.success = True
-        response.message = 'emergency stop enabled' if self._emergency_stop else 'emergency stop cleared'
+        response.message = (
+            'emergency stop enabled'
+            if self._emergency_stop
+            else 'emergency stop cleared'
+        )
         self.get_logger().warning(response.message)
         return response
 
@@ -194,6 +201,13 @@ class SimCommandBridge(Node):
             return self._fallback_twist_or_stop(twist, 'command timeout')
         if self._emergency_stop:
             return twist, 'emergency stop'
+        return self._twist_from_command(command)
+
+    def _twist_from_command(
+        self,
+        command: ForkliftControlCommand,
+    ) -> Tuple[Twist, str]:
+        twist = Twist()
         if not command.enable:
             return twist, 'command disabled'
         if command.brake:
@@ -209,9 +223,9 @@ class SimCommandBridge(Node):
             min(self._max_steering_angle_rad, command.steering_angle_rad),
         )
         twist.linear.x = direction * speed
-        if self._is_pivot_turn(speed, steering):
+        if self._is_pivot_turn(steering):
             twist.linear.x = 0.0
-            twist.angular.z = direction * speed / self._pivot_turn_radius
+            twist.angular.z = direction * self._pivot_angular_velocity_radps
             if steering < 0.0:
                 twist.angular.z *= -1.0
         else:
@@ -246,8 +260,8 @@ class SimCommandBridge(Node):
         )
         return twist, 'twist fallback'
 
-    def _is_pivot_turn(self, speed: float, steering: float) -> bool:
-        if not self._allow_pivot_turn or speed <= 1e-6:
+    def _is_pivot_turn(self, steering: float) -> bool:
+        if not self._allow_pivot_turn:
             return False
         return (
             abs(steering)
