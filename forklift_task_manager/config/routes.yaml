@@ -1,0 +1,11 @@
+routes:
+  A_to_B:
+    loop: false
+    segments:
+      - {to: B, type: drive}
+  sparse_corner:
+    loop: false
+    waypoints:
+      - [-2.0, -0.5]
+      - [-0.3, -0.5]
+      - [-0.3, 1.2]

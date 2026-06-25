@@ -9,7 +9,7 @@ set -u
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 colcon --log-base log_foxy test \
-  --packages-select forklift_vehicle_interface forklift_safety forklift_oru_planner forklift_nav2_plugins \
+  --packages-select forklift_vehicle_interface forklift_safety forklift_task_manager forklift_oru_planner forklift_nav2_plugins \
   --build-base build_foxy \
   --install-base install_foxy \
   --event-handlers console_cohesion+

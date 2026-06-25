@@ -13,11 +13,13 @@
 3. 不做即时急停、不重启节点。急停只“观察 `/forklift/safety_gate/status` → 任务转 PAUSED”，且**不**调用 `/forklift_safety/set_emergency_stop`。
 4. 解除急停后需显式 `resume`，不自动续跑。
 5. Foxy / Python 3.8 兼容（镜像 forklift_safety 的工具链）。
+6. 不做段内路径加密/插值/平滑、不发布稠密 `nav_msgs/Path`。段内几何全交给 lattice planner；task_manager 只把稀疏点拆成相邻两点的段，逐段发 `NavigateToPose`。
 
 ## 交付物
 1. `forklift_task_manager` package（节点 + route_model + config/stations.yaml + config/routes.yaml + launch + pytest）。
 2. `forklift_msgs` 新增 `action/ExecuteRoute.action`、`srv/GoToStation.srv`、`msg/TaskStatus.msg`，并改 `CMakeLists.txt`（含 action_msgs 依赖）。
-3. pytest 覆盖：route/stations 加载校验、状态机迁移、段序列+loop、pause/resume/cancel、safety 急停→PAUSED、重试到 FAILED。mock action client，不依赖真 Nav2。
+3. **稀疏点列自动定朝向**：route_model 实现 §3b 的纯函数 `derive_segment_poses(waypoints)`——支持 route 给一串裸 `(x,y)` 点，拐点 yaw 自动 = 指向下一点方向，逐段下发。**不做段内插值/加密**（那是 lattice planner 的活）。
+4. pytest 覆盖：route/stations 加载校验、状态机迁移、段序列+loop、pause/resume/cancel、safety 急停→PAUSED、重试到 FAILED，以及 `derive_segment_poses`（§5 列的 6 个用例）。mock action client，不依赖真 Nav2。
 
 ## 验证（提交前自检）
 - `bash scripts/foxy_colcon_build.sh`（或仓库现有 Foxy 构建脚本）能构建 forklift_msgs + forklift_task_manager。

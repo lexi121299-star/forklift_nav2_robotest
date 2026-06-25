@@ -1,0 +1,11 @@
+stations:
+  A:
+    x: -2.0
+    y: -0.5
+    yaw: 0.0
+    frame_id: map
+  B:
+    x: 1.2
+    y: -0.5
+    yaw: 0.0
+    frame_id: map

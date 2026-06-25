@@ -64,7 +64,7 @@ P9  真车低速联调
 [ ] P8.3  动态障碍等待、重新规划、简单绕行
 [ ] P8.4  真车低速 safety acceptance 包
 [ ] P2.3  真车 vehicle_interface 实际 I/O：底盘控制、反馈、急停、watchdog（代码侧已补齐，待台架/真车验收）
-[ ] P7.1  task_manager 最小任务入口
+[x] P7.1  task_manager 最小任务入口
 ```
 
 调整原因：
@@ -1050,6 +1050,7 @@ forklift_task_manager/        # ament_python, Foxy / py3.8, 结构镜像 forklif
   config/
     stations.yaml              # 命名位姿：name -> {x, y, yaw, frame_id: map}
     routes.yaml                # 命名路线：name -> {loop: bool, segments: [{to, type, yaw?}]}
+                               #   或稀疏点列：name -> {loop: bool, waypoints: [[x,y] | [x,y,yaw], ...]}（见 §3b）
   launch/
     task_manager.launch.py
   test/
@@ -1112,6 +1113,29 @@ msg/TaskStatus.msg
 
 executor（每段）：取下一段 → 用段的 `{x,y,yaw}` 组 `NavigateToPose` goal（`frame_id=map`）→ 等结果 → 成功则下一段（`loop` 回首段）；失败 → 重试 `max_retries` 次 → 仍失败转 `FAILED`，`reason` 写明。**叉臂朝终点方向 = goal 的 yaw**：RViz 2D Goal Pose 拖出的朝向、或 stations.yaml 的 yaw，直接作为 goal 朝向；不需要额外运动指令。（更精细的「到点后原地对正」留到 P6.5a pivot primitive 之后再加一段 `type: pivot`。）
 
+**3b. 稀疏点列 → 自动推断拐点朝向（route_model 纯函数）**
+
+> 动机：用户想"只丢一串稀疏 `(x,y)` 点（绕厂区直行→直角→直行），系统自己定朝向并规划"。这里**把"插点/加密"和"定朝向"分清楚**：
+> - **段内加密由 planner 做，不在这里**：lattice planner（`GridBased` + `use_lattice_planner`，`lattice_step_distance≈0.20`）对单段 A→B 本就搜出稠密可行路径。task_manager **不做插值、不发稠密路径**，只负责把稀疏点拆成相邻两点的段，逐段下发 `NavigateToPose`，每段交给 lattice 自己加密。
+> - **拐点朝向由这里推断**：lattice 的 `lattice_goal_heading_cost_multiplier` 较低，goal 只给 `(x,y)` 不给 yaw 时它可能用 arc **把直角切成圆弧**而非干净的"直行+末端 pivot"。所以拐点必须带 yaw = 下一段行进方向。
+
+route_model 增加纯函数（便于单测，不碰 ROS）：
+
+```python
+def derive_segment_poses(waypoints, *, eps=1e-3) -> list[tuple[x, y, yaw]]:
+    # waypoints: [[x,y] | [x,y,yaw], ...]，frame_id=map
+    # 规则：
+    #   - 显式给了 yaw 的点：原样保留（拐点想要特定朝向时覆盖自动值）。
+    #   - 非末点且未给 yaw：yaw_i = atan2(y[i+1]-y[i], x[i+1]-x[i])  # 指向下一点
+    #   - 末点未给 yaw：沿用前一段 yaw（到点保持行进朝向）。
+    #   - 相邻点距离 < eps（重合/零长段）：剔除或报错（见下）。
+    #   - 单点 route：必须显式给 yaw，否则报错（无"下一点"可推朝向）。
+```
+
+- 校验（在 route_model 里做，加载即失败而非运行时崩）：① 至少 1 个 waypoint；② 单点必须带 yaw；③ 剔除与前一点重合（`<eps`）的点并告警，剔除后若 < 1 点则报错；④ 坐标可解析为 float、yaw（给了的话）是弧度。
+- executor 拿到 `derive_segment_poses` 的输出后，**逐个 `(x,y,yaw)` 作为 `NavigateToPose` goal**，行为与既有命名站点段完全一致（成功→下一段，`loop` 回首段，失败→重试→FAILED）。
+- `waypoints` 形式与 `segments`（命名站点）形式二选一；route 同时给两者视为配置错误。命名站点段不走自动朝向（站点 yaml 自带 yaw）。
+
 安全联动（被动观察，不抢权）：
 - 订阅 `/forklift/safety_gate/status`（`std_msgs/String`，safety gate 已发）。出现 `emergency stop` / `vehicle emergency stop` / `vehicle fault` 等停车原因 → 取消当前 Nav2 goal、状态转 `PAUSED`、`reason` 透传该字符串。
 - **解除后必须显式 `resume`**，不自动续跑。task_manager 永远不调用 `/forklift_safety/set_emergency_stop`，不替代急停。
@@ -1127,6 +1151,7 @@ executor（每段）：取下一段 → 用段的 `{x,y,yaw}` 组 `NavigateToPos
 **5. 测试与验收**
 
 - 单测（pytest，不依赖真 Nav2，mock action client）：route/stations 加载校验、状态机迁移、段序列推进与 loop 回绕、pause/resume/cancel、`safety_gate/status` 急停 → PAUSED、重试到 FAILED。
+- 单测（`derive_segment_poses` 纯函数，见 §3b）：直角点列拐点 yaw = atan2(下一点)（如 `[[0,0],[2,0],[2,2]]` → 拐点 (2,0) yaw=π/2）；显式 yaw 覆盖自动值；末点沿用前一段朝向；共线点列朝向不变（无伪 pivot）；重合点剔除/报错；单点无 yaw 报错。
 - 仿真验收（现有 sim bringup + RViz）：
   - [ ] RViz 2D Goal Pose 单点 → 走到点且**终点朝向正确（叉臂朝目标）**。
   - [ ] `go_to_station("B")` → 走到命名站点。
@@ -1138,6 +1163,24 @@ executor（每段）：取下一段 → 用段的 `{x,y,yaw}` 组 `NavigateToPos
 **6. 完成后回填**
 
 - 勾掉 §1 清单 `[ ] P7.1`，并在本节追加「执行记录」（日期 + 实测结果 + 遗留项），与 P2.3 / P8.2 记录风格一致。
+
+**P7.1 执行记录（2026-06-24）**
+
+- 新增 `forklift_task_manager` ament_python package：配置加载/校验、纯函数
+  `derive_segment_poses`、可注入 Nav2 adapter 的状态机、`ExecuteRoute` action、
+  `GoToStation`/pause/resume/cancel service、`/goal_pose` 与 safety status 订阅、
+  `/forklift/task_status` transient-local 状态发布、launch 和示例 stations/routes 配置。
+- 稀疏 `waypoints` 只保留原始点并逐点下发 `NavigateToPose`；未显式给 yaw 的非末点朝向下一点，
+  末点沿用最后一段方向；不插值、不加密、不发布 `nav_msgs/Path`。
+- `forklift_msgs` 新增 `ExecuteRoute.action`、`GoToStation.srv`、`TaskStatus.msg`，
+  rosidl 增加 `action_msgs` 依赖；Foxy interface show 与 launch `--show-args` 正常。
+- Foxy docker 实测：`bash scripts/foxy_colcon_build.sh` 7 packages 构建通过；
+  `bash scripts/foxy_colcon_test.sh` 共 124 tests、0 errors、0 failures，其中
+  `forklift_task_manager` 14 pytest 全过，覆盖 §5 指定的 6 个 `derive_segment_poses` 用例。
+- headless 启动后 `ros2 node info /forklift_task_manager` 仅有
+  `/forklift/task_status`、参数事件和 rosout publisher，没有 `/cmd_vel` 或
+  `ForkliftControlCommand` publisher；节点只持有 `NavigateToPose` action client。
+- 遗留项：按任务书未运行真车或仿真端到端验收，§5 的 RViz/Nav2 仿真检查仍留给人工/计划方。
 
 ## 10. P8: 建 forklift_safety
 
@@ -1670,7 +1713,7 @@ grep -E "ForkliftMpcController|OruGlobalPlanner|follow_path|Failed to make progr
     [x] 8.2-6 Foxy docker 端到端验收记录（gate 起停、急停锁定/解除、recovery 白名单、超时停车、限幅、costmap timeout、footprint collision）
 [ ] P8.3 动态障碍等待、重新规划、简单绕行
 [ ] P8.4 真车低速 safety acceptance 包
-[ ] P7.1 task_manager 最小任务入口
+[x] P7.1 task_manager 最小任务入口
 [ ] P10 motion planner lookup/primitives 加强
 [ ] P11 path smoother + constraint_extract
 [ ] P12 评估是否上完整 ORU QP-MPC

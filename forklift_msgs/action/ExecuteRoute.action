@@ -1,0 +1,10 @@
+string route_name
+bool loop
+---
+bool success
+string message
+---
+string current_segment
+int32 segment_index
+int32 segment_count
+float32 progress
