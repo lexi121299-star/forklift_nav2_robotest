@@ -352,7 +352,7 @@ sim URDF `forklift_nav2_demo/urdf/forklift_diff_drive.urdf.xacro` 是粗略替�
 | 整车长 | ~2.89（叉尖 -2.043↔+0.85） | 3.299 |
 
 - Gazebo diff_drive 只用 `wheel_separation`+`wheel_diameter`,所以 sim 自洽、历史 acceptance 作为**仿真**仍有效;但 controller/gate 现在按真车 0.937 轮距 / 1.4 轴距算,sim 车并没有这套几何,转向行为不会 1:1 迁移。若要用 sim 验真车参数,需同步 URDF 并重跑 acceptance。
-- safety gate footprint `[[0.843,0.58],...,[-2.043,0.58]]`（2.886×1.16）也是 sim 几何;真车 3.299×1.22,上真车前(P8.4)必须放大。
+- safety gate footprint `[[0.843,0.58],...,[-2.043,0.58]]`（2.886×1.16）也是 sim 几何;真车 3.299×1.22,上真车前(P8.4)必须放大。**(2026-06-24 更新)** footprint 已单源化:gate footprint 启动时从 yaml `local_costmap.footprint`(:201)自动同步(`cde7551`,见下方 P8.2 执行记录),所以**放大只改 yaml 一处**,gate/controller 自动跟随;具体改法见 `real_vehicle_tuning_guide.md` §2.1,闸门临时关闭见 §7.2。
 - **转向方式已确认(2026-06-24,厂家)**:真车是**后轮转向**(规格图纸 转向电机 YDZ48400A-G45 / 齿轮箱速比 45 / 转向齿轮 110/25 / 电转向 / 转弯半径 1760mm)。原地回转的实现方式 = **把转向角打到 90°,再发驱动转速**,Curtis 内部协调两驱动轮+后轮,车**绕两个驱动轮所在轴的中心**旋转。
   - 与现有模型一致,**无需改代码**:MPC `forklift_vehicle_model.cpp` pivot 时绕 `rear_axle_x_offset`(=驱动轴中心)旋转;`curtis_command_kinematics` pivot 时 `v_outer=ω·track/2`(驱动轮在中心 ±track/2);两边触发条件都是「转向角≥90°+给驱动速度」,且共用同一 `pivot_turn_radius`,彼此自洽。
   - **留台架标定项**:① `pivot_turn_radius`(现 0.6,是"速度→转速"增益,非旋转中心;MPC+gate+接口三处同值,标定时一起改)—— 90° + 已知 drive rpm 量实际 °/s 反推;② 非 pivot 正常转弯走自行车模型,真车后轮转向的转向方向语义可能与前轮转向相反,台架一并验。
@@ -1281,6 +1281,13 @@ P8.2 剩余缺口（2026-06-18 已补完 8.2-4/5/6，下列为已闭环状态 + 
 真车前遗留（不阻塞 P8.2 标记，但进 P8.4 前必须闭环）：
 
 - **drive_rpm 限幅**：gate 已对 `drive_rpm` 做 `|rpm|<=max_drive_rpm`（默认 2500）限幅，并把 `accel_time_sec`/`decel_time_sec` 缺省补成厂家建议值（5s/3s）。注意真车 0x203 驱动帧用的是 `drive_rpm` 不是 `velocity_mps`，所以 velocity→rpm 转换必须放在 gate **下游**（`curtis_vehicle_interface`，用已限好的 velocity_mps 算），否则限速会被绕过——归 P2.3。
+
+> **执行记录（2026-06-24/25）— footprint 单源化 + safety gate 运行期旁路开关。** 上车前为「一处改、全局生效」和「闸门挂了能临时绕过仍能跑」两个真车运维需求做了 launch 层插桩，并补了一整套上车文档：
+> - **footprint 单源化**：`forklift_navigation.launch.py` 加 `footprint_from_params()`，启动时从 `forklift_nav2_oru_test_foxy.yaml` 的 `local_costmap.footprint`（:201）读出，经 OpaqueFunction 注入 safety gate。以前 footprint 散在三处（local_costmap / controller / gate 默认值），现在 gate 自动跟随 yaml，**放大真车 footprint 只改 yaml 一处**（global_costmap 规划用 footprint :255 仍独立，概念不同——见指南 §2.1）。
+> - **运行期旁路开关**：plumb 了 `safety_enabled` / `safety_collision_check_enabled` / `safety_costmap_monitor_enabled` 三个 LaunchArgument 透传到 gate，默认全 `true`（行为与改动前完全一致）。闸门误停时可分级关闭（仅关碰撞检查 / 仅关 costmap 监控 / 全关旁路），车仍正常跑。**注意不要用 `use_safety_command_gate:=false` 来关——那会停掉整个 relay，车反而不动**（见指南 §7.2）。
+> - 验证：`footprint_from_params()` 实测从 yaml 正确解出 `[[0.843,0.58],…,[-2.043,0.58]]`，缺文件回空串；默认值保持原行为。提交 `cde7551`。
+> - 配套上车文档（`real_vehicle_tuning_guide.md`）：§1.5 坐标系/base_link/标定顺序（`2d938f0`）、§1.5.5/§1.5.6 TF 改法 + 视觉/定位职责划分（`fadf75b`）、§2.1 一次性改 footprint/膨胀、§7.2 安全闸临时关闭方案、§8 bring-up 清单加 odom 原点一致性预检（`a7c29d2`）。
+> - 遗留：footprint 单源化只解决「改一处」，真车几何放大（3.299×1.22）本身仍是 P8.4 标定项；§8.2-3 的 live 端到端抓日志仍未补。
 
 P8.3 最低标准：
 
