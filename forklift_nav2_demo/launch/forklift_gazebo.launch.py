@@ -38,12 +38,17 @@ def generate_launch_description():
     bridge_twist_fallback_topic = LaunchConfiguration('bridge_twist_fallback_topic')
     bridge_twist_fallback_timeout_sec = LaunchConfiguration(
         'bridge_twist_fallback_timeout_sec')
+    scan_self_filter_enabled = LaunchConfiguration('scan_self_filter_enabled')
+    scan_raw_topic = LaunchConfiguration('scan_raw_topic')
+    scan_filtered_topic = LaunchConfiguration('scan_filtered_topic')
 
     urdf_file = os.path.join(package_share, 'urdf', 'forklift_diff_drive.urdf.xacro')
     robot_description = ParameterValue(
         Command([
             'xacro ',
             urdf_file,
+            ' gazebo_scan_topic:=',
+            scan_raw_topic,
         ]),
         value_type=str,
     )
@@ -53,6 +58,8 @@ def generate_launch_description():
             urdf_file,
             ' gazebo_cmd_vel_topic:=',
             bridge_cmd_vel_topic,
+            ' gazebo_scan_topic:=',
+            scan_raw_topic,
         ]),
         value_type=str,
     )
@@ -159,6 +166,22 @@ def generate_launch_description():
         }.items(),
     )
 
+    scan_self_filter = Node(
+        package='forklift_nav2_demo',
+        executable='forklift_scan_self_filter',
+        name='forklift_scan_self_filter',
+        output='screen',
+        condition=IfCondition(scan_self_filter_enabled),
+        parameters=[{
+            'input_topic': scan_raw_topic,
+            'output_topic': scan_filtered_topic,
+            'sensor_x': 0.25,
+            'sensor_y': 0.0,
+            'sensor_yaw': 0.0,
+            'footprint': '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]',
+        }],
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'world',
@@ -170,6 +193,9 @@ def generate_launch_description():
         DeclareLaunchArgument('z_pose', default_value='0.05'),
         DeclareLaunchArgument('yaw', default_value='0.0'),
         DeclareLaunchArgument('gui', default_value='true'),
+        DeclareLaunchArgument('scan_self_filter_enabled', default_value='true'),
+        DeclareLaunchArgument('scan_raw_topic', default_value='/scan_raw'),
+        DeclareLaunchArgument('scan_filtered_topic', default_value='/scan'),
         DeclareLaunchArgument(
             'use_sim_command_bridge',
             default_value='false',
@@ -206,5 +232,6 @@ def generate_launch_description():
         bridge_robot_state_publisher,
         spawn_robot,
         bridge_spawn_robot,
+        scan_self_filter,
         sim_command_bridge,
     ])

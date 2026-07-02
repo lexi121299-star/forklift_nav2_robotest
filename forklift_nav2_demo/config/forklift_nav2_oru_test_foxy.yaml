@@ -140,12 +140,13 @@ controller_server:
       yaw_goal_tolerance: 0.25
       transform_tolerance: 0.2
       terminal_slowdown_distance: 0.6
-      # Terminal latch: once within both tolerances of the goal, stop and stay
-      # stopped (no re-solve/drift) until a new goal arrives. Keep
-      # goal_latch_yaw_tolerance aligned with general_goal_checker.yaw_goal_tolerance.
+      # Terminal latch must be no looser than the controller's own terminal
+      # tolerance.  A 0.25 m latch can stop FollowPath before Nav2 observes the
+      # goal as reached, leaving the action active and turning later goals into
+      # preemption requests against a controller that is still latched.
       goal_latch_enabled: true
-      goal_latch_xy_tolerance: 0.25
-      goal_latch_yaw_tolerance: 0.30
+      goal_latch_xy_tolerance: 0.08
+      goal_latch_yaw_tolerance: 0.25
       velocity_samples: 8
       steering_samples: 11
       preview_window_points: 10
@@ -191,7 +192,10 @@ local_costmap:
     ros__parameters:
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: odom
+      # Keep controller pose, FollowPath goal checker, and global plan in the
+      # same frame. Foxy otherwise compares the map-frame goal with an
+      # odom-frame robot pose and can hold a completed goal for 30 seconds.
+      global_frame: map
       robot_base_frame: base_link
       use_sim_time: True
       rolling_window: true

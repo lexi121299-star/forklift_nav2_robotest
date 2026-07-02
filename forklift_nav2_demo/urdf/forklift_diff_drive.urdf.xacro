@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="forklift_diff_drive">
   <xacro:arg name="gazebo_cmd_vel_topic" default="cmd_vel"/>
+  <xacro:arg name="gazebo_scan_topic" default="scan"/>
 
   <xacro:property name="wheel_radius" value="0.16"/>
   <xacro:property name="wheel_width" value="0.08"/>
@@ -261,7 +262,7 @@
       </ray>
       <plugin name="forklift_laserscan" filename="libgazebo_ros_ray_sensor.so">
         <ros>
-          <remapping>~/out:=scan</remapping>
+          <remapping>~/out:=$(arg gazebo_scan_topic)</remapping>
         </ros>
         <output_type>sensor_msgs/LaserScan</output_type>
         <frame_name>base_scan</frame_name>

@@ -101,8 +101,12 @@ def generate_launch_description():
     safety_raw_command_topic = LaunchConfiguration('safety_raw_command_topic')
     safety_gated_command_topic = LaunchConfiguration('safety_gated_command_topic')
     safety_recovery_twist_topic = LaunchConfiguration('safety_recovery_twist_topic')
+    safety_localization_topic = LaunchConfiguration('safety_localization_topic')
+    safety_localization_message_type = LaunchConfiguration(
+        'safety_localization_message_type')
     safety_command_timeout_sec = LaunchConfiguration('safety_command_timeout_sec')
     safety_recovery_timeout_sec = LaunchConfiguration('safety_recovery_timeout_sec')
+    safety_costmap_timeout_sec = LaunchConfiguration('safety_costmap_timeout_sec')
     safety_max_recovery_velocity_mps = LaunchConfiguration('safety_max_recovery_velocity_mps')
     safety_max_recovery_angular_velocity_radps = LaunchConfiguration(
         'safety_max_recovery_angular_velocity_radps')
@@ -173,8 +177,11 @@ def generate_launch_description():
             'raw_command_topic': safety_raw_command_topic,
             'gated_command_topic': safety_gated_command_topic,
             'recovery_twist_topic': safety_recovery_twist_topic,
+            'localization_topic': safety_localization_topic,
+            'localization_message_type': safety_localization_message_type,
             'command_timeout_sec': safety_command_timeout_sec,
             'recovery_timeout_sec': safety_recovery_timeout_sec,
+            'costmap_timeout_sec': safety_costmap_timeout_sec,
             'max_forward_velocity_mps': bridge_max_velocity_mps,
             'max_reverse_velocity_mps': '0.15',
             'max_recovery_velocity_mps': safety_max_recovery_velocity_mps,
@@ -290,8 +297,18 @@ def generate_launch_description():
             default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument('safety_gated_command_topic', default_value='/forklift/control_cmd'),
         DeclareLaunchArgument('safety_recovery_twist_topic', default_value='/cmd_vel'),
+        DeclareLaunchArgument('safety_localization_topic', default_value='/amcl_pose'),
+        DeclareLaunchArgument(
+            'safety_localization_message_type',
+            default_value='pose_with_covariance_stamped'),
         DeclareLaunchArgument('safety_command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('safety_recovery_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument(
+            'safety_costmap_timeout_sec',
+            default_value='1.5',
+            description=(
+                'Maximum local costmap age. Must exceed the 0.5 s nominal '
+                'period of the 2 Hz local costmap publisher.')),
         DeclareLaunchArgument('safety_max_recovery_velocity_mps', default_value='0.10'),
         DeclareLaunchArgument('safety_max_recovery_angular_velocity_radps', default_value='0.30'),
         DeclareLaunchArgument(

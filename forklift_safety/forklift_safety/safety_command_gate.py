@@ -7,7 +7,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 import rclpy
 from forklift_msgs.msg import ForkliftControlCommand, ForkliftFaultState, ForkliftVehicleState
 from forklift_msgs.srv import SetEmergencyStop
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -420,6 +420,7 @@ class SafetyCommandGate(Node):
         self.declare_parameter('vehicle_state_topic', '/forklift/vehicle_state')
         self.declare_parameter('fault_state_topic', '/forklift/fault_state')
         self.declare_parameter('localization_topic', '/odom')
+        self.declare_parameter('localization_message_type', 'odometry')
         self.declare_parameter('costmap_topic', '/local_costmap/costmap_raw')
         self.declare_parameter('costmap_message_type', 'costmap_raw')
         self.declare_parameter('status_topic', '/forklift/safety_gate/status')
@@ -468,6 +469,8 @@ class SafetyCommandGate(Node):
         self._vehicle_state_topic = str(self.get_parameter('vehicle_state_topic').value)
         self._fault_state_topic = str(self.get_parameter('fault_state_topic').value)
         self._localization_topic = str(self.get_parameter('localization_topic').value)
+        self._localization_message_type = str(
+            self.get_parameter('localization_message_type').value).lower()
         self._costmap_topic = str(self.get_parameter('costmap_topic').value)
         self._costmap_message_type = str(
             self.get_parameter('costmap_message_type').value).lower()
@@ -582,7 +585,18 @@ class SafetyCommandGate(Node):
                 10,
             )
         if self._localization_topic:
-            self.create_subscription(Odometry, self._localization_topic, self._on_localization, 10)
+            if self._localization_message_type in {
+                'pose_with_covariance_stamped', 'amcl_pose'
+            }:
+                self.create_subscription(
+                    PoseWithCovarianceStamped,
+                    self._localization_topic,
+                    self._on_localization,
+                    10,
+                )
+            else:
+                self.create_subscription(
+                    Odometry, self._localization_topic, self._on_localization, 10)
         if self._costmap_topic:
             if self._costmap_message_type in {'costmap_raw', 'nav2_costmap'}:
                 if Nav2Costmap is None:
@@ -641,7 +655,7 @@ class SafetyCommandGate(Node):
         self._last_fault_state = msg
         self._last_fault_state_time = self.get_clock().now()
 
-    def _on_localization(self, msg: Odometry) -> None:
+    def _on_localization(self, msg) -> None:
         self._last_localization_time = self.get_clock().now()
         pose = msg.pose.pose
         self._last_pose = (

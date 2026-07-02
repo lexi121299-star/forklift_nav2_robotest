@@ -10,6 +10,8 @@ def generate_launch_description():
     raw_command_topic = LaunchConfiguration('raw_command_topic')
     gated_command_topic = LaunchConfiguration('gated_command_topic')
     recovery_twist_topic = LaunchConfiguration('recovery_twist_topic')
+    localization_topic = LaunchConfiguration('localization_topic')
+    localization_message_type = LaunchConfiguration('localization_message_type')
     costmap_topic = LaunchConfiguration('costmap_topic')
     costmap_message_type = LaunchConfiguration('costmap_message_type')
     command_timeout_sec = LaunchConfiguration('command_timeout_sec')
@@ -45,11 +47,16 @@ def generate_launch_description():
         DeclareLaunchArgument('raw_command_topic', default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument('gated_command_topic', default_value='/forklift/control_cmd'),
         DeclareLaunchArgument('recovery_twist_topic', default_value='/cmd_vel'),
+        DeclareLaunchArgument('localization_topic', default_value='/odom'),
+        DeclareLaunchArgument('localization_message_type', default_value='odometry'),
         DeclareLaunchArgument('costmap_topic', default_value='/local_costmap/costmap_raw'),
         DeclareLaunchArgument('costmap_message_type', default_value='costmap_raw'),
         DeclareLaunchArgument('command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('recovery_timeout_sec', default_value='0.5'),
-        DeclareLaunchArgument('costmap_timeout_sec', default_value='0.5'),
+        # local_costmap publishes at 2 Hz (0.5 s nominal period).  The watchdog
+        # needs scheduling margin; matching the nominal period causes false
+        # timeouts on every slightly late update.
+        DeclareLaunchArgument('costmap_timeout_sec', default_value='1.5'),
         DeclareLaunchArgument('costmap_monitor_enabled', default_value='true'),
         DeclareLaunchArgument('collision_check_enabled', default_value='true'),
         DeclareLaunchArgument(
@@ -88,6 +95,8 @@ def generate_launch_description():
                 'raw_command_topic': raw_command_topic,
                 'gated_command_topic': gated_command_topic,
                 'recovery_twist_topic': recovery_twist_topic,
+                'localization_topic': localization_topic,
+                'localization_message_type': localization_message_type,
                 'costmap_topic': costmap_topic,
                 'costmap_message_type': costmap_message_type,
                 'command_timeout_sec': command_timeout_sec,

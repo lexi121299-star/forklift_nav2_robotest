@@ -73,4 +73,10 @@ install(
   RENAME spawn_forklift_entity
 )
 
+install(
+  PROGRAMS scripts/forklift_scan_self_filter.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME forklift_scan_self_filter
+)
+
 ament_package()
