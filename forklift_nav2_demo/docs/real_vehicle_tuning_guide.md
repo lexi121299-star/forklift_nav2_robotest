@@ -10,7 +10,7 @@
 
 > **生效方式**:这些都是 yaml 参数,**改完不用 colcon 编译**,但 costmap / 控制器在 `configure` 时读参数,所以要**重启导航栈**(或对应节点 deactivate→cleanup→configure→activate)才生效。控制器逻辑改动(`.cpp`)才需要 `colcon build`(在 Foxy docker 内)。
 
-> **实车 vs 仿真**:上车时务必 `use_sim_command_bridge:=false`,不要起 sim 桥;一切运动走 `/forklift/control_cmd`(`publish_control_cmd: true`)。详见第 8 节。
+> **实车 vs 仿真**:实车只使用 `foxy-real` 分支的 `scripts/start_foxy_real.sh`，不要复用会启动 Gazebo 的仿真总入口。一切运动走安全链路 `/forklift/control_cmd_raw → safety_command_gate → /forklift/control_cmd → Curtis CAN`。详见第 8 节。
 
 > **DDS 中间件**:镜像默认已切到 **CycloneDDS**(Foxy FastRTPS 在 `autostart` 启动时会间歇性崩掉随机 lifecycle 节点)。Docker 怎么改、ARM 注意事项、回退方式见 **第 10 节**——上车前必读。
 
@@ -302,7 +302,7 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 
 #### 默认状态 & 怎么确认当前开/关
 
-- **默认全开**：三个开关 `safety_enabled` / `safety_collision_check_enabled` / `safety_costmap_monitor_enabled` **默认值都是 `true`**。正常 `ros2 launch ... forklift_navigation.launch.py` **不带任何 `safety_*:=false`,安全闸就是满档开启**（碰撞检查 + costmap 兜底 + 限幅全在）。只有在启动命令里**显式加** `safety_*:=false` 才会关。
+- **默认全开**：真车入口 `forklift_real_navigation.launch.py` 明确把 `enabled` / `collision_check_enabled` / `costmap_monitor_enabled` 都设为 `true`（碰撞检查 + costmap 兜底 + 限幅全在）。当前 `start_foxy_real.sh` **不暴露关闭参数**，避免现场误操作。
 - **怎么看运行中到底开没开**——看状态话题：
   ```bash
   ros2 topic echo /forklift/safety_gate/status
@@ -316,7 +316,7 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 
   另:`ros2 node info /safety_command_gate` 能看到节点在不在、订了哪些话题。
 
-这些开关已由顶层 `forklift_navigation.launch.py` 转发给安全闸（之前没转发,只在单独启动闸节点时才有效——已修）。都是 **launch 参数**,放进你的启动命令/启动脚本即可,**不用改代码、不用重新编译**。
+以下开关是安全门节点本身支持的调试能力，但真车顶层 launch 当前故意不透传。若确需定位误停，应先保持 `VEHICLE_DRY_RUN=true`，单独启动/检查安全门；不要为了旁路安全门改用仿真 launch。
 
 **全套档位（从"留兜底"到"全关"）：**
 
@@ -326,17 +326,7 @@ global_costmap 现已加回 `obstacle_layer`（[`:257`](../config/forklift_nav2_
 | costmap 偶发超时/缺失把车卡死 | `safety_costmap_monitor_enabled:=false` | 只关 costmap 缺失/超时停车 |
 | 安全闸整体逻辑可疑、要先跑通 | `safety_enabled:=false` | **旁路模式**：闸仍在线、仍转发 `control_cmd_raw→control_cmd`、**仍做速度/rpm 限幅**,但跳过所有否决（碰撞/超时/方向）。车能正常跑,限幅保命。 |
 
-**最彻底的"全关但车还能跑"（三个一起）：**
-
-```bash
-ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
-  use_sim_command_bridge:=false \
-  safety_enabled:=false \
-  safety_collision_check_enabled:=false \
-  safety_costmap_monitor_enabled:=false
-```
-
-此时安全闸=纯转发+限幅管道,任何 costmap/footprint/定位问题都不会再停车。
+> 真车入口目前没有“一条命令全关安全门”的通道。需要这种调试时先停真车输出、切回 `VEHICLE_DRY_RUN=true`，确认问题和风险后再修改专用真车 launch；禁止用 `forklift_navigation.launch.py` 代替，因为它是仿真入口并会启动 Gazebo。
 
 > **不要用 `use_safety_command_gate:=false` 来"关安全闸"**：那会**整个不启动闸节点**,于是没人把 `/forklift/control_cmd_raw` 转成 `/forklift/control_cmd`,**车反而完全不动**。要"关闭但能跑"一定用上面的 `safety_enabled:=false`（闸在线、只旁路否决）。
 
@@ -348,16 +338,105 @@ ros2 launch forklift_nav2_demo forklift_navigation.launch.py \
 
 ## 8. 实车 bring-up 检查清单（一切走 vehicle command）
 
+### 8.1 `dry_run` 到底做什么
+
+真车脚本默认 `VEHICLE_DRY_RUN=true`，这是**接口演练模式，不操作真车**：
+
+- 不打开 `can0`，不发送、接收任何 CAN 报文；
+- 仍订阅安全门输出 `/forklift/control_cmd`；
+- 仍把指令编码成准备发送的 Curtis `0x203` / `0x303` / `0x403`，但只打印 `Curtis TX dry-run` 日志；
+- 仍发布 `/odom` 和 TF，但没有真实 CAN feedback，里程计保持初始化的静止零值，**不能拿来验证真实里程计或定位闭环**。
+
+`VEHICLE_DRY_RUN=false` 时，`curtis_vehicle_interface` 在节点构造阶段立即打开指定的 SocketCAN 口，并开始：
+
+- 20 Hz 发送 `0x203` / `0x303` / `0x403`；
+- 50 Hz 轮询 Curtis feedback；
+- 从 feedback 发布 `/odom`、TF、车辆状态、IO 和故障状态。
+
+> ⚠️ **不会等待导航 goal 才开始发 CAN。** 还没收到第一条 `/forklift/control_cmd` 时，接口也会以 20 Hz 周期发送制动/停止帧；命令超过 0.5 s、急停或非 auto 模式时同样发送停止帧。
+
+### 8.2 vehicle interface 与 Curtis interface 的关系
+
+它们不是两个串联节点。`forklift_vehicle_interface` 是软件包，包内提供两个不同运行环境的适配节点：
+
+```text
+forklift_vehicle_interface（软件包）
+├── curtis_vehicle_interface（真车：ForkliftControlCommand ↔ SocketCAN/Curtis）
+└── sim_command_bridge（仿真：ForkliftControlCommand → Gazebo Twist）
+```
+
+真车实际命令链路：
+
+```text
+Nav2 controller
+  → /forklift/control_cmd_raw
+  → safety_command_gate
+  → /forklift/control_cmd
+  → curtis_vehicle_interface
+  → SocketCAN can0
+  → Curtis 控制器
+```
+
+真车入口只启动 `curtis_vehicle_interface`，不会启动 `sim_command_bridge`。
+
+### 8.3 真车脚本启动哪些组件
+
+`scripts/start_foxy_real.sh` 启动：
+
+- `robot_state_publisher`；
+- `curtis_vehicle_interface`；
+- `safety_command_gate`；
+- Nav2（AMCL、地图服务器、planner、controller、BT navigator 等）；
+- RViz（默认开启，可用 `USE_RVIZ=false` 关闭）。
+
+它**不启动** Gazebo、`sim_command_bridge`、仿真激光自过滤节点，也**暂不启动** `forklift_task_manager`。
+
+`forklift_task_manager` 是可选的站点/路线任务调度层，只向 Nav2 的 `NavigateToPose` action 发稀疏任务点，不直接发布底盘命令。手动在 RViz 发 A→B goal 不需要它；执行 `stations.yaml` / `routes.yaml` 的多段任务时才需要。主栈运行后，可在另一终端启动：
+
+```bash
+docker exec -it forklift-foxy-real bash -lc '
+  source /opt/ros/foxy/setup.bash
+  source /workspace/install_foxy/setup.bash
+  ros2 launch forklift_task_manager task_manager.launch.py use_sim_time:=false
+'
+```
+
+### 8.4 什么时候允许真实发送 CAN
+
+先在 `dry_run=true` 下完成以下检查：
+
+- [ ] `can0` 波特率、接线、终端电阻正确，`ip -details link show can0` 显示接口已 UP；
+- [ ] `candump can0` 能稳定看到符合协议的 Curtis feedback；
+- [ ] 硬件急停、驻车/制动和人工接管有效，第一次测试最好架空驱动轮；
+- [ ] dry-run 日志中的方向、转角、RPM、使能和停止帧编码正确；
+- [ ] `/scan`、真实 `/odom`、TF、local costmap 和安全门状态正常；
+- [ ] 首测场地清空，控制器速度/加速度已压低。
+
+全部通过后才进入 live CAN：
+
+```bash
+git switch foxy-real
+VEHICLE_DRY_RUN=false CAN_INTERFACE=can0 ./scripts/start_foxy_real.sh
+```
+
+启动日志必须出现 `curtis_vehicle_interface opened SocketCAN can0`。若打不开接口，节点应直接启动失败，不要绕过错误继续测试。停止整套真车栈：
+
+```bash
+./scripts/stop_foxy_real.sh
+```
+
+### 8.5 系统级检查清单
+
 0. **DDS 必须是 CycloneDDS**（`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`）——否则 FastRTPS 会在 `autostart` 启动时间歇性崩掉随机 lifecycle 节点（amcl/bt_navigator/recoveries）。镜像与改法见 §10。
 0.5. ⚠️ **坐标原点一致性——上车前必须和定位同事【确认而非通知】**（详见 §1.5.6）：
    - [ ] 双方约定 **base_link 原点 = 后驱动/转向轴中心,+x 前、+y 左**。
    - [ ] **定位同事发的里程计 `odom→base_footprint` 确实以这个后轴点为参考**——不一致会让 AMCL 发散,现象像"定位坏了"实则原点错位。**这一条必须当面对齐,不能默认。**
    - [ ] 你这边:footprint 已按后轴量（§2.1）、`rear_axle_x_offset` 已设（后轴上=0,controller [`:132`](../config/forklift_nav2_oru_test_foxy.yaml#L132) + lattice [`:372`](../config/forklift_nav2_oru_test_foxy.yaml#L372)）。
    - [ ] `use_sim_time:=false`、TF 树 `view_frames` 连通单根、RViz 里 scan 贴墙（§1.5.5 验证）。
-1. `use_sim_command_bridge:=false`——**不要**起 sim 桥（桥只是仿真把 `/forklift/control_cmd` 翻成 `/cmd_vel` 喂 Gazebo）。
-2. 不要设置 `twist_fallback_topic`（保持空）——这是唯一能让系统消费 `/cmd_vel` 的开关。
-3. `publish_control_cmd: true`（[`:179`](../config/forklift_nav2_oru_test_foxy.yaml#L179)）、`control_cmd_topic: "/forklift/control_cmd"`（[`:180`](../config/forklift_nav2_oru_test_foxy.yaml#L180)）。
-4. 起 `curtis_vehicle_interface` 消费 `/forklift/control_cmd`（编码 Curtis CAN）。
+1. 使用 `foxy-real` 的 `scripts/start_foxy_real.sh`，不要用仿真 `forklift_navigation.launch.py`；真车 launch 不包含 Gazebo 和 sim bridge。
+2. 第一次只用默认 `VEHICLE_DRY_RUN=true`，确认编码和全 ROS 链路后才按 §8.4 切 live CAN。
+3. `publish_control_cmd: true`，controller 输出话题必须是 `/forklift/control_cmd_raw`，不能绕过安全门直接写 `/forklift/control_cmd`。
+4. `curtis_vehicle_interface` 只消费安全门放行后的 `/forklift/control_cmd`，并负责 Curtis CAN 编解码、feedback、`/odom` 和 TF。
 5. 所有运动（含 pivot 直角转弯）都以 `ForkliftControlCommand` 下发，**BT 里没有 Spin/BackUp 类指令**，恢复行为只清代价图。
 6. 真车上 `/cmd_vel` 无人订阅（Nav2 接口要求控制器返回 `TwistStamped`，那是死端口，不影响）。
 7. **确认 `/odom` 和 `/local_costmap/costmap_raw` 真进了 `safety_command_gate`**，否则 footprint 检查 fail-closed 永远停车（车"明明没障碍却不动"）。三种判断方法（Foxy docker 内，从最直接到最底层）:
