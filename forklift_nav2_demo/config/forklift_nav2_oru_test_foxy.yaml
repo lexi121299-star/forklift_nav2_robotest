@@ -192,10 +192,10 @@ local_costmap:
     ros__parameters:
       update_frequency: 5.0
       publish_frequency: 2.0
-      # Keep controller pose, FollowPath goal checker, and global plan in the
-      # same frame. Foxy otherwise compares the map-frame goal with an
-      # odom-frame robot pose and can hold a completed goal for 30 seconds.
-      global_frame: map
+      # Real vehicle: keep the rolling local costmap and controller pose in the
+      # continuous odom frame. AMCL owns map -> odom; the global planner remains
+      # in map. This prevents localization corrections from jumping local control.
+      global_frame: odom
       robot_base_frame: base_link
       use_sim_time: True
       rolling_window: true
