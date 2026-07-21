@@ -574,3 +574,121 @@ enforce_pallet_approach_station:=false
 - `dx` / `dy` 的正负方向必须由雷达节点固定并记录，否则侧移和插叉方向会有风险。
 - 取叉段中的低速相对运动必须仍然经过 safety gate，不允许 Task Manager 直接发布底盘控制命令。
 - 真实货叉高度闭环、侧移能力限制、雷达识别算法不在 Task Manager 内实现。
+
+## 13. TODO List
+
+### 13.1 雷达检测 adapter
+
+当前状态：
+
+- Task Manager 已经定义并调用 `DetectPalletOffset.action`。
+- 当前仓库中还没有真实雷达 action server。
+- 该 action 不是模拟节点，也不会自己产生假数据。
+
+后续需要实现一个雷达适配节点：
+
+```text
+雷达原始 topic/message
+  -> lidar/pallet detector adapter
+  -> /forklift/perception/detect_pallet_offset action server
+  -> Task Manager
+```
+
+建议职责：
+
+- 订阅雷达或感知模块持续发布的托盘检测 message。
+- 收到 `DetectPalletOffset.action` goal 后，开始等待当前 `slot_id` 的有效检测结果。
+- 校验 message 时间戳，避免使用旧数据。
+- 校验目标库位、置信度、偏移范围。
+- 返回 `offset_x_m`、`offset_y_m`、`confidence`。
+- 支持 timeout、cancel 和明确失败原因。
+
+建议不要让 Task Manager 直接订阅雷达 topic。雷达 message 通常是持续流，而 Task Manager 需要的是“一次检测请求 -> 一次结果”的任务语义，这层转换更适合放在 adapter/action server 中。
+
+### 13.2 叉臂控制 adapter
+
+当前状态：
+
+- Task Manager 已经定义并调用 `ForkMoveTo.action`。
+- 当前仓库中还没有真实叉臂 action server。
+- Task Manager 不直接发 CAN，不直接控制阀电流，也不做叉臂闭环。
+
+后续如果要通过 CAN 控制叉臂电机，需要实现一个叉臂控制适配节点：
+
+```text
+Task Manager
+  -> /forklift/fork/move_to action
+  -> fork control adapter
+  -> CAN command
+  -> 叉臂电机 / 泵 / 阀 / 控制器
+  -> CAN feedback / 编码器 / 限位 / 高度传感器
+  -> fork control adapter 判断到位
+  -> action result 返回 Task Manager
+```
+
+建议职责：
+
+- 接收 `ForkMoveTo.action` goal：
+  - `target_height_m`
+  - `side_shift_m`
+  - `tilt_rad`
+- 将目标高度、侧移、倾角转换为底层控制输出：
+  - 泵电机 rpm。
+  - 升降阀电流。
+  - 下降阀电流。
+  - 侧移阀电流。
+  - 倾斜阀电流。
+- 读取反馈：
+  - 当前叉高。
+  - 当前侧移位置。
+  - 当前倾角。
+  - 限位开关。
+  - 故障码。
+  - 电机状态。
+- 做闭环判断：
+
+```text
+abs(current_height_m - target_height_m) <= height_tolerance_m
+```
+
+- 到位后停止输出并返回 success。
+- cancel 时立即停止升降、侧移、倾斜输出。
+- timeout 时停止输出并返回失败。
+- 故障或限位触发时停止输出并返回明确原因。
+
+第一版 adapter 可以先复用项目已有控制消息：
+
+```text
+ForkMoveTo.action server
+  -> ForkliftControlCommand
+  -> pump_rpm / lift_valve_ma / lower_valve_ma / side_shift_* / tilt_*
+  -> vehicle_interface 编码成 CAN
+```
+
+如果现场叉臂 CAN 协议与底盘 CAN 协议分离，也可以由 adapter 直接使用 SocketCAN。无论哪种实现，原则都是：叉臂闭环、CAN 细节、限位和故障处理放在 adapter；Task Manager 只做任务编排。
+
+### 13.3 低速相对运动 adapter
+
+当前状态：
+
+- Task Manager 已经定义并调用 `MoveRelative.action`。
+- 当前仓库中还没有真实低速相对运动 action server。
+
+后续需要实现短距离低速移动适配节点：
+
+```text
+Task Manager
+  -> /forklift/fine_motion/move_relative action
+  -> fine motion adapter
+  -> 底盘控制链路
+  -> forklift_safety
+  -> vehicle_interface / CAN
+```
+
+建议职责：
+
+- 接收相对移动距离 `distance_m` 和最大速度 `max_speed_mps`。
+- 控制车辆低速前进或后退。
+- 使用 odom / 编码器 / 控制器反馈判断距离是否完成。
+- 所有底盘控制必须经过 `forklift_safety`。
+- 支持 timeout、cancel、急停暂停和明确失败原因。
