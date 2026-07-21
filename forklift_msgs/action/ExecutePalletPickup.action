@@ -1,0 +1,11 @@
+string task_id
+string slot_id
+---
+bool success
+string message
+float64 offset_x_m
+float64 offset_y_m
+---
+string phase
+float32 progress
+float64 current_height_m

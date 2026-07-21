@@ -7,7 +7,11 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/DetectPalletOffset.action"
   "action/ExecuteRoute.action"
+  "action/ExecutePalletPickup.action"
+  "action/ForkMoveTo.action"
+  "action/MoveRelative.action"
   "msg/ForkliftControlCommand.msg"
   "msg/ForkliftVehicleState.msg"
   "msg/ForkliftFaultState.msg"

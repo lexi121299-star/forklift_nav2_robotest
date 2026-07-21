@@ -1,0 +1,10 @@
+float64 target_height_m
+float64 side_shift_m
+float64 tilt_rad
+---
+bool success
+string message
+float64 final_height_m
+---
+float64 current_height_m
+string phase

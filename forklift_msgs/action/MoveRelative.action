@@ -1,0 +1,7 @@
+float64 distance_m
+float64 max_speed_mps
+---
+bool success
+string message
+---
+float64 remaining_distance_m

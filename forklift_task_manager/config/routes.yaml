@@ -9,3 +9,11 @@ routes:
       - [-2.0, -0.5]
       - [-0.3, -0.5]
       - [-0.3, 1.2]
+  route_to_slot_001_approach:
+    loop: false
+    segments:
+      - {to: slot_001_approach, type: drive}
+  route_to_slot_002_approach:
+    loop: false
+    segments:
+      - {to: slot_002_approach, type: drive}

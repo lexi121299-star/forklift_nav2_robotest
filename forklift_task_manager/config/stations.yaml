@@ -9,3 +9,13 @@ stations:
     y: -0.5
     yaw: 0.0
     frame_id: map
+  slot_001_approach:
+    x: 2.0
+    y: -0.5
+    yaw: 0.0
+    frame_id: map
+  slot_002_approach:
+    x: 2.0
+    y: 0.5
+    yaw: 0.0
+    frame_id: map

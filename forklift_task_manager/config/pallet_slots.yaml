@@ -1,0 +1,22 @@
+slots:
+  slot_001:
+    approach_station: slot_001_approach
+    level_index: 1
+    pick_height_m: 0.55
+  slot_002:
+    approach_station: slot_002_approach
+    level_index: 2
+    pick_height_m: 1.10
+
+pickup_defaults:
+  level_pitch_m: 0.55
+  scan_level_offset: 3
+  fork_insert_depth_m: 0.80
+  pallet_clearance_m: 0.08
+  max_offset_x_m: 0.20
+  max_offset_y_m: 0.08
+  min_detection_confidence: 0.75
+  fork_timeout_sec: 8.0
+  detection_timeout_sec: 3.0
+  fine_motion_timeout_sec: 6.0
+  fine_motion_speed_mps: 0.08

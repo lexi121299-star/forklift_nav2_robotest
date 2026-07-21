@@ -1,0 +1,10 @@
+string slot_id
+float64 scan_height_m
+---
+bool success
+string message
+float64 offset_x_m
+float64 offset_y_m
+float64 confidence
+---
+string phase
