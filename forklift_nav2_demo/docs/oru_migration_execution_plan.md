@@ -1046,6 +1046,8 @@ forklift_task_manager/        # ament_python, Foxy / py3.8, 结构镜像 forklif
   forklift_task_manager/
     __init__.py
     task_manager_node.py       # 编排节点（状态机 + executor）
+    dispatch_report.py         # 纯函数：聚合调度上报 JSON
+    dispatch_reporter_node.py  # 订阅 task/fault/vehicle/safety，发布 dispatch_report
     route_model.py             # stations/routes 加载 + 校验（纯函数，便于单测）
   config/
     stations.yaml              # 命名位姿：name -> {x, y, yaw, frame_id: map}
@@ -1181,6 +1183,23 @@ def derive_segment_poses(waypoints, *, eps=1e-3) -> list[tuple[x, y, yaw]]:
   `/forklift/task_status`、参数事件和 rosout publisher，没有 `/cmd_vel` 或
   `ForkliftControlCommand` publisher；节点只持有 `NavigateToPose` action client。
 - 遗留项：按任务书未运行真车或仿真端到端验收，§5 的 RViz/Nav2 仿真检查仍留给人工/计划方。
+
+**P7.2 调度上报聚合节点执行记录（2026-07-20）**
+
+- 新增 `dispatch_reporter_node`，订阅 `/forklift/task_status`、`/forklift/fault_state`、
+  `/forklift/vehicle_state`、`/forklift/safety_gate/status`，默认发布统一 JSON 到
+  `/forklift/dispatch_report`。节点不发布 `/cmd_vel`，不发布 `ForkliftControlCommand`，
+  不参与底盘控制。
+- 新增 `dispatch_report.py` 纯函数模块，生成 `task`、`fault`、`vehicle`、`safety_status`
+  和 `alarms` 字段；`vehicle.battery_percent <= battery_low_threshold` 时生成
+  `LOW_BATTERY`，`fault_state.has_fault` 时生成 `VEHICLE_FAULT`。
+- `task_manager.launch.py` 默认启动 reporter，参数包括 `use_dispatch_reporter`、
+  `robot_id`、`dispatch_report_topic`、`dispatch_http_url`、`battery_low_threshold`。
+  `dispatch_http_url` 为空时只发 ROS topic；非空时同时 HTTP POST JSON 到调度系统。
+- Foxy docker 验证：`forklift_task_manager` 包级测试 17 passed；
+  重新 build 后 `ros2 run forklift_task_manager dispatch_reporter_node` 能正常启动并打印
+  `dispatch reporter ready: publishing /forklift/dispatch_report`。启动验证用 `timeout 2s`
+  主动截停，因此命令返回 124 属于预期截停，不是节点启动失败。
 
 ## 10. P8: 建 forklift_safety
 

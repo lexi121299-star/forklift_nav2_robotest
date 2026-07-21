@@ -3,6 +3,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -20,6 +21,11 @@ def generate_launch_description():
     enforce_pallet_approach_station = LaunchConfiguration(
         'enforce_pallet_approach_station'
     )
+    use_dispatch_reporter = LaunchConfiguration('use_dispatch_reporter')
+    robot_id = LaunchConfiguration('robot_id')
+    dispatch_report_topic = LaunchConfiguration('dispatch_report_topic')
+    dispatch_http_url = LaunchConfiguration('dispatch_http_url')
+    battery_low_threshold = LaunchConfiguration('battery_low_threshold')
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     return LaunchDescription([
@@ -50,6 +56,13 @@ def generate_launch_description():
             'move_relative_action', default_value='/forklift/fine_motion/move_relative'
         ),
         DeclareLaunchArgument('enforce_pallet_approach_station', default_value='true'),
+        DeclareLaunchArgument('use_dispatch_reporter', default_value='true'),
+        DeclareLaunchArgument('robot_id', default_value='forklift_001'),
+        DeclareLaunchArgument(
+            'dispatch_report_topic', default_value='/forklift/dispatch_report'
+        ),
+        DeclareLaunchArgument('dispatch_http_url', default_value=''),
+        DeclareLaunchArgument('battery_low_threshold', default_value='20.0'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         Node(
             package='forklift_task_manager',
@@ -66,6 +79,20 @@ def generate_launch_description():
                 'detect_pallet_offset_action': detect_pallet_offset_action,
                 'move_relative_action': move_relative_action,
                 'enforce_pallet_approach_station': enforce_pallet_approach_station,
+                'use_sim_time': use_sim_time,
+            }],
+        ),
+        Node(
+            package='forklift_task_manager',
+            executable='dispatch_reporter_node',
+            name='forklift_dispatch_reporter',
+            output='screen',
+            condition=IfCondition(use_dispatch_reporter),
+            parameters=[{
+                'robot_id': robot_id,
+                'report_topic': dispatch_report_topic,
+                'dispatch_http_url': dispatch_http_url,
+                'battery_low_threshold': battery_low_threshold,
                 'use_sim_time': use_sim_time,
             }],
         ),

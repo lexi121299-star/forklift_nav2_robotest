@@ -25,6 +25,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'dispatch_reporter_node = forklift_task_manager.dispatch_reporter_node:main',
             'task_manager_node = forklift_task_manager.task_manager_node:main',
         ],
     },

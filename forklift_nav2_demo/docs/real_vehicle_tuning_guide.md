@@ -391,14 +391,35 @@ Nav2 controller
 
 它**不启动** Gazebo、`sim_command_bridge`、仿真激光自过滤节点，也**暂不启动** `forklift_task_manager`。
 
-`forklift_task_manager` 是可选的站点/路线任务调度层，只向 Nav2 的 `NavigateToPose` action 发稀疏任务点，不直接发布底盘命令。手动在 RViz 发 A→B goal 不需要它；执行 `stations.yaml` / `routes.yaml` 的多段任务时才需要。主栈运行后，可在另一终端启动：
+`forklift_task_manager` 是可选的站点/路线任务调度层，只向 Nav2 的 `NavigateToPose` action 发稀疏任务点，不直接发布底盘命令。手动在 RViz 发 A→B goal 不需要它；需要由 task manager 接收 RViz `/goal_pose`、观察任务状态，或执行 `stations.yaml` / `routes.yaml` 的多段任务时再启动。主栈运行后，可在另一终端启动：
 
 ```bash
-docker exec -it forklift-foxy-real bash -lc '
-  source /opt/ros/foxy/setup.bash
-  source /workspace/install_foxy/setup.bash
-  ros2 launch forklift_task_manager task_manager.launch.py use_sim_time:=false
-'
+./scripts/start_foxy_real_task_manager.sh
+```
+
+脚本只在已经运行的 `forklift-foxy-real` 容器内增加 task manager，不启动 Gazebo，也不直接发送底盘/CAN 命令。`task_manager.launch.py` 默认同时启动 `dispatch_reporter_node`，用于把任务、底盘故障、车辆状态和 safety gate 状态聚合成调度上报 JSON。启动后在 RViz 使用 `2D Goal Pose`：点击位置并拖动箭头设置最终车身朝向；固定叉臂随车身朝向终点。当前只提供导航到目标位姿，不包含视觉精对准、插叉或升降叉动作。
+
+常用检查：
+
+```bash
+ros2 topic echo /forklift/task_status
+ros2 topic echo /forklift/dispatch_report
+```
+
+`/forklift/dispatch_report` 是调度侧优先消费的话题；它聚合了：
+
+- `/forklift/task_status`：任务状态；
+- `/forklift/fault_state`：底盘故障码与摘要；
+- `/forklift/vehicle_state`：车辆状态、电量 `battery_percent`、温度等；
+- `/forklift/safety_gate/status`：最终安全闸原因。
+
+默认低电量阈值是 `20.0%`，低于阈值时 report 的 `alarms` 会出现 `LOW_BATTERY`。如果需要临时关闭 reporter，可直接启动 launch 时加 `use_dispatch_reporter:=false`。如果要接外部调度 HTTP 接口，可在容器内手动启动：
+
+```bash
+ros2 launch forklift_task_manager task_manager.launch.py \
+  use_sim_time:=false \
+  robot_id:=forklift_001 \
+  dispatch_http_url:=http://调度系统地址/api/robot/report
 ```
 
 ### 8.4 什么时候允许真实发送 CAN
