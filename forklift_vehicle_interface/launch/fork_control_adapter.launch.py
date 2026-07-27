@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -5,11 +8,19 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    package_share = get_package_share_directory('forklift_vehicle_interface')
+    default_params_file = os.path.join(
+        package_share,
+        'config',
+        'fork_control_adapter.yaml',
+    )
+    params_file = LaunchConfiguration('params_file')
     action_name = LaunchConfiguration('action_name')
     command_topic = LaunchConfiguration('command_topic')
     fork_state_topic = LaunchConfiguration('fork_state_topic')
 
     return LaunchDescription([
+        DeclareLaunchArgument('params_file', default_value=default_params_file),
         DeclareLaunchArgument('action_name', default_value='/forklift/fork/move_to'),
         DeclareLaunchArgument('command_topic', default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument(
@@ -21,10 +32,13 @@ def generate_launch_description():
             executable='fork_control_adapter',
             name='fork_control_adapter',
             output='screen',
-            parameters=[{
-                'action_name': action_name,
-                'command_topic': command_topic,
-                'fork_state_topic': fork_state_topic,
-            }],
+            parameters=[
+                params_file,
+                {
+                    'action_name': action_name,
+                    'command_topic': command_topic,
+                    'fork_state_topic': fork_state_topic,
+                },
+            ],
         ),
     ])

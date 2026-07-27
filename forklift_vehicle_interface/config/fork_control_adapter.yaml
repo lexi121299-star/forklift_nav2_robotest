@@ -1,0 +1,44 @@
+fork_control_adapter:
+  ros__parameters:
+    action_name: /forklift/fork/move_to
+    command_topic: /forklift/control_cmd_raw
+    fork_state_topic: /forklift/fork/joint_state
+
+    command_rate_hz: 20.0
+    feedback_timeout_sec: 0.5
+    default_action_timeout_sec: 8.0
+
+    height_joint_name: fork_height_m
+    side_shift_joint_name: fork_side_shift_m
+    tilt_joint_name: fork_tilt_rad
+    require_height_feedback: true
+    require_side_shift_feedback: false
+    require_tilt_feedback: false
+
+    min_height_m: 0.0
+    max_height_m: 3.0
+    max_abs_side_shift_m: 0.12
+    max_abs_tilt_rad: 0.20
+
+    height_tolerance_m: 0.01
+    side_shift_tolerance_m: 0.005
+    tilt_tolerance_rad: 0.01
+
+    height_slow_zone_m: 0.08
+    side_shift_slow_zone_m: 0.03
+    tilt_slow_zone_rad: 0.04
+
+    lift_pump_rpm: 1500.0
+    lower_pump_rpm: 0.0
+
+    lift_valve_min_ma: 250.0
+    lift_valve_max_ma: 800.0
+    lower_valve_min_ma: 180.0
+    lower_valve_max_ma: 650.0
+    side_shift_valve_min_ma: 180.0
+    side_shift_valve_max_ma: 600.0
+    tilt_valve_min_ma: 180.0
+    tilt_valve_max_ma: 600.0
+
+    positive_side_shift_is_right: true
+    positive_tilt_uses_backward_valve: true

@@ -710,6 +710,19 @@ lower_valve_min_ma = 180
 lower_valve_max_ma = 650
 ```
 
+这些参数已集中放到：
+
+```text
+forklift_vehicle_interface/config/fork_control_adapter.yaml
+```
+
+现场调试时优先修改 yaml 或通过 launch 指定新的 `params_file`，不要直接改代码默认值。例如：
+
+```bash
+ros2 launch forklift_vehicle_interface fork_control_adapter.launch.py \
+  params_file:=/path/to/site_fork_control_adapter.yaml
+```
+
 CAN 协议编码对应关系：
 
 ```text
