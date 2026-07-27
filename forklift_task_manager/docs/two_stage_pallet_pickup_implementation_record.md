@@ -610,10 +610,44 @@ enforce_pallet_approach_station:=false
 当前状态：
 
 - Task Manager 已经定义并调用 `ForkMoveTo.action`。
-- 当前仓库中还没有真实叉臂 action server。
+- 已新增第一版叉臂控制 adapter：
+  - `forklift_vehicle_interface/forklift_vehicle_interface/fork_control_adapter.py`
+  - executable: `fork_control_adapter`
+  - launch: `forklift_vehicle_interface/launch/fork_control_adapter.launch.py`
 - Task Manager 不直接发 CAN，不直接控制阀电流，也不做叉臂闭环。
 
-后续如果要通过 CAN 控制叉臂电机，需要实现一个叉臂控制适配节点：
+当前没有新增自定义 interface。第一版复用已有接口：
+
+```text
+上层任务接口：ForkMoveTo.action
+控制输出接口：ForkliftControlCommand
+反馈输入接口：sensor_msgs/JointState
+```
+
+默认 topic：
+
+```text
+Action server:
+/forklift/fork/move_to
+
+Command output:
+/forklift/control_cmd_raw
+
+Fork feedback input:
+/forklift/fork/joint_state
+```
+
+`/forklift/fork/joint_state` 默认 joint name：
+
+```text
+fork_height_m
+fork_side_shift_m
+fork_tilt_rad
+```
+
+后续 CANopen 拉线编码器节点只需要把编码器位置换算成 `fork_height_m`，并发布到该 JointState topic，即可作为高度闭环反馈来源。如果现场侧移或倾角也要闭环，需要继续接入对应位置反馈。
+
+通过 CAN 控制叉臂电机时，整体链路如下：
 
 ```text
 Task Manager
@@ -626,25 +660,99 @@ Task Manager
   -> action result 返回 Task Manager
 ```
 
-建议职责：
+当前 adapter 已实现的逻辑：
 
 - 接收 `ForkMoveTo.action` goal：
   - `target_height_m`
   - `side_shift_m`
   - `tilt_rad`
-- 将目标高度、侧移、倾角转换为底层控制输出：
+- 按顺序控制三个轴：
+  1. 高度先到位。
+  2. 再执行侧移。
+  3. 最后执行倾角。
+- 将目标高度、侧移、倾角转换为 `ForkliftControlCommand`：
   - 泵电机 rpm。
   - 升降阀电流。
   - 下降阀电流。
   - 侧移阀电流。
   - 倾斜阀电流。
-- 读取反馈：
-  - 当前叉高。
-  - 当前侧移位置。
-  - 当前倾角。
-  - 限位开关。
-  - 故障码。
-  - 电机状态。
+- 默认发布到 `/forklift/control_cmd_raw`，再由 `forklift_safety` 转发到 `/forklift/control_cmd`。
+- 到位后发布零泵速/零阀电流命令并返回 success。
+- cancel / timeout / feedback missing 时发布停止命令并返回失败。
+
+高度目标和比例阀电流的关系：
+
+- 要升到多高由 `target_height_m` 决定。
+- 对 N 号库位取叉时，`target_height_m` 来自 `pallet_slots.yaml`：
+  - `H_pick = pick_height_m`
+  - `H_scan = H_pick + scan_level_offset * level_pitch_m`
+- 比例阀电流不是高度设定值，而是根据高度误差计算出来的运动强度：
+
+```text
+height_error = target_height_m - current_height_m
+ratio = abs(height_error) / height_slow_zone_m
+valve_ma = min_ma + (max_ma - min_ma) * ratio
+```
+
+- 当距离目标高度较远时，阀电流接近 `*_valve_max_ma`。
+- 当距离目标高度进入 `height_slow_zone_m` 后，阀电流逐渐减小。
+- 当 `abs(height_error) <= height_tolerance_m` 时，认为高度到位，停止泵和阀输出。
+
+当前默认高度控制参数：
+
+```text
+height_tolerance_m = 0.01
+height_slow_zone_m = 0.08
+lift_pump_rpm = 1500
+lift_valve_min_ma = 250
+lift_valve_max_ma = 800
+lower_valve_min_ma = 180
+lower_valve_max_ma = 650
+```
+
+CAN 协议编码对应关系：
+
+```text
+pump_rpm                  -> CAN 0x303 Data[0:2], uint16 little-endian
+lower_valve_ma > 0        -> CAN 0x303 Data[3] bit2
+lower_valve_ma / 10       -> CAN 0x403 Data[0]
+lift_valve_ma / 10        -> CAN 0x403 Data[1]
+side_shift_left_ma / 10   -> CAN 0x403 Data[4]
+side_shift_right_ma / 10  -> CAN 0x403 Data[5]
+tilt_forward_ma / 10      -> CAN 0x403 Data[6]
+tilt_backward_ma / 10     -> CAN 0x403 Data[7]
+```
+
+示例：
+
+```text
+pump_rpm = 1500
+lift_valve_ma = 400
+
+0x303 = DC 05 00 00 00 00 00 00
+0x403 = 00 28 00 00 00 00 00 00
+```
+
+其中 `lift_valve_ma=400mA` 被编码为 `400 / 10 = 40 = 0x28`。如果现场协议不是 `mA / 10`，需要调整 `curtis_can_codec.py` 中的阀电流编码函数，或在 adapter 中增加现场标定曲线。
+
+仍需现场接入的反馈：
+
+```text
+CANopen 拉线编码器
+  -> encoder count
+  -> height_m = (count - zero_count) * meter_per_count + height_offset_m
+  -> sensor_msgs/JointState(name=["fork_height_m"], position=[height_m])
+```
+
+建议反馈：
+
+- 当前叉高。
+- 当前侧移位置。
+- 当前倾角。
+- 限位开关。
+- 故障码。
+- 电机状态。
+
 - 做闭环判断：
 
 ```text

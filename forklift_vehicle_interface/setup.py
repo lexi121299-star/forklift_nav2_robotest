@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'sim_command_bridge = forklift_vehicle_interface.sim_command_bridge:main',
             'curtis_vehicle_interface = forklift_vehicle_interface.curtis_vehicle_interface:main',
+            'fork_control_adapter = forklift_vehicle_interface.fork_control_adapter:main',
         ],
     },
 )
