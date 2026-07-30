@@ -1,0 +1,45 @@
+xfl201_vehicle_interface:
+  ros__parameters:
+    dry_run: true
+    can_interface: can0
+    command_timeout_sec: 0.5
+    control_rate_hz: 20.0
+    feedback_poll_rate_hz: 50.0
+    state_publish_rate_hz: 20.0
+    feedback_timeout_sec: 0.5
+    publish_tf: true
+    odom_frame_id: odom
+    base_frame_id: base_link
+
+    # TODO supplier confirm: protocol RPM may be motor-shaft RPM or wheel-end RPM.
+    drive_wheel_radius_m: 0.15
+    drive_gear_ratio: 1.0
+    drive_track_width_m: 0.80
+    drive_wheel_base_m: 1.47
+
+    # TODO supplier confirm: use these for 0x209/0x20A encoder odometry.
+    left_meter_per_pulse: 0.0
+    right_meter_per_pulse: 0.0
+    left_encoder_sign: 1.0
+    right_encoder_sign: 1.0
+
+    # TODO field confirm: XFL201 protocol says body positive is fork reverse.
+    body_positive_is_fork_reverse: true
+    left_motor_sign: 1.0
+    right_motor_sign: 1.0
+
+    max_motor_rpm: 5000.0
+    min_motor_rpm: 0.0
+    max_brake_force: 255
+    normal_brake_force: 0
+    send_fork_stop_frame: false
+
+    # TODO supplier confirm: if the chassis is pure differential, set
+    # use_command_steering_angle=false and keep steering_angle_fixed_deg=0.
+    use_command_steering_angle: true
+    steering_angle_fixed_deg: 0.0
+    pivot_steering_angle_rad: 1.5707963267948966
+    pivot_turn_radius_m: 0.60
+
+    max_integration_dt_sec: 0.20
+    max_rx_frames_per_cycle: 32

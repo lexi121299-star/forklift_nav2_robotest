@@ -37,6 +37,7 @@ def generate_launch_description():
     params_file = LaunchConfiguration('nav2_params_file')
     use_rviz = LaunchConfiguration('use_rviz')
     vehicle_dry_run = LaunchConfiguration('vehicle_dry_run')
+    vehicle_model = LaunchConfiguration('vehicle_model')
     can_interface = LaunchConfiguration('can_interface')
     nav2_start_delay = LaunchConfiguration('nav2_start_delay')
 
@@ -56,17 +57,25 @@ def generate_launch_description():
         parameters=[{'robot_description': robot_description, 'use_sim_time': False}],
     )
 
-    vehicle_interface = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(vehicle_share, 'launch', 'curtis_vehicle_interface.launch.py')),
-        launch_arguments={
+    def launch_vehicle_interface(context, *args, **kwargs):
+        selected = vehicle_model.perform(context).strip().lower()
+        common_arguments = {
             'dry_run': vehicle_dry_run,
             'can_interface': can_interface,
             'publish_tf': 'true',
             'odom_frame_id': 'odom',
             'base_frame_id': 'base_link',
-        }.items(),
-    )
+        }
+        if selected == 'curtis':
+            launch_file = 'curtis_vehicle_interface.launch.py'
+        elif selected == 'xfl201':
+            launch_file = 'xfl201_vehicle_interface.launch.py'
+        else:
+            raise RuntimeError('vehicle_model must be one of: curtis, xfl201')
+        return [IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(vehicle_share, 'launch', launch_file)),
+            launch_arguments=common_arguments.items(),
+        )]
 
     def launch_safety(context, *args, **kwargs):
         footprint = footprint_from_params(params_file.perform(context))
@@ -127,10 +136,14 @@ def generate_launch_description():
             'vehicle_dry_run',
             default_value='true',
             description='Safety default. Set false only when CAN hardware is ready.'),
+        DeclareLaunchArgument(
+            'vehicle_model',
+            default_value='curtis',
+            description='Vehicle interface model: curtis or xfl201.'),
         DeclareLaunchArgument('can_interface', default_value='can0'),
         DeclareLaunchArgument('nav2_start_delay', default_value='3.0'),
         robot_state_publisher,
-        vehicle_interface,
+        OpaqueFunction(function=launch_vehicle_interface),
         OpaqueFunction(function=launch_safety),
         TimerAction(period=nav2_start_delay, actions=[nav2, rviz]),
     ])
