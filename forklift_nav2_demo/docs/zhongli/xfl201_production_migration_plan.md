@@ -34,6 +34,7 @@ xfl201-zhongli-diff-drive
 | 整车宽 | 1076 mm |
 | 整车高 | 2306 mm |
 | 载荷中心距 | 500 mm |
+| 承载长度 | 434 mm |
 | 轴距 | 1470 mm |
 | 到货叉垂直面的长度 | 2100 mm |
 | 货叉尺寸 | 40 / 122 / 1070 mm |
@@ -45,6 +46,13 @@ xfl201-zhongli-diff-drive
 | 前直角行驶通道宽度 | 1400 mm |
 | 直角转弯通道宽度 | 2137 mm |
 | 单侧取卸货通道宽度 | 3610 mm |
+
+当前建模约定：
+
+- `base_link` 放在两轮轴中心。
+- 车辆前进方向定义为叉臂反方向，即 `base_link +x` 指向车体尾部/配重方向，货叉方向为 `-x`。
+- 舵角 `+90°/-90°` 时，先按车辆围绕两轮轴中心旋转处理；该点与 `base_link` 重合，后续实车低速测试复核。
+- `Wa = 1743 mm` 暂按外轮廓最小转弯半径使用，不直接等同于控制模型里的 `pivot_turn_radius`；后续作为外置参数标定。
 
 这些参数会影响：
 
@@ -259,7 +267,7 @@ forklift_nav2_demo/urdf/xfl201_steered.urdf.xacro
 
 必须现场确认：
 
-- `base_link` 选择在几何中心、驱动轴中心，还是现有系统约定位置。
+- `base_link` 已按当前约定放在两轮轴中心，`+x` 为叉臂反方向，`-x` 为货叉方向。
 - 激光雷达相对 `base_link` 的 xyz/rpy。
 - 左右驱动轮中心距。
 - 驱动轮半径。
@@ -295,7 +303,11 @@ footprint: "[[front_x, half_width], [front_x, -half_width], [rear_x, -half_width
 其中：
 
 - `half_width` 应至少接近 `1.076 / 2 = 0.538 m`，再加安装误差和安全余量。
-- `front_x` / `rear_x` 取决于 `base_link` 定义。
+- 按当前 `base_link` 约定，初版空车车体 footprint 可先取：
+  - `front_x = l2 - x = 2.100 - 0.434 = +1.666 m`。
+  - `rear_x = -x = -0.434 m`，到货叉垂直面。
+  - `half_width = 0.538 m`，实际配置需要再加安全余量。
+- 如果把货叉纳入 footprint，货叉尖端可先按 `rear_x = -(x + fork_length) = -(0.434 + 1.070) = -1.504 m` 估算。
 - 叉臂是否纳入 footprint 要按导航场景决定：空车行驶和插叉动作可能需要不同 footprint。
 
 ## 6. 底盘建模策略
@@ -318,7 +330,7 @@ footprint: "[[front_x, half_width], [front_x, -half_width], [rear_x, -half_width
 - **不需要新建差速底盘模型。**
 - **需要做 XFL201 专用参数、footprint、URDF、safety gate 参数和里程计标定。**
 
-仍需注意：厂家说“绕中心点旋转”，但这个中心点相对 `base_link` 的位置还没确认。若实车中心点可以通过 `rear_axle_x_offset` 表达，则只改参数；若不能表达，再做小范围模型补丁。
+当前约定 `base_link` 位于两轮轴中心，舵角 `+90°/-90°` 时先按围绕该点旋转处理。因此 XFL201 初版可将 `rear_axle_x_offset` / `lattice_rear_axle_x_offset` 配成 `0.0`。若实车低速测试发现旋转中心相对 `base_link` 有偏移，再通过参数修正；只有参数无法表达时才做小范围模型补丁。
 
 ### 6.1 第一阶段：兼容现有上层接口
 
@@ -460,6 +472,8 @@ delta_yaw = delta_s * tan(steering_angle) / wheel_base
 
 当 steering_angle 接近 ±90° 时，使用现场标定的转向半径：
 delta_yaw = delta_s / pivot_turn_radius
+
+如果 `base_link` 与两轮轴中心/旋转中心重合，pivot 时 `delta_s` 只用于计算 yaw，不应继续作为 `base_link` 的 x/y 平移量积分。
 ```
 
 需要 YAML 配置：
@@ -468,8 +482,9 @@ delta_yaw = delta_s / pivot_turn_radius
 encoder_counts_per_motor_rev: TBD
 drive_gear_ratio: TBD
 drive_wheel_radius_m: TBD
-drive_wheel_base_m: TBD
-pivot_turn_radius_m: TBD
+drive_wheel_base_m: 1.47
+pivot_turn_radius_m: 1.743  # 暂按 Wa 外轮廓转弯半径占位，后续实车标定
+pivot_center_x_offset_m: 0.0
 left_encoder_sign: 1
 right_encoder_sign: 1
 odom_publish_tf: true
@@ -733,11 +748,11 @@ config/vehicles/xfl201_unit_002.yaml
 
 | 参数 | 当前判断 | 下周动作 |
 | --- | --- | --- |
-| `wheel_base` | 尺寸图读取为 `1.47 m` | 和厂家/实车尺寸复核，写入 XFL201 Nav2 与 safety YAML |
-| `pivot_turn_radius` | 旧配置 `0.6 m` 不一定适用 | 询问厂家“舵角 ±90° 绕中心旋转”的等效半径，或实车低速标定 |
-| `rear_axle_x_offset` | 旧配置 `-0.34 m` 不一定适用 | 确认旋转中心相对 `base_link` 的 x 偏移 |
-| `base_link` 位置 | 未确认 | 与定位/建模统一，决定 footprint、TF、odom 参考点 |
-| footprint `front_x/rear_x/half_width` | 旧车型不可沿用 | 按 XFL201 长宽和 `base_link` 重新计算 |
+| `wheel_base` | 尺寸图读取为 `1.47 m` | 写入 XFL201 Nav2、safety、odom YAML，并现场复核 |
+| `pivot_turn_radius` | `Wa=1.743 m` 暂按外轮廓转弯半径占位 | 作为可配置外置参数，后续用实车低速标定替换 |
+| `rear_axle_x_offset` | 初版 `0.0 m` | `base_link` 在两轮轴中心，pivot 初版按围绕该点旋转 |
+| `base_link` 位置 | 已确认初版 | 两轮轴中心，`+x` 为叉臂反方向，`-x` 为货叉方向 |
+| footprint `front_x/rear_x/half_width` | 初版可计算 | 空车约 `front_x=+1.666 m`、`rear_x=-0.434 m`、`half_width=0.538 m + safety_margin` |
 | `lattice_rear_axle_x_offset` | 需要和 controller 一致 | 与 `rear_axle_x_offset` 同步 |
 | safety gate pivot 参数 | 需要和 Nav2 一致 | 同步 `wheel_base/pivot_turn_radius/rear_axle_x_offset` |
 
@@ -747,7 +762,7 @@ config/vehicles/xfl201_unit_002.yaml
 2. 将 XFL201 的 `wheel_base`、`max_steering_angle`、`allow_pivot_turn`、`pivot_steering_angle`、`pivot_turn_radius`、`rear_axle_x_offset` 写入专用配置。
 3. 将 safety gate 的 XFL201 参数与 Nav2 参数对齐。
 4. 新增或重命名 XFL201 URDF 为舵轮车型语义，例如 `xfl201_steered.urdf.xacro`，不要再使用 `diff_drive` 命名。
-5. 按 XFL201 尺寸更新 costmap footprint 和 safety footprint。
+5. 按 XFL201 尺寸更新 costmap footprint 和 safety footprint；空车和带货叉 footprint 分开考虑。
 6. 根据厂家回复或现场测试填写 odom 标定参数：`meter_per_pulse`、轮半径、齿比、左右脉冲方向、舵角反馈方向。
 7. 用低速实车测试验证：
    - 直行 1 m 的 odom 距离。
@@ -762,7 +777,7 @@ config/vehicles/xfl201_unit_002.yaml
 ```text
 普通转弯: yaw_rate = v * tan(steering_angle) / wheel_base
 90 deg pivot: yaw_rate = v / pivot_turn_radius
-旋转中心: rear_axle_x_offset 参数描述
+旋转中心: rear_axle_x_offset = 0.0，初版等同 base_link
 ```
 
 只有出现以下情况，才考虑修改 C++ 车辆模型：
@@ -785,12 +800,15 @@ config/vehicles/xfl201_unit_002.yaml
 | 最小 RPM | 已确认 | 低速 30 RPM，稳定运行 100 RPM |
 | 心跳超时 | 已确认 | 检测 200 ms，建议发送周期 50 ms，允许周期不超过 150 ms |
 | 停车/急停方式 | 已确认 | 发 RPM=0，没有刹车选项 |
+| `base_link` 位置 | 已确认初版 | 两轮轴中心，`+x` 为叉臂反方向 |
+| 轴距 | 已确认初版 | 尺寸图读取为 1470 mm |
+| `Wa` 转弯半径 | 已确认占位 | 1743 mm，暂按外轮廓转弯半径，可外置参数修改 |
 | 左电机 RPM 正方向 | 待确认 | 协议说车体正方向是货叉反方向，需要实测 |
 | 右电机 RPM 正方向 | 待确认 | 需要实测 |
 | RPM 是电机轴还是轮端 | 待确认 | 影响速度换算 |
 | 齿比 | 待确认 | 如果 RPM 是电机轴必须配置 |
 | 驱动轮半径 | 待确认 | 影响 odom 和 RPM 换算 |
-| 轴距/转向半径 | 待确认 | 影响舵轮模型 odom 和 swept footprint |
+| pivot 等效半径 | 待确认 | `Wa` 可先占位，但真实 `pivot_turn_radius` 仍建议低速标定 |
 | 脉冲每圈数量 | 待确认 | 影响 odom |
 | 货叉高度反馈来源 | 待确认 | `0x233` 只看到控制，没有高度反馈 |
 | 侧移反馈来源 | 待确认 | 需要传感器或 CAN 反馈 |
