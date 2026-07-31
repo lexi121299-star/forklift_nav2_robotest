@@ -240,7 +240,7 @@ vehicle_model:=xfl201
 建议新增：
 
 ```text
-forklift_nav2_demo/urdf/xfl201_diff_drive.urdf.xacro
+forklift_nav2_demo/urdf/xfl201_steered.urdf.xacro
 ```
 
 或将现有 URDF 参数化，但量产初期建议先单独建 XFL201 文件，避免影响旧车型。
@@ -281,7 +281,7 @@ forklift_nav2_demo/config/xfl201_nav2_foxy.yaml
 - inflation radius。
 - controller max velocity。
 - controller max angular velocity。
-- planner lattice arc radius / diff primitive。
+- planner lattice arc radius / steered pivot primitive。
 - safety gate footprint。
 - rear axle / drive axle offset。
 - pivot / in-place rotate 能力。
@@ -299,6 +299,26 @@ footprint: "[[front_x, half_width], [front_x, -half_width], [rear_x, -half_width
 - 叉臂是否纳入 footprint 要按导航场景决定：空车行驶和插叉动作可能需要不同 footprint。
 
 ## 6. 底盘建模策略
+
+### 6.0 当前模型复核结论
+
+根据厂家最新回复，XFL201 不是左右差速底盘，而是舵轮角度 + 左右行走电机 RPM 的三支点车型。因此原计划中“按差速车重做车辆模型”的方向不需要继续推进。
+
+现有 Nav2 侧 `ForkliftVehicleModel` 已经具备舵角运动学能力：
+
+- 普通转弯使用 `velocity + steering_angle`。
+- 普通转弯 yaw rate 按 `velocity * tan(steering_angle) / wheel_base` 计算。
+- 接近 `pivot_steering_angle` 时支持 `allow_pivot_turn` 分支。
+- pivot 分支已有 `pivot_turn_radius` 和 `rear_axle_x_offset` 参数，可表达“舵角 ±90° 绕某个中心点旋转”的效果。
+- `forklift_safety` 的 command gate 也已经按同类参数做短时 swept footprint 预测。
+
+所以当前判断是：
+
+- **不需要大规模重写 planner/controller/vehicle model C++。**
+- **不需要新建差速底盘模型。**
+- **需要做 XFL201 专用参数、footprint、URDF、safety gate 参数和里程计标定。**
+
+仍需注意：厂家说“绕中心点旋转”，但这个中心点相对 `base_link` 的位置还没确认。若实车中心点可以通过 `rear_axle_x_offset` 表达，则只改参数；若不能表达，再做小范围模型补丁。
 
 ### 6.1 第一阶段：兼容现有上层接口
 
@@ -335,11 +355,11 @@ steering_angle = steering_angle_rad
 风险：
 
 - XFL201 不能执行左右轮反转的差速原地旋转。
-- 现有 planner/controller 中的 pivot primitive 需要重新定义为“舵角 ±90° 的小半径转向”，而不是差速 counter-rotation。
+- 现有 planner/controller 中的 pivot primitive 必须按“舵角 ±90° 的小半径转向/绕中心旋转”理解，不能再按差速 counter-rotation 理解。
 
-### 6.2 第二阶段：XFL201 舵轮模型专用控制器
+### 6.2 后续优化：XFL201 舵轮语义显式化
 
-量产稳定后，建议把上层控制器显式升级为 XFL201 舵轮底盘模型：
+量产稳定后，可以把上层控制器的命名和参数显式升级为 XFL201 舵轮底盘语义：
 
 ```text
 controller output:
@@ -353,12 +373,14 @@ vehicle interface:
 
 这样会更符合厂家确认的 XFL201 控制语义。
 
-需要改动：
+这不是当前上车前的阻塞项。下周优先按参数化方式确认模型是否够用，只在实车验证发现当前 pivot 几何表达不了 XFL201 行为时，再做小范围代码修改。
+
+可能的改动：
 
 - `ForkliftMpcController` 增加 `drive_model:=curtis_pivot|xfl201_steered`。
-- `ForkliftVehicleModel` 支持 XFL201 舵角模型。
-- planner primitive 中禁止差速原地旋转；`±90°` 转向按小半径绕中心旋转处理。
-- safety gate swept footprint 按 XFL201 舵角模型预测。
+- `ForkliftVehicleModel` 参数命名补充 XFL201 舵角模型说明。
+- planner primitive 文档和配置中禁止差速原地旋转语义；`±90°` 转向按小半径绕中心旋转处理。
+- safety gate swept footprint 参数与 XFL201 Nav2 参数统一。
 - sim bridge 支持 XFL201 舵轮模型下的真实运动。
 
 ## 7. 货叉控制策略
@@ -691,7 +713,68 @@ config/vehicles/xfl201_unit_002.yaml
 7. 接入 odom。
 8. 再接货叉闭环和取托盘流程。
 
-## 12. 待现场确认项
+## 12. 下周确认和修改清单
+
+### 12.1 已确认的方向
+
+下周不再按差速车方向推进 XFL201。当前代码分支已经按厂家回复调整为：
+
+- `0x231` 左右电机 RPM 同向同值输出，用作行走速度。
+- 转向由 `0x231` 舵轮角度字段控制。
+- 直行舵角给 `0`。
+- 停车/急停均发 RPM=0，不依赖刹车字段。
+- 自动模式必须持续发送 `0x232` 心跳。
+- 心跳周期建议保持 `50 ms`，不超过厂家允许的 `150 ms`。
+- `0x233` 暂不由底盘 vehicle interface 周期发送，后续由货叉 adapter 独立接管，避免底盘和货叉抢同一帧。
+
+### 12.2 需要确认的模型参数
+
+这些参数决定 Nav2、Safety Gate、URDF、odom 是否一致：
+
+| 参数 | 当前判断 | 下周动作 |
+| --- | --- | --- |
+| `wheel_base` | 尺寸图读取为 `1.47 m` | 和厂家/实车尺寸复核，写入 XFL201 Nav2 与 safety YAML |
+| `pivot_turn_radius` | 旧配置 `0.6 m` 不一定适用 | 询问厂家“舵角 ±90° 绕中心旋转”的等效半径，或实车低速标定 |
+| `rear_axle_x_offset` | 旧配置 `-0.34 m` 不一定适用 | 确认旋转中心相对 `base_link` 的 x 偏移 |
+| `base_link` 位置 | 未确认 | 与定位/建模统一，决定 footprint、TF、odom 参考点 |
+| footprint `front_x/rear_x/half_width` | 旧车型不可沿用 | 按 XFL201 长宽和 `base_link` 重新计算 |
+| `lattice_rear_axle_x_offset` | 需要和 controller 一致 | 与 `rear_axle_x_offset` 同步 |
+| safety gate pivot 参数 | 需要和 Nav2 一致 | 同步 `wheel_base/pivot_turn_radius/rear_axle_x_offset` |
+
+### 12.3 下周建议修改项
+
+1. 新增或整理 `forklift_nav2_demo/config/xfl201_nav2_foxy.yaml`。
+2. 将 XFL201 的 `wheel_base`、`max_steering_angle`、`allow_pivot_turn`、`pivot_steering_angle`、`pivot_turn_radius`、`rear_axle_x_offset` 写入专用配置。
+3. 将 safety gate 的 XFL201 参数与 Nav2 参数对齐。
+4. 新增或重命名 XFL201 URDF 为舵轮车型语义，例如 `xfl201_steered.urdf.xacro`，不要再使用 `diff_drive` 命名。
+5. 按 XFL201 尺寸更新 costmap footprint 和 safety footprint。
+6. 根据厂家回复或现场测试填写 odom 标定参数：`meter_per_pulse`、轮半径、齿比、左右脉冲方向、舵角反馈方向。
+7. 用低速实车测试验证：
+   - 直行 1 m 的 odom 距离。
+   - 小角度转向 yaw 方向。
+   - 舵角 `+90°/-90°` 的旋转方向和等效半径。
+   - safety gate 预测轨迹和实车运动是否一致。
+
+### 12.4 是否需要改大模型的判断条件
+
+默认先认为现有 `ForkliftVehicleModel` 足够表达 XFL201：
+
+```text
+普通转弯: yaw_rate = v * tan(steering_angle) / wheel_base
+90 deg pivot: yaw_rate = v / pivot_turn_radius
+旋转中心: rear_axle_x_offset 参数描述
+```
+
+只有出现以下情况，才考虑修改 C++ 车辆模型：
+
+- 实车 `+90°/-90°` 旋转中心无法用单一 `rear_axle_x_offset` 表达。
+- planner、controller、safety gate 对同一条 pivot 轨迹预测不一致。
+- `base_link` 不是当前模型假设的参考点，且通过参数无法修正。
+- XFL201 需要同时表达“行走速度参考点”和“旋转中心参考点”两个不同坐标。
+
+如果只是尺寸、半径、中心点、速度限制不同，优先通过 YAML 和 URDF 解决。
+
+## 13. 待现场确认项
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
@@ -715,7 +798,7 @@ config/vehicles/xfl201_unit_002.yaml
 | 激光雷达安装位 | 待确认 | 影响 TF 和避障 |
 | 托盘检测雷达安装位 | 待确认 | 影响取托盘偏移计算 |
 
-## 13. 风险点
+## 14. 风险点
 
 1. 已确认 XFL201 不是差速模型；后续 planner/controller 不能再按差速原地旋转设计。
 2. 如果没有准确 wheel radius / gear ratio / pulse ratio，odom 会漂。
@@ -723,7 +806,7 @@ config/vehicles/xfl201_unit_002.yaml
 4. 新车尺寸更长，旧地图窄通道路线可能需要重新验证。
 5. 量产车型必须避免在代码中写死某一台车的标定值。
 
-## 14. 结论
+## 15. 结论
 
 XFL201 应作为独立车型平台接入，而不是在 Curtis 车型上打补丁。
 
