@@ -45,7 +45,10 @@ xfl201_vehicle_interface:
     use_command_steering_angle: true
     steering_angle_fixed_deg: 0.0
     pivot_steering_angle_rad: 1.5707963267948966
-    pivot_turn_radius_m: 0.60
+    # Wa=1.743 m is an outer-envelope turning radius placeholder until
+    # low-speed XFL201 calibration provides the effective pivot radius.
+    pivot_turn_radius_m: 1.743
+    pivot_center_x_offset_m: 0.0
 
     max_integration_dt_sec: 0.20
     max_rx_frames_per_cycle: 32

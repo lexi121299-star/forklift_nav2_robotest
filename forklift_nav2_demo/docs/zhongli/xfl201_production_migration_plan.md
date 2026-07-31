@@ -770,6 +770,26 @@ config/vehicles/xfl201_unit_002.yaml
    - 舵角 `+90°/-90°` 的旋转方向和等效半径。
    - safety gate 预测轨迹和实车运动是否一致。
 
+### 12.3.1 已提前完成项
+
+2026-07-31 已先完成以下改动：
+
+- 新增 `forklift_nav2_demo/config/xfl201_nav2_foxy.yaml`。
+- 新增 `forklift_nav2_demo/urdf/xfl201_steered.urdf.xacro`，用于 XFL201 真车 TF/可视化建模。
+- `forklift_real_navigation.launch.py` 支持 `vehicle_model:=xfl201` 时默认选择 XFL201 Nav2 参数和 XFL201 URDF。
+- safety gate 在 `vehicle_model:=xfl201` 时使用 `wheel_base=1.47`、`pivot_turn_radius=1.743`、`rear_axle_x_offset=0.0`。
+- XFL201 Nav2 配置已写入保守带货叉 footprint：`[[1.666, 0.60], [1.666, -0.60], [-1.504, -0.60], [-1.504, 0.60]]`。
+- XFL201 vehicle interface 配置已将 `pivot_turn_radius_m` 改为 `1.743`，并新增 `pivot_center_x_offset_m: 0.0`。
+- XFL201 odom 在舵角 `+90°/-90°` 且 `pivot_center_x_offset_m=0.0` 时只积分 yaw，不再把轮端行走距离误算成 `base_link` 平移。
+- 已通过 Foxy Docker 构建和 `forklift_vehicle_interface`、`forklift_safety` 测试。
+
+仍需下周现场确认：
+
+- `Wa=1.743 m` 是否能作为 `pivot_turn_radius` 的临时值，或是否需要低速标定出更准确的等效半径。
+- XFL201 footprint 是否使用保守带货叉外廓，还是拆成空车/插叉两套 footprint。
+- 轮半径、齿比、脉冲到米比例、左右编码器方向。
+- 激光雷达、叉尖光电、叉根托盘到位检测的 TF 和 topic/message。
+
 ### 12.4 是否需要改大模型的判断条件
 
 默认先认为现有 `ForkliftVehicleModel` 足够表达 XFL201：

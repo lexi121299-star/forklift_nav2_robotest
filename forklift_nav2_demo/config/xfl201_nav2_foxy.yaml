@@ -1,0 +1,440 @@
+amcl:
+  ros__parameters:
+    use_sim_time: True
+    alpha1: 0.05
+    alpha2: 0.05
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: "base_footprint"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"
+    max_beams: 60
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "differential"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    update_min_a: 0.2
+    update_min_d: 0.25
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: scan
+
+# XFL201 geometry assumptions, REV. 06/2026:
+# - base_link is at the center of the two-wheel axle.
+# - +x points opposite the fork direction; forks extend toward -x.
+# - Empty vehicle body footprint estimate:
+#   front_x = +1.666 m, rear_x = -0.434 m, half_width = 0.538 m + margin.
+# - Conservative with-forks footprint extends rear_x to -1.504 m.
+
+amcl_map_client:
+  ros__parameters:
+    use_sim_time: True
+
+amcl_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: True
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    default_bt_xml_filename: "/workspace/install/forklift_nav2_demo/share/forklift_nav2_demo/behavior_trees/forklift_oru_plan_once_with_recovery.xml"
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    enable_groot_monitoring: True
+    groot_zmq_publisher_port: 1666
+    groot_zmq_server_port: 1667
+    plugin_lib_names:
+    - forklift_nav2_plugins
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+
+bt_navigator_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+controller_server:
+  ros__parameters:
+    use_sim_time: True
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugin: "general_goal_checker"
+    controller_plugins: ["FollowPath"]
+
+    # Progress checker parameters
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.2
+      movement_time_allowance: 30.0
+
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      # Kept aligned with FollowPath.goal_latch_yaw_tolerance so that when the
+      # controller latches a stop the BT also reports the goal as reached.
+      yaw_goal_tolerance: 0.30
+
+    # Forklift MPC controller parameters
+    FollowPath:
+      plugin: "forklift_nav2_plugins/ForkliftMpcController"
+      wheel_base: 1.47
+      max_velocity: 0.45
+      min_velocity: 0.06
+      max_reverse_velocity: 0.15
+      max_steering_angle: 1.5707963267948966
+      max_steering_angle_velocity: 1.6
+      max_acceleration: 0.5
+      max_angular_velocity: 0.8
+      allow_pivot_turn: true
+      pivot_steering_angle: 1.5707963267948966
+      pivot_steering_tolerance: 0.03
+      # Wa=1.743 m is an outer-envelope turning radius placeholder until
+      # low-speed XFL201 calibration provides the effective pivot radius.
+      pivot_turn_radius: 1.743
+      rear_axle_x_offset: 0.0
+      pivot_velocity: 0.12
+      pivot_yaw_tolerance: 0.05
+      pivot_stop_velocity_threshold: 0.02
+      horizon_time: 1.8
+      time_step: 0.2
+      lookahead_distance: 0.9
+      xy_goal_tolerance: 0.08
+      yaw_goal_tolerance: 0.25
+      transform_tolerance: 0.2
+      terminal_slowdown_distance: 0.6
+      # Terminal latch must be no looser than the controller's own terminal
+      # tolerance.  A 0.25 m latch can stop FollowPath before Nav2 observes the
+      # goal as reached, leaving the action active and turning later goals into
+      # preemption requests against a controller that is still latched.
+      goal_latch_enabled: true
+      goal_latch_xy_tolerance: 0.08
+      goal_latch_yaw_tolerance: 0.25
+      velocity_samples: 8
+      steering_samples: 11
+      preview_window_points: 10
+      allow_reverse: true
+      use_mpc_solver: true
+      use_collision_check: true
+      allow_unknown: true
+      preprocess_path: true
+      respect_reverse_path_orientation: true
+      trajectory_resample_spacing: 0.10
+      trajectory_smoothing_iterations: 1
+      trajectory_smoothing_corner_cut_ratio: 0.25
+      sharp_turn_warning_angle: 0.7853981633974483
+      minimum_turning_radius: 0.0
+      curvature_slowdown_enabled: true
+      curvature_slowdown_lateral_accel: 0.12
+      min_curvature_speed: 0.08
+      safety_gate_enabled: true
+      safety_emergency_stop_active: false
+      safety_stop_distance: 0.55
+      safety_slowdown_distance: 1.25
+      safety_min_speed: 0.05
+      safety_sample_spacing: 0.10
+      collision_cost_threshold: 253
+      path_distance_weight: 8.0
+      local_goal_weight: 14.0
+      global_goal_weight: 2.0
+      heading_weight: 2.0
+      obstacle_weight: 12.0
+      smoothness_weight: 1.0
+      velocity_reward_weight: 1.2
+      publish_control_cmd: true
+      control_cmd_topic: "/forklift/control_cmd_raw"
+      control_cmd_accel_time: 0.3
+      control_cmd_decel_time: 0.3
+
+controller_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      # Real vehicle: keep the rolling local costmap and controller pose in the
+      # continuous odom frame. AMCL owns map -> odom; the global planner remains
+      # in map. This prevents localization corrections from jumping local control.
+      global_frame: odom
+      robot_base_frame: base_link
+      use_sim_time: True
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      footprint: "[[1.666, 0.60], [1.666, -0.60], [-1.504, -0.60], [-1.504, 0.60]]"
+      plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.65
+        cost_scaling_factor: 5.0
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        map_subscribe_transient_local: True
+      always_send_full_costmap: True
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: True
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: True
+      footprint: "[[1.666, 0.60], [1.666, -0.60], [-1.504, -0.60], [-1.504, 0.60]]"
+      resolution: 0.05
+      track_unknown_space: true
+      # obstacle_layer added so the global planner avoids real obstacles that are
+      # not in the static "clean" map (sensed via /scan at plan time). Order keeps
+      # inflation last. Still plan-once: only obstacles visible when the goal is
+      # sent (within the laser range below) are routed around.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.65
+      always_send_full_costmap: True
+  global_costmap_client:
+    ros__parameters:
+      use_sim_time: True
+  global_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: True
+
+map_server:
+  ros__parameters:
+    use_sim_time: True
+    yaml_filename: "map.yaml"
+
+map_saver:
+  ros__parameters:
+    use_sim_time: True
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "forklift_nav2_plugins/OruGlobalPlanner"
+      allow_unknown: true
+      use_diagonal: true
+      prevent_corner_cutting: true
+      use_footprint_collision_check: true
+      footprint_collision_cost_threshold: 253
+      lethal_cost_threshold: 253
+      cost_travel_multiplier: 2.0
+      unknown_cost_penalty: 5.0
+      start_tolerance: 1.2
+      goal_tolerance: 1.5
+      max_iterations: 0
+      use_final_approach_orientation: true
+      use_lattice_planner: true
+      # v1 fail-safe: when the kinodynamic lattice search finds no path, fail cleanly
+      # (PlannerException) instead of handing a holonomic 2D-A* path to the forklift
+      # controller. A* ignores heading/kinematics, so the controller could not track it
+      # and the vehicle diverged to the wrong corner. Re-routing is deferred to P10; v1
+      # runs fixed, pre-validated routes and stops/aborts safely on planning failure.
+      lattice_fallback_to_astar: false
+      lattice_heading_bins: 16
+      lattice_step_distance: 0.20
+      lattice_arc_radius: 1.20
+      # Multi-curvature catalog. The tight/default/wide radii all terminate on
+      # the configured heading bins; the smallest radius is also used by the
+      # Reeds-Shepp analytic expansion.
+      lattice_arc_radii: [1.20, 1.743, 2.40]
+      lattice_arc_angle: 0.3926990817
+      lattice_primitive_samples: 5
+      lattice_reverse_enabled: true
+      lattice_goal_tolerance: 0.25
+      lattice_turn_cost_multiplier: 0.25
+      lattice_obstacle_cost_multiplier: 1.0
+      lattice_goal_heading_cost_multiplier: 0.25
+      lattice_reverse_cost_multiplier: 3.0
+      lattice_gear_switch_cost: 4.0
+      lattice_reverse_requires_goal_behind: true
+      lattice_reverse_goal_behind_margin: 0.05
+      lattice_pivot_enabled: true
+      lattice_pivot_angle: 0.3926990817
+      lattice_pivot_turn_cost: 2.0
+      lattice_rear_axle_x_offset: 0.0
+      # Near the goal with a large remaining heading error, fix heading by pivot only
+      # and suppress reverse so terminal nudges do not destabilise the controller.
+      lattice_pivot_terminal_radius: 1.743
+      lattice_pivot_terminal_heading: 0.7853981634  # pi/4 = 45 deg
+      # Reeds-Shepp goal shot. Every sample still passes costmap + footprint checks.
+      lattice_analytic_expansion_enabled: true
+      lattice_analytic_expansion_radius: 3.0
+      lattice_analytic_expansion_interval: 20
+      lattice_analytic_expansion_sample_distance: 0.05
+      # 0.0 means half a heading bin.
+      lattice_goal_heading_tolerance: 0.0
+      # Collision-checked Reeds-Shepp shortcuts; rejected shortcuts leave the
+      # original lattice segment chain untouched.
+      lattice_shortcut_smoothing_enabled: true
+      lattice_shortcut_max_lookahead: 12
+      lattice_max_iterations: 250000
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+recoveries_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    recovery_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_recoveries/Spin"
+    backup:
+      plugin: "nav2_recoveries/BackUp"
+    wait:
+      plugin: "nav2_recoveries/Wait"
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_timeout: 0.1
+    use_sim_time: true
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: True
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 2000
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200

@@ -31,7 +31,8 @@ class Xfl201OdomState:
 class Xfl201FeedbackState:
     drive_wheel_base_m: float = 1.47
     pivot_steering_angle_rad: float = math.pi / 2.0
-    pivot_turn_radius_m: float = 0.60
+    pivot_turn_radius_m: float = 1.743
+    pivot_center_x_offset_m: float = 0.0
     left_meter_per_pulse: float = 0.0
     right_meter_per_pulse: float = 0.0
     left_encoder_sign: float = 1.0
@@ -182,21 +183,43 @@ class Xfl201FeedbackState:
         )
 
         delta_s = 0.5 * (left_distance + right_distance)
-        delta_yaw = self._delta_yaw_from_steering(delta_s)
-        heading = self.odom.yaw + 0.5 * delta_yaw
-        self.odom.x += delta_s * math.cos(heading)
-        self.odom.y += delta_s * math.sin(heading)
-        self.odom.yaw = _normalize_angle(self.odom.yaw + delta_yaw)
+        old_x = self.odom.x
+        old_y = self.odom.y
+        if self._is_pivot_steering():
+            delta_yaw = self._pivot_delta_yaw(delta_s)
+            self._integrate_pivot_delta(delta_yaw)
+            base_delta_s = math.hypot(self.odom.x - old_x, self.odom.y - old_y)
+        else:
+            delta_yaw = self._steered_delta_yaw(delta_s)
+            heading = self.odom.yaw + 0.5 * delta_yaw
+            self.odom.x += delta_s * math.cos(heading)
+            self.odom.y += delta_s * math.sin(heading)
+            self.odom.yaw = _normalize_angle(self.odom.yaw + delta_yaw)
+            base_delta_s = delta_s
         if dt > 1e-9:
-            self.odom.velocity_mps = delta_s / dt
+            self.odom.velocity_mps = base_delta_s / dt
             self.odom.angular_velocity_radps = delta_yaw / dt
 
-    def _delta_yaw_from_steering(self, delta_s: float) -> float:
-        steering = self.steering_angle_rad
-        if abs(steering) >= self.pivot_steering_angle_rad - 1e-3:
-            turn_radius = max(1e-6, self.pivot_turn_radius_m)
-            return delta_s / turn_radius * (1.0 if steering >= 0.0 else -1.0)
-        return delta_s * math.tan(steering) / self.drive_wheel_base_m
+    def _is_pivot_steering(self) -> bool:
+        return abs(self.steering_angle_rad) >= self.pivot_steering_angle_rad - 1e-3
+
+    def _pivot_delta_yaw(self, delta_s: float) -> float:
+        turn_radius = max(1e-6, self.pivot_turn_radius_m)
+        direction = 1.0 if self.steering_angle_rad >= 0.0 else -1.0
+        return delta_s / turn_radius * direction
+
+    def _steered_delta_yaw(self, delta_s: float) -> float:
+        return delta_s * math.tan(self.steering_angle_rad) / self.drive_wheel_base_m
+
+    def _integrate_pivot_delta(self, delta_yaw: float) -> None:
+        old_yaw = self.odom.yaw
+        new_yaw = _normalize_angle(old_yaw + delta_yaw)
+        offset = self.pivot_center_x_offset_m
+        center_x = self.odom.x + offset * math.cos(old_yaw)
+        center_y = self.odom.y + offset * math.sin(old_yaw)
+        self.odom.x = center_x - offset * math.cos(new_yaw)
+        self.odom.y = center_y - offset * math.sin(new_yaw)
+        self.odom.yaw = new_yaw
 
 
 def _normalize_angle(angle: float) -> float:

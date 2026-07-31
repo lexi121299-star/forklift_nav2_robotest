@@ -56,7 +56,8 @@ class Xfl201VehicleInterface(Node):
         self.declare_parameter('right_encoder_sign', 1.0)
         self.declare_parameter('body_positive_is_fork_reverse', True)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
-        self.declare_parameter('pivot_turn_radius_m', 0.60)
+        self.declare_parameter('pivot_turn_radius_m', 1.743)
+        self.declare_parameter('pivot_center_x_offset_m', 0.0)
         self.declare_parameter('max_motor_rpm', 3000.0)
         self.declare_parameter('min_motor_rpm', 100.0)
         self.declare_parameter('rpm_accel_time_sec', 1.0)
@@ -87,7 +88,10 @@ class Xfl201VehicleInterface(Node):
         self._pivot_steering_angle_rad = self._positive_param(
             'pivot_steering_angle_rad', math.pi / 2.0
         )
-        self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 0.60)
+        self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 1.743)
+        self._pivot_center_x_offset_m = float(
+            self.get_parameter('pivot_center_x_offset_m').value
+        )
         self._max_motor_rpm = self._positive_param('max_motor_rpm', 3000.0)
         self._min_motor_rpm = max(0.0, float(self.get_parameter('min_motor_rpm').value))
         self._rpm_accel_time_sec = self._positive_param('rpm_accel_time_sec', 1.0)
@@ -116,6 +120,7 @@ class Xfl201VehicleInterface(Node):
             drive_wheel_base_m=self._drive_wheel_base_m,
             pivot_steering_angle_rad=self._pivot_steering_angle_rad,
             pivot_turn_radius_m=self._pivot_turn_radius_m,
+            pivot_center_x_offset_m=self._pivot_center_x_offset_m,
             left_meter_per_pulse=max(0.0, float(self.get_parameter('left_meter_per_pulse').value)),
             right_meter_per_pulse=max(0.0, float(self.get_parameter('right_meter_per_pulse').value)),
             left_encoder_sign=self._nonzero_param('left_encoder_sign', 1.0),

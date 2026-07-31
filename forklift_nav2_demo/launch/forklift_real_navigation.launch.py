@@ -41,24 +41,43 @@ def generate_launch_description():
     can_interface = LaunchConfiguration('can_interface')
     nav2_start_delay = LaunchConfiguration('nav2_start_delay')
 
-    robot_description = ParameterValue(
-        Command([
-            'xacro ',
-            os.path.join(demo_share, 'urdf', 'forklift_diff_drive.urdf.xacro'),
-        ]),
-        value_type=str,
-    )
+    def selected_vehicle_model(context):
+        selected = vehicle_model.perform(context).strip().lower()
+        if selected not in {'curtis', 'xfl201'}:
+            raise RuntimeError('vehicle_model must be one of: curtis, xfl201')
+        return selected
 
-    robot_state_publisher = Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        name='robot_state_publisher',
-        output='screen',
-        parameters=[{'robot_description': robot_description, 'use_sim_time': False}],
-    )
+    def default_nav2_params_file(selected):
+        if selected == 'xfl201':
+            return os.path.join(demo_share, 'config', 'xfl201_nav2_foxy.yaml')
+        return os.path.join(demo_share, 'config', 'forklift_nav2_oru_test_foxy.yaml')
+
+    def resolve_nav2_params_file(context):
+        configured = params_file.perform(context).strip()
+        if configured:
+            return configured
+        return default_nav2_params_file(selected_vehicle_model(context))
+
+    def robot_xacro_file(selected):
+        if selected == 'xfl201':
+            return os.path.join(demo_share, 'urdf', 'xfl201_steered.urdf.xacro')
+        return os.path.join(demo_share, 'urdf', 'forklift_diff_drive.urdf.xacro')
+
+    def launch_robot_state_publisher(context, *args, **kwargs):
+        robot_description = ParameterValue(
+            Command(['xacro ', robot_xacro_file(selected_vehicle_model(context))]),
+            value_type=str,
+        )
+        return [Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{'robot_description': robot_description, 'use_sim_time': False}],
+        )]
 
     def launch_vehicle_interface(context, *args, **kwargs):
-        selected = vehicle_model.perform(context).strip().lower()
+        selected = selected_vehicle_model(context)
         common_arguments = {
             'dry_run': vehicle_dry_run,
             'can_interface': can_interface,
@@ -68,17 +87,16 @@ def generate_launch_description():
         }
         if selected == 'curtis':
             launch_file = 'curtis_vehicle_interface.launch.py'
-        elif selected == 'xfl201':
-            launch_file = 'xfl201_vehicle_interface.launch.py'
         else:
-            raise RuntimeError('vehicle_model must be one of: curtis, xfl201')
+            launch_file = 'xfl201_vehicle_interface.launch.py'
         return [IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(vehicle_share, 'launch', launch_file)),
             launch_arguments=common_arguments.items(),
         )]
 
     def launch_safety(context, *args, **kwargs):
-        footprint = footprint_from_params(params_file.perform(context))
+        selected = selected_vehicle_model(context)
+        footprint = footprint_from_params(resolve_nav2_params_file(context))
         arguments = {
             'use_sim_time': 'false',
             'enabled': 'true',
@@ -90,9 +108,22 @@ def generate_launch_description():
             'localization_topic': '/odom',
             'localization_message_type': 'odometry',
             'costmap_timeout_sec': '1.5',
-            'wheel_base': '1.2',
-            'rear_axle_x_offset': '-0.34',
         }
+        if selected == 'xfl201':
+            arguments.update({
+                'wheel_base': '1.47',
+                'pivot_turn_radius': '1.743',
+                'rear_axle_x_offset': '0.0',
+                'max_drive_rpm': '3000.0',
+                'drive_accel_time_sec': '1.0',
+                'drive_decel_time_sec': '1.0',
+            })
+        else:
+            arguments.update({
+                'wheel_base': '1.2',
+                'pivot_turn_radius': '0.6',
+                'rear_axle_x_offset': '-0.34',
+            })
         if footprint:
             arguments['footprint'] = footprint
         return [IncludeLaunchDescription(
@@ -101,17 +132,18 @@ def generate_launch_description():
             launch_arguments=arguments.items(),
         )]
 
-    nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
-        launch_arguments={
-            'map': map_file,
-            'params_file': params_file,
-            'use_sim_time': 'false',
-            'autostart': 'true',
-            'use_composition': 'False',
-        }.items(),
-    )
+    def launch_nav2(context, *args, **kwargs):
+        return [IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
+            launch_arguments={
+                'map': map_file,
+                'params_file': resolve_nav2_params_file(context),
+                'use_sim_time': 'false',
+                'autostart': 'true',
+                'use_composition': 'False',
+            }.items(),
+        )]
 
     rviz = Node(
         package='rviz2',
@@ -129,8 +161,11 @@ def generate_launch_description():
             default_value='/workspace/forklift_factory_big_map_clean.yaml'),
         DeclareLaunchArgument(
             'nav2_params_file',
-            default_value=os.path.join(
-                demo_share, 'config', 'forklift_nav2_oru_test_foxy.yaml')),
+            default_value='',
+            description=(
+                'Optional Nav2 params file. Empty selects the default for '
+                'vehicle_model.'
+            )),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'vehicle_dry_run',
@@ -142,8 +177,8 @@ def generate_launch_description():
             description='Vehicle interface model: curtis or xfl201.'),
         DeclareLaunchArgument('can_interface', default_value='can0'),
         DeclareLaunchArgument('nav2_start_delay', default_value='3.0'),
-        robot_state_publisher,
+        OpaqueFunction(function=launch_robot_state_publisher),
         OpaqueFunction(function=launch_vehicle_interface),
         OpaqueFunction(function=launch_safety),
-        TimerAction(period=nav2_start_delay, actions=[nav2, rviz]),
+        TimerAction(period=nav2_start_delay, actions=[OpaqueFunction(function=launch_nav2), rviz]),
     ])
