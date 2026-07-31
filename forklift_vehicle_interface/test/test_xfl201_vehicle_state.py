@@ -30,9 +30,9 @@ def test_feedback_state_updates_vehicle_mode_and_faults():
     assert state.fault_summary() == 'travel=7, steering=3, vcm_valve=9'
 
 
-def test_encoder_odometry_uses_both_wheels():
+def test_encoder_odometry_uses_average_distance_for_straight_travel():
     state = Xfl201FeedbackState(
-        drive_track_width_m=0.80,
+        drive_wheel_base_m=1.0,
         left_meter_per_pulse=0.001,
         right_meter_per_pulse=0.001,
         max_integration_dt_sec=10.0,
@@ -47,15 +47,45 @@ def test_encoder_odometry_uses_both_wheels():
     assert state.odom.y == pytest.approx(0.0)
     assert state.odom.yaw == pytest.approx(0.0)
 
-    state.update_frame(0x209, i64_le(1000), 2.0)
-    state.update_frame(0x20A, i64_le(1400), 2.0)
+
+def test_encoder_odometry_uses_steering_angle_for_yaw():
+    state = Xfl201FeedbackState(
+        drive_wheel_base_m=1.0,
+        left_meter_per_pulse=0.001,
+        right_meter_per_pulse=0.001,
+        max_integration_dt_sec=10.0,
+    )
+    state.steering_angle_rad = math.radians(45.0)
+
+    state.update_frame(0x209, i64_le(0), 0.0)
+    state.update_frame(0x20A, i64_le(0), 0.0)
+    state.update_frame(0x209, i64_le(400), 1.0)
+    state.update_frame(0x20A, i64_le(400), 1.0)
+
+    assert state.odom.yaw == pytest.approx(0.4)
+
+
+def test_ninety_degree_steering_uses_configured_turn_radius_for_yaw():
+    state = Xfl201FeedbackState(
+        drive_wheel_base_m=1.0,
+        pivot_turn_radius_m=0.5,
+        left_meter_per_pulse=0.001,
+        right_meter_per_pulse=0.001,
+        max_integration_dt_sec=10.0,
+    )
+    state.steering_angle_rad = math.pi / 2.0
+
+    state.update_frame(0x209, i64_le(0), 0.0)
+    state.update_frame(0x20A, i64_le(0), 0.0)
+    state.update_frame(0x209, i64_le(250), 1.0)
+    state.update_frame(0x20A, i64_le(250), 1.0)
 
     assert state.odom.yaw == pytest.approx(0.5)
 
 
 def test_encoder_odometry_stays_zero_until_supplier_scale_is_configured():
     state = Xfl201FeedbackState(
-        drive_track_width_m=0.80,
+        drive_wheel_base_m=1.0,
         left_meter_per_pulse=0.0,
         right_meter_per_pulse=0.0,
     )

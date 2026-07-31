@@ -75,9 +75,15 @@ XFL201 协议：
 
 - 旧 Curtis 车型使用 `0x203 / 0x303 / 0x403`。
 - XFL201 使用 `0x231 / 0x232 / 0x233`。
-- XFL201 车体控制直接给左、右电机转速，范围 `int16 -5000~5000 RPM`。
+- 厂家确认 XFL201 不是差速底盘，舵轮角度必须给；直行舵角给 `0`。
+- `0x231` 的左、右电机 RPM 是行走速度命令，正常同向同值输出，不用于差速转向。
+- 车辆不能左右轮反转原地旋转；可给舵角 `±90°`，以行走 RPM 围绕转向中心旋转。
 - XFL201 货叉控制是速度百分比 + 方向 bit，不是泵转速 + 比例阀电流。
 - XFL201 协议波特率为 `125 kbps`，标准帧。
+- 心跳检测窗口当前为 `200 ms`，`200 ms` 内收到一帧心跳即可；建议发送周期保持 `50 ms`，允许周期不超过 `150 ms`。
+- 心跳丢失后电控报错并自动停车，恢复心跳后需要人工按复位按键恢复任务。
+- 停车和急停均发 RPM=0；协议虽有刹车力度字段，但厂家说明当前没有刹车选项。
+- 当前最大行走命令为 `3000 RPM`，最小低速 `30 RPM`，最小稳定运行速度 `100 RPM`。
 
 因此必须新增 XFL201 专用 CAN codec 和 vehicle interface，不能复用 Curtis CAN codec。
 
@@ -103,7 +109,7 @@ XFL201 协议：
 
 5. **先兼容，再优化模型**
    - 第一阶段可以用现有上层 `ForkliftControlCommand` 兼容 XFL201。
-   - 后续再把 Nav2 控制器升级成真正差速底盘模型。
+   - 车型接口按舵轮模型处理：上层速度变成左右同值 RPM，上层转角变成 `0x231` 舵轮角度。
 
 ## 5. 需要新增和修改的文件
 
@@ -312,13 +318,12 @@ XFL201 adapter 内部转换：
 
 ```text
 v = signed velocity_mps
-w = 根据 steering_angle_rad 或 pivot command 推导
 
-left_speed_mps  = v - w * track_width / 2
-right_speed_mps = v + w * track_width / 2
+travel_rpm = speed_to_motor_rpm(v)
 
-left_rpm  = speed_to_motor_rpm(left_speed_mps)
-right_rpm = speed_to_motor_rpm(right_speed_mps)
+left_rpm  = travel_rpm
+right_rpm = travel_rpm
+steering_angle = steering_angle_rad
 ```
 
 优点：
@@ -329,31 +334,32 @@ right_rpm = speed_to_motor_rpm(right_speed_mps)
 
 风险：
 
-- 现有 controller 名义上仍是 steering/pivot 模型，不是完整差速模型。
-- 小半径转弯、原地旋转、终点姿态调整可能需要调参。
+- XFL201 不能执行左右轮反转的差速原地旋转。
+- 现有 planner/controller 中的 pivot primitive 需要重新定义为“舵角 ±90° 的小半径转向”，而不是差速 counter-rotation。
 
-### 6.2 第二阶段：差速模型专用控制器
+### 6.2 第二阶段：XFL201 舵轮模型专用控制器
 
-量产稳定后，建议把上层控制器升级为差速底盘模型：
+量产稳定后，建议把上层控制器显式升级为 XFL201 舵轮底盘模型：
 
 ```text
 controller output:
-  linear velocity v
-  angular velocity w
+  travel velocity v
+  steering angle phi
 
 vehicle interface:
-  v/w -> left/right rpm
+  v -> left/right same rpm
+  phi -> 0x231 steering angle
 ```
 
-这样会更符合 XFL201 左右差速车体。
+这样会更符合厂家确认的 XFL201 控制语义。
 
 需要改动：
 
-- `ForkliftMpcController` 增加 `drive_model:=ackermann_like|differential`。
-- `ForkliftVehicleModel` 支持 differential。
-- planner primitive 支持差速原地旋转。
-- safety gate swept footprint 按差速模型预测。
-- sim bridge 支持差速模型下的真实 `v/w`。
+- `ForkliftMpcController` 增加 `drive_model:=curtis_pivot|xfl201_steered`。
+- `ForkliftVehicleModel` 支持 XFL201 舵角模型。
+- planner primitive 中禁止差速原地旋转；`±90°` 转向按小半径绕中心旋转处理。
+- safety gate swept footprint 按 XFL201 舵角模型预测。
+- sim bridge 支持 XFL201 舵轮模型下的真实运动。
 
 ## 7. 货叉控制策略
 
@@ -428,7 +434,10 @@ left_distance = delta_left_count * meter_per_pulse
 right_distance = delta_right_count * meter_per_pulse
 
 delta_s = (left_distance + right_distance) / 2
-delta_yaw = (right_distance - left_distance) / track_width
+delta_yaw = delta_s * tan(steering_angle) / wheel_base
+
+当 steering_angle 接近 ±90° 时，使用现场标定的转向半径：
+delta_yaw = delta_s / pivot_turn_radius
 ```
 
 需要 YAML 配置：
@@ -437,7 +446,8 @@ delta_yaw = (right_distance - left_distance) / track_width
 encoder_counts_per_motor_rev: TBD
 drive_gear_ratio: TBD
 drive_wheel_radius_m: TBD
-drive_track_width_m: TBD
+drive_wheel_base_m: TBD
+pivot_turn_radius_m: TBD
 left_encoder_sign: 1
 right_encoder_sign: 1
 odom_publish_tf: true
@@ -557,7 +567,7 @@ XFL201 量产必须保留三层安全：
 验收：
 
 - 直行 1 m，odom 距离误差在可接受范围。
-- 原地旋转 90 度，odom yaw 方向正确。
+- 舵角 `±90°` 小半径转向 90 度，odom yaw 方向正确。
 - 左右轮符号正确。
 - 断 CAN 或反馈超时进入 fault。
 
@@ -585,7 +595,7 @@ XFL201 量产必须保留三层安全：
 - 直线前进。
 - 倒车。
 - 低速小角度转弯。
-- 原地/近原地旋转。
+- 舵角 `±90°` 小半径转向。
 - 到点停车。
 - 障碍物触发 safety stop。
 
@@ -659,7 +669,7 @@ config/vehicles/xfl201_unit_002.yaml
 - 自动/手动模式。
 - 直行 5 m。
 - 倒车 2 m。
-- 原地旋转 90 度。
+- 舵角 ±90° 小半径转向 90 度。
 - A-B 导航。
 - 障碍停车。
 - 货叉升降。
@@ -685,14 +695,19 @@ config/vehicles/xfl201_unit_002.yaml
 
 | 项目 | 状态 | 说明 |
 | --- | --- | --- |
-| 左右差速是否完全成立 | 待确认 | 协议有左右电机 RPM，但也有舵轮角度字段 |
-| 舵轮角度字段是否需要控制 | 待确认 | 如果差速车无需舵角，可固定 0 |
+| 左右差速是否完全成立 | 已确认 | 厂家确认不是差速车 |
+| 舵轮角度字段是否需要控制 | 已确认 | 必须给；直行给 0 |
+| 原地旋转能力 | 已确认 | 不能差速原地旋转；舵角 ±90° 绕中心旋转 |
+| 最大 RPM | 已确认 | 当前最大 3000 RPM |
+| 最小 RPM | 已确认 | 低速 30 RPM，稳定运行 100 RPM |
+| 心跳超时 | 已确认 | 检测 200 ms，建议发送周期 50 ms，允许周期不超过 150 ms |
+| 停车/急停方式 | 已确认 | 发 RPM=0，没有刹车选项 |
 | 左电机 RPM 正方向 | 待确认 | 协议说车体正方向是货叉反方向，需要实测 |
 | 右电机 RPM 正方向 | 待确认 | 需要实测 |
 | RPM 是电机轴还是轮端 | 待确认 | 影响速度换算 |
 | 齿比 | 待确认 | 如果 RPM 是电机轴必须配置 |
 | 驱动轮半径 | 待确认 | 影响 odom 和 RPM 换算 |
-| 驱动轮中心距 | 待确认 | 影响差速角速度 |
+| 轴距/转向半径 | 待确认 | 影响舵轮模型 odom 和 swept footprint |
 | 脉冲每圈数量 | 待确认 | 影响 odom |
 | 货叉高度反馈来源 | 待确认 | `0x233` 只看到控制，没有高度反馈 |
 | 侧移反馈来源 | 待确认 | 需要传感器或 CAN 反馈 |
@@ -702,7 +717,7 @@ config/vehicles/xfl201_unit_002.yaml
 
 ## 13. 风险点
 
-1. 协议里的“左右电机转速 + 舵轮角度”语义需要确认。
+1. 已确认 XFL201 不是差速模型；后续 planner/controller 不能再按差速原地旋转设计。
 2. 如果没有准确 wheel radius / gear ratio / pulse ratio，odom 会漂。
 3. 如果货叉没有位置反馈，不能做可靠的 `ForkMoveTo.action`。
 4. 新车尺寸更长，旧地图窄通道路线可能需要重新验证。

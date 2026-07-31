@@ -10,14 +10,13 @@ def make_interface():
     interface = object.__new__(Xfl201VehicleInterface)
     interface._drive_wheel_radius_m = 0.10
     interface._drive_gear_ratio = 1.0
-    interface._drive_track_width_m = 0.80
     interface._drive_wheel_base_m = 1.47
     interface._left_motor_sign = 1.0
     interface._right_motor_sign = 1.0
     interface._body_positive_is_fork_reverse = False
     interface._pivot_steering_angle_rad = math.pi / 2.0
     interface._pivot_turn_radius_m = 0.40
-    interface._max_motor_rpm = 5000.0
+    interface._max_motor_rpm = 3000.0
     interface._min_motor_rpm = 0.0
     interface._steering_angle_fixed_deg = 0.0
     interface._use_command_steering_angle = True
@@ -45,15 +44,16 @@ def test_straight_command_maps_to_equal_motor_rpm():
     assert steering == pytest.approx(0.0)
 
 
-def test_pivot_command_maps_to_opposite_motor_rpm():
+def test_ninety_degree_steering_keeps_equal_travel_rpm():
     interface = make_interface()
 
-    left, right, _ = interface._motor_command_from_control(
+    left, right, steering = interface._motor_command_from_control(
         make_command(speed=0.2, steering=math.pi / 2.0)
     )
 
-    assert left == pytest.approx(-right)
-    assert left < 0.0
+    assert left == pytest.approx(right)
+    assert steering == pytest.approx(90.0)
+    assert left > 0.0
     assert right > 0.0
 
 

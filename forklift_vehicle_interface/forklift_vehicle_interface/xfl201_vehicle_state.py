@@ -29,7 +29,9 @@ class Xfl201OdomState:
 
 @dataclass
 class Xfl201FeedbackState:
-    drive_track_width_m: float = 0.80
+    drive_wheel_base_m: float = 1.47
+    pivot_steering_angle_rad: float = math.pi / 2.0
+    pivot_turn_radius_m: float = 0.60
     left_meter_per_pulse: float = 0.0
     right_meter_per_pulse: float = 0.0
     left_encoder_sign: float = 1.0
@@ -108,7 +110,7 @@ class Xfl201FeedbackState:
 
     def odom_enabled(self) -> bool:
         return (
-            self.drive_track_width_m > 1e-6 and
+            self.drive_wheel_base_m > 1e-6 and
             self.left_meter_per_pulse > 0.0 and
             self.right_meter_per_pulse > 0.0
         )
@@ -180,7 +182,7 @@ class Xfl201FeedbackState:
         )
 
         delta_s = 0.5 * (left_distance + right_distance)
-        delta_yaw = (right_distance - left_distance) / self.drive_track_width_m
+        delta_yaw = self._delta_yaw_from_steering(delta_s)
         heading = self.odom.yaw + 0.5 * delta_yaw
         self.odom.x += delta_s * math.cos(heading)
         self.odom.y += delta_s * math.sin(heading)
@@ -188,6 +190,13 @@ class Xfl201FeedbackState:
         if dt > 1e-9:
             self.odom.velocity_mps = delta_s / dt
             self.odom.angular_velocity_radps = delta_yaw / dt
+
+    def _delta_yaw_from_steering(self, delta_s: float) -> float:
+        steering = self.steering_angle_rad
+        if abs(steering) >= self.pivot_steering_angle_rad - 1e-3:
+            turn_radius = max(1e-6, self.pivot_turn_radius_m)
+            return delta_s / turn_radius * (1.0 if steering >= 0.0 else -1.0)
+        return delta_s * math.tan(steering) / self.drive_wheel_base_m
 
 
 def _normalize_angle(angle: float) -> float:

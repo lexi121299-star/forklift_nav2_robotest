@@ -47,7 +47,6 @@ class Xfl201VehicleInterface(Node):
         self.declare_parameter('base_frame_id', 'base_link')
         self.declare_parameter('drive_wheel_radius_m', 0.15)
         self.declare_parameter('drive_gear_ratio', 1.0)
-        self.declare_parameter('drive_track_width_m', 0.80)
         self.declare_parameter('drive_wheel_base_m', 1.47)
         self.declare_parameter('left_meter_per_pulse', 0.0)
         self.declare_parameter('right_meter_per_pulse', 0.0)
@@ -58,9 +57,11 @@ class Xfl201VehicleInterface(Node):
         self.declare_parameter('body_positive_is_fork_reverse', True)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('pivot_turn_radius_m', 0.60)
-        self.declare_parameter('max_motor_rpm', 5000.0)
-        self.declare_parameter('min_motor_rpm', 0.0)
-        self.declare_parameter('max_brake_force', 255)
+        self.declare_parameter('max_motor_rpm', 3000.0)
+        self.declare_parameter('min_motor_rpm', 100.0)
+        self.declare_parameter('rpm_accel_time_sec', 1.0)
+        self.declare_parameter('rpm_decel_time_sec', 1.0)
+        self.declare_parameter('max_brake_force', 0)
         self.declare_parameter('normal_brake_force', 0)
         self.declare_parameter('send_fork_stop_frame', False)
         self.declare_parameter('steering_angle_fixed_deg', 0.0)
@@ -77,7 +78,6 @@ class Xfl201VehicleInterface(Node):
         self._base_frame_id = str(self.get_parameter('base_frame_id').value)
         self._drive_wheel_radius_m = self._positive_param('drive_wheel_radius_m', 0.15)
         self._drive_gear_ratio = self._positive_param('drive_gear_ratio', 1.0)
-        self._drive_track_width_m = self._positive_param('drive_track_width_m', 0.80)
         self._drive_wheel_base_m = self._positive_param('drive_wheel_base_m', 1.47)
         self._left_motor_sign = self._nonzero_param('left_motor_sign', 1.0)
         self._right_motor_sign = self._nonzero_param('right_motor_sign', 1.0)
@@ -88,8 +88,10 @@ class Xfl201VehicleInterface(Node):
             'pivot_steering_angle_rad', math.pi / 2.0
         )
         self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 0.60)
-        self._max_motor_rpm = self._positive_param('max_motor_rpm', 5000.0)
+        self._max_motor_rpm = self._positive_param('max_motor_rpm', 3000.0)
         self._min_motor_rpm = max(0.0, float(self.get_parameter('min_motor_rpm').value))
+        self._rpm_accel_time_sec = self._positive_param('rpm_accel_time_sec', 1.0)
+        self._rpm_decel_time_sec = self._positive_param('rpm_decel_time_sec', 1.0)
         self._max_brake_force = self._byte_param('max_brake_force', 255)
         self._normal_brake_force = self._byte_param('normal_brake_force', 0)
         self._send_fork_stop_frame = self._bool_param('send_fork_stop_frame', False)
@@ -106,9 +108,14 @@ class Xfl201VehicleInterface(Node):
         self._last_stop_reason = ''
         self._last_logged_tx = ''
         self._transport_error = ''
+        self._last_left_command_rpm = 0.0
+        self._last_right_command_rpm = 0.0
+        self._last_tx_sec: Optional[float] = None
 
         self._feedback = Xfl201FeedbackState(
-            drive_track_width_m=self._drive_track_width_m,
+            drive_wheel_base_m=self._drive_wheel_base_m,
+            pivot_steering_angle_rad=self._pivot_steering_angle_rad,
+            pivot_turn_radius_m=self._pivot_turn_radius_m,
             left_meter_per_pulse=max(0.0, float(self.get_parameter('left_meter_per_pulse').value)),
             right_meter_per_pulse=max(0.0, float(self.get_parameter('right_meter_per_pulse').value)),
             left_encoder_sign=self._nonzero_param('left_encoder_sign', 1.0),
@@ -297,6 +304,12 @@ class Xfl201VehicleInterface(Node):
 
     def _send_frames(self, command: ForkliftControlCommand, stop_reason: str) -> None:
         left_rpm, right_rpm, steering_deg = self._motor_command_from_control(command)
+        immediate_stop = (
+            stop_reason in {'emergency stop', 'command timeout'} or
+            command.brake or
+            not command.enable
+        )
+        left_rpm, right_rpm = self._slew_motor_rpms(left_rpm, right_rpm, immediate_stop)
         travel = {
             'left_motor_rpm': left_rpm,
             'right_motor_rpm': right_rpm,
@@ -328,42 +341,31 @@ class Xfl201VehicleInterface(Node):
         if not command.enable or command.brake:
             return 0.0, 0.0, self._steering_deg_for_command(command)
 
-        v, w = self._twist_from_control(command)
-        left_speed = v - w * self._drive_track_width_m * 0.5
-        right_speed = v + w * self._drive_track_width_m * 0.5
-        left_rpm = self._speed_to_motor_rpm(left_speed) * self._left_motor_sign
-        right_rpm = self._speed_to_motor_rpm(right_speed) * self._right_motor_sign
+        travel_speed = self._travel_speed_from_control(command)
+        motor_rpm = self._speed_to_motor_rpm(travel_speed)
+        left_rpm = motor_rpm * self._left_motor_sign
+        right_rpm = motor_rpm * self._right_motor_sign
         return (
             self._clamp_motor_rpm(left_rpm),
             self._clamp_motor_rpm(right_rpm),
             self._steering_deg_for_command(command),
         )
 
-    def _twist_from_control(self, command: ForkliftControlCommand) -> Tuple[float, float]:
+    def _travel_speed_from_control(self, command: ForkliftControlCommand) -> float:
         direction = self._direction(command)
         if direction == 0:
-            return 0.0, 0.0
+            return 0.0
 
         speed = abs(command.velocity_mps)
         if abs(command.drive_rpm) > 1e-6 and speed <= 1e-6:
             speed = self._motor_rpm_to_speed(abs(command.drive_rpm))
         if speed <= 1e-9:
-            return 0.0, 0.0
+            return 0.0
 
         v = direction * speed
         if self._body_positive_is_fork_reverse:
             v *= -1.0
-
-        steering = command.steering_angle_rad
-        if self._is_pivot_turn(steering):
-            omega = abs(v) / self._pivot_turn_radius_m
-            if direction < 0:
-                omega *= -1.0
-            if steering < 0.0:
-                omega *= -1.0
-            return 0.0, omega
-
-        return v, v * math.tan(steering) / self._drive_wheel_base_m
+        return v
 
     def _direction(self, command: ForkliftControlCommand) -> int:
         if command.forward and not command.reverse:
@@ -371,9 +373,6 @@ class Xfl201VehicleInterface(Node):
         if command.reverse and not command.forward:
             return -1
         return 0
-
-    def _is_pivot_turn(self, steering: float) -> bool:
-        return abs(steering) >= self._pivot_steering_angle_rad - 1e-3
 
     def _steering_deg_for_command(self, command: ForkliftControlCommand) -> float:
         if not self._use_command_steering_angle:
@@ -397,6 +396,46 @@ class Xfl201VehicleInterface(Node):
 
     def _clamp_motor_rpm(self, rpm: float) -> float:
         return max(-self._max_motor_rpm, min(self._max_motor_rpm, rpm))
+
+    def _slew_motor_rpms(
+        self,
+        target_left_rpm: float,
+        target_right_rpm: float,
+        immediate_stop: bool = False,
+    ) -> Tuple[float, float]:
+        if immediate_stop:
+            self._last_left_command_rpm = target_left_rpm
+            self._last_right_command_rpm = target_right_rpm
+            self._last_tx_sec = self._now_sec()
+            return target_left_rpm, target_right_rpm
+
+        now_sec = self._now_sec()
+        if self._last_tx_sec is None:
+            self._last_tx_sec = now_sec
+            self._last_left_command_rpm = target_left_rpm
+            self._last_right_command_rpm = target_right_rpm
+            return target_left_rpm, target_right_rpm
+
+        dt = max(0.0, now_sec - self._last_tx_sec)
+        self._last_tx_sec = now_sec
+        accel_step = self._max_motor_rpm * dt / max(1e-6, self._rpm_accel_time_sec)
+        decel_step = self._max_motor_rpm * dt / max(1e-6, self._rpm_decel_time_sec)
+
+        self._last_left_command_rpm = self._slew_one_rpm(
+            self._last_left_command_rpm, target_left_rpm, accel_step, decel_step)
+        self._last_right_command_rpm = self._slew_one_rpm(
+            self._last_right_command_rpm, target_right_rpm, accel_step, decel_step)
+        return self._last_left_command_rpm, self._last_right_command_rpm
+
+    @staticmethod
+    def _slew_one_rpm(current: float, target: float, accel_step: float, decel_step: float) -> float:
+        delta = target - current
+        if abs(delta) <= 1e-9:
+            return target
+        step = decel_step if abs(target) < abs(current) else accel_step
+        if abs(delta) <= step:
+            return target
+        return current + math.copysign(step, delta)
 
     def _log_tx_frames(
         self,
