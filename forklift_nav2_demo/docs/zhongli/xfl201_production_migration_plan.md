@@ -790,6 +790,37 @@ config/vehicles/xfl201_unit_002.yaml
 - 轮半径、齿比、脉冲到米比例、左右编码器方向。
 - 激光雷达、叉尖光电、叉根托盘到位检测的 TF 和 topic/message。
 
+### 12.3.2 当前剩余工作（2026-08-03）
+
+截至 2026-08-03，代码侧已经完成 XFL201 专用 CAN codec、vehicle interface dry-run、Nav2 参数、URDF、launch 车型选择、safety gate 参数对齐、pivot odom 初版修正。后续剩余工作主要分为“现场标定/验证”和“未实现 adapter”两类。
+
+| 模块 | 当前状态 | 剩余工作 | 阻塞/输入 |
+| --- | --- | --- | --- |
+| 真 CAN 通讯 | 已有 `xfl201_vehicle_interface` 和 `zhongli_can_codec` | 上车验证 `0x231/0x232` 周期发送、`0x206/0x207/0x209/0x20A/0x6DB` 接收、SocketCAN `125 kbps` 配置 | 需要实车、CAN 接线、自动模式 |
+| 心跳/复位流程 | 代码按 20 Hz 发送心跳 | 实测心跳丢失后自动停车、心跳恢复后必须人工复位、任务状态如何恢复 | 厂家复位按键/状态反馈 |
+| 行走方向标定 | 初版使用 `body_positive_is_fork_reverse: true`，左右电机同值 RPM | 实测前进/后退方向、左右电机 RPM 正负号、舵角正负号、`steering_angle_deg` 零位 | 安全区域低速试车 |
+| RPM 与速度换算 | 代码可配置轮半径、齿比、RPM 限幅 | 确认 RPM 是电机轴还是轮端、齿比、真实轮半径；用 `315.35 RPM ≈ 1 km/h` 校验换算 | 厂家参数或现场测速 |
+| 编码器里程计 | 已接 `0x209/0x20A` 脉冲积分框架 | 确认脉冲每圈数量、脉冲到米比例、左右脉冲符号、上电是否清零、溢出处理 | 厂家回复/直行 1 m 标定 |
+| pivot 半径 | `Wa=1.743 m` 暂作为外置占位 | 实测舵角 `+90°/-90°` 转 90 度的等效半径和 yaw 方向，必要时调整 `pivot_turn_radius` | 低速转向标定 |
+| pivot 中心 | 初版 `pivot_center_x_offset_m=0.0`、`rear_axle_x_offset=0.0` | 验证车辆是否确实围绕两轮轴中心旋转；如果不是，标定中心相对 `base_link` 的 x 偏移 | 低速转向轨迹 |
+| Nav2/safety footprint | 已有保守带货叉 footprint | 确认正式导航使用空车 footprint 还是带货叉 footprint；根据实际外廓、安全余量和通道宽度调参 | 现场通道和避障策略 |
+| URDF / TF | 已有 XFL201 初版 URDF | 测量并写入 270° 避障激光、补盲相机、叉尖光电、叉根检测、托盘检测雷达的 `xyz/rpy` | 传感器安装尺寸 |
+| 定位接入 | launch 默认 `/odom`、`map -> odom -> base_link` | 明确定位侧最终提供哪些 topic，是否由定位发布 `map -> odom`，以及是否使用 AMCL/SLAM/外部定位 | 定位同事 topic/message 定稿 |
+| 实车基础导航 | Nav2 参数已可切 `vehicle_model:=xfl201` | 跑通直行、倒车、小角度转弯、`±90°` 小半径转向、到点停车、障碍停车 | CAN/odom/TF 都正常后执行 |
+| XFL201 货叉 adapter | 仍未实现 | 新增 `xfl201_fork_control_adapter`，把 `ForkMoveTo.action` 转成 `0x233` 速度百分比和方向 bit | 货叉反馈来源未确认 |
+| 货叉闭环反馈 | 未接入 | 明确高度、侧移、倾角、限位、故障码来源；没有反馈就不能可靠闭环 `ForkMoveTo.action` | 厂家协议或外置传感器 |
+| 托盘/雷达接入 | 任务文档已有两段式流程 | 做雷达 message/action adapter，将实际雷达 message 转成托盘偏移结果；接入 task manager 取叉段 | 雷达 topic/message 定稿 |
+| 两段式取托盘实车联调 | 设计文档已有 | 导航到等待位、升到 `N+3`、雷达检测、下降到 `N`、偏移补偿、插叉、轻抬的实车流程验证 | 货叉 adapter + 雷达 adapter |
+| 量产配置 | 方案中规划了 per-vehicle YAML | 建立 `xfl201_default.yaml` 和单车标定文件，避免把某一台车参数写死在代码里 | 第一台车标定完成后沉淀 |
+| 量产验收 | 文档列了验收项 | 编写出厂/回归 checklist 和必要脚本，覆盖 CAN、急停、自动/手动、导航、货叉、托盘检测 | 第一轮实车验证结果 |
+
+优先级建议：
+
+1. 先做真 CAN 通讯和行走方向标定，确认车辆能安全收发、停车、前进/后退。
+2. 再做编码器里程计和 pivot 半径/中心标定，保证 `/odom` 与实车运动自洽。
+3. 然后做 TF/footprint/safety gate 实车复核，避免模型和避障误差。
+4. 在底盘闭环稳定后，再进入 XFL201 货叉 adapter、雷达 adapter 和两段式取托盘实车联调。
+
 ### 12.4 是否需要改大模型的判断条件
 
 默认先认为现有 `ForkliftVehicleModel` 足够表达 XFL201：
