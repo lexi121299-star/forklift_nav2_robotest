@@ -19,11 +19,11 @@ xfl201_vehicle_interface:
     drive_gear_ratio: 26.75
     drive_wheel_base_m: 1.47
 
-    # Initial odometry scale for 0x209/0x20A.
-    # Assumption until field calibration: counters are motor-side encoder counts
-    # at 1024 counts/rev, so meter_per_pulse = pi*0.45/(26.75*1024).
-    left_meter_per_pulse: 0.000051610568564376714
-    right_meter_per_pulse: 0.000051610568564376714
+    # Supplier confirmed 0x209/0x20A are motor-side pulse counters:
+    # 64 pulses/motor rev, gear ratio 26.75, wheel diameter 450 mm.
+    # meter_per_pulse = pi*0.45/(26.75*64) ~= 0.000826 m.
+    left_meter_per_pulse: 0.0008257690970300274
+    right_meter_per_pulse: 0.0008257690970300274
     left_encoder_sign: 1.0
     right_encoder_sign: 1.0
 

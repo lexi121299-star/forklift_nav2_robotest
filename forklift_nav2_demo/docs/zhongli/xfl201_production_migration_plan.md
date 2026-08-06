@@ -479,13 +479,13 @@ delta_yaw = delta_s / pivot_turn_radius
 需要 YAML 配置：
 
 ```yaml
-encoder_counts_per_motor_rev: TBD
+encoder_counts_per_motor_rev: 64
 drive_gear_ratio: 26.75
 drive_wheel_radius_m: 0.225
 drive_wheel_base_m: 1.47
 front_track_width_m: 0.936
-left_meter_per_pulse: 0.000051610568564376714   # initial: assumes motor-side 1024 counts/rev
-right_meter_per_pulse: 0.000051610568564376714  # replace after 5m/10m field calibration
+left_meter_per_pulse: 0.0008257690970300274   # pi*0.45/(26.75*64), supplier-confirmed initial value
+right_meter_per_pulse: 0.0008257690970300274  # replace only if 5m/10m field calibration shows drift
 pivot_turn_radius_m: 1.743  # 暂按 Wa 外轮廓转弯半径占位，后续实车标定
 pivot_center_x_offset_m: 0.0
 left_encoder_sign: 1
@@ -790,7 +790,7 @@ config/vehicles/xfl201_unit_002.yaml
 
 - `Wa=1.743 m` 是否能作为 `pivot_turn_radius` 的临时值，或是否需要低速标定出更准确的等效半径。
 - XFL201 footprint 是否使用保守带货叉外廓，还是拆成空车/插叉两套 footprint。
-- 轮半径、齿比、脉冲到米比例、左右编码器方向。
+- 轮半径、齿比、脉冲到米比例已由厂家确认；左右编码器方向仍需现场低速验证。
 - 激光雷达、叉尖光电、叉根托盘到位检测的 TF 和 topic/message。
 
 ### 12.3.2 当前剩余工作（2026-08-03）
@@ -802,8 +802,8 @@ config/vehicles/xfl201_unit_002.yaml
 | 真 CAN 通讯 | 已有 `xfl201_vehicle_interface` 和 `zhongli_can_codec` | 上车验证 `0x231/0x232` 周期发送、`0x206/0x207/0x209/0x20A/0x6DB` 接收、SocketCAN `125 kbps` 配置 | 需要实车、CAN 接线、自动模式 |
 | 心跳/复位流程 | 代码按 20 Hz 发送心跳 | 实测心跳丢失后自动停车、心跳恢复后必须人工复位、任务状态如何恢复 | 厂家复位按键/状态反馈 |
 | 行走方向标定 | 初版使用 `body_positive_is_fork_reverse: true`，左右电机同值 RPM | 实测前进/后退方向、左右电机 RPM 正负号、舵角正负号、`steering_angle_deg` 零位 | 安全区域低速试车 |
-| RPM 与速度换算 | 代码可配置轮半径、齿比、RPM 限幅 | 确认 RPM 是电机轴还是轮端、齿比、真实轮半径；用 `315.35 RPM ≈ 1 km/h` 校验换算 | 厂家参数或现场测速 |
-| 编码器里程计 | 已接 `0x209/0x20A` 脉冲积分框架 | 确认脉冲每圈数量、脉冲到米比例、左右脉冲符号、上电是否清零、溢出处理 | 厂家回复/直行 1 m 标定 |
+| RPM 与速度换算 | 厂家确认轮径 `450 mm`、减速比 `26.75`、最大 `3000 RPM` | 用 `315.35 RPM ≈ 1 km/h` 和现场测速复核；确认 RPM 正负方向 | 现场测速/低速试车 |
+| 编码器里程计 | 厂家确认 `0x209/0x20A` 是电机端脉冲，`64` 脉冲/电机转，减速比 `26.75` | 已写入 `meter_per_pulse=0.0008257690970300274`；仍需验证左右脉冲符号、上电是否清零、溢出处理，并做 5m/10m 标定 | 低速直行标定 |
 | pivot 半径 | `Wa=1.743 m` 暂作为外置占位 | 实测舵角 `+90°/-90°` 转 90 度的等效半径和 yaw 方向，必要时调整 `pivot_turn_radius` | 低速转向标定 |
 | pivot 中心 | 初版 `pivot_center_x_offset_m=0.0`、`rear_axle_x_offset=0.0` | 验证车辆是否确实围绕两轮轴中心旋转；如果不是，标定中心相对 `base_link` 的 x 偏移 | 低速转向轨迹 |
 | Nav2/safety footprint | 已有保守带货叉 footprint | 确认正式导航使用空车 footprint 还是带货叉 footprint；根据实际外廓、安全余量和通道宽度调参 | 现场通道和避障策略 |
@@ -859,11 +859,11 @@ config/vehicles/xfl201_unit_002.yaml
 | `Wa` 转弯半径 | 已确认占位 | 1743 mm，暂按外轮廓转弯半径，可外置参数修改 |
 | 左电机 RPM 正方向 | 待确认 | 协议说车体正方向是货叉反方向，需要实测 |
 | 右电机 RPM 正方向 | 待确认 | 需要实测 |
-| RPM 是电机轴还是轮端 | 待确认 | 影响速度换算 |
-| 齿比 | 待确认 | 如果 RPM 是电机轴必须配置 |
-| 驱动轮半径 | 待确认 | 影响 odom 和 RPM 换算 |
+| RPM 是电机轴还是轮端 | 已确认 | 按电机侧 RPM 处理，减速比 `26.75` |
+| 齿比 | 已确认 | 电机转 `26.75` 圈，轮子转 `1` 圈 |
+| 驱动轮半径 | 已确认初版 | 轮径 `450 mm`，半径 `0.225 m`，现场仍可按滚动半径微调 |
 | pivot 等效半径 | 待确认 | `Wa` 可先占位，但真实 `pivot_turn_radius` 仍建议低速标定 |
-| 脉冲每圈数量 | 待确认 | 影响 odom |
+| 脉冲每圈数量 | 已确认 | 电机转一圈 `64` 个脉冲，`1` 个脉冲约 `0.0008 m` |
 | 货叉高度反馈来源 | 待确认 | `0x233` 只看到控制，没有高度反馈 |
 | 侧移反馈来源 | 待确认 | 需要传感器或 CAN 反馈 |
 | 倾角反馈来源 | 待确认 | 需要传感器或 CAN 反馈 |
