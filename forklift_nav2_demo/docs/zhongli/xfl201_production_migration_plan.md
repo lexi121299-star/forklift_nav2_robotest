@@ -878,7 +878,37 @@ config/vehicles/xfl201_unit_002.yaml
 4. 新车尺寸更长，旧地图窄通道路线可能需要重新验证。
 5. 量产车型必须避免在代码中写死某一台车的标定值。
 
-## 15. 结论
+## 15. 最新遗留问题摘要
+
+截至 2026-08-06，厂家已确认轮径、轮距、减速比和电机端脉冲换算；代码侧已经把 `meter_per_pulse=0.0008257690970300274` 写入 XFL201 配置。后续剩余问题集中在实车验证和上层 adapter：
+
+1. 底盘 CAN 实车验证：
+   - 验证 `0x231/0x232` 周期发送，`0x206/0x207/0x209/0x20A/0x6DB` 正常接收。
+   - 确认 SocketCAN `can0`、`125 kbps`、自动模式和心跳丢失停车/恢复复位流程。
+
+2. 底盘方向和 odom 标定：
+   - 低速验证前进/后退方向、左右电机 RPM 正负号、左右脉冲计数正负号、舵角正负方向。
+   - 用 5 m / 10 m 直线标定 `/odom`，必要时微调 `left_meter_per_pulse`、`right_meter_per_pulse` 和滚动半径。
+
+3. Pivot 转向标定：
+   - 舵角 `+90°/-90°` 低速转向，确认车辆是否绕两轮轴中心旋转。
+   - 标定 `pivot_turn_radius_m` 和 `pivot_center_x_offset_m`，必要时同步 Nav2、safety gate 和 vehicle interface 参数。
+
+4. 定位和 TF 接入：
+   - 明确定位侧提供 `map -> odom`，还是只提供 `/robot_pose` / `/localization/pose`。
+   - 如果定位只给 map 下位姿，需要新增 adapter 转成 `map -> odom`，底盘仍发布 `odom -> base_link`。
+   - 测量避障雷达、补盲相机、叉尖光电、叉根检测、托盘检测雷达的 `xyz/rpy`。
+
+5. 货叉与托盘 adapter：
+   - 新增 XFL201 货叉 adapter，把 `ForkMoveTo.action` 转成 `0x233` 控制。
+   - 明确高度、侧移、倾角、限位和故障反馈来源；没有反馈时不能做可靠闭环。
+   - 做雷达 message/action adapter，接入两段式取托盘流程。
+
+6. 量产沉淀：
+   - 建立 `xfl201_default.yaml` 和单车标定 YAML，避免把第一台车参数写死在代码里。
+   - 补出厂/回归 checklist，覆盖 CAN、急停、手自动、odom、TF、导航、货叉和托盘检测。
+
+## 16. 结论
 
 XFL201 应作为独立车型平台接入，而不是在 Curtis 车型上打补丁。
 
