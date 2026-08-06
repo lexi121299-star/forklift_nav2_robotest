@@ -19,11 +19,11 @@ xfl201_vehicle_interface:
     drive_gear_ratio: 26.75
     drive_wheel_base_m: 1.47
 
-    # Supplier confirmed 0x209/0x20A are motor-side pulse counters:
-    # 64 pulses/motor rev, gear ratio 26.75, wheel diameter 450 mm.
-    # meter_per_pulse = pi*0.45/(26.75*64) ~= 0.000826 m.
-    left_meter_per_pulse: 0.0008257690970300274
-    right_meter_per_pulse: 0.0008257690970300274
+    # Supplier revised the encoder scale after accounting for encoder/pole pairs:
+    # 0x209/0x20A are motor-side pulse counters, currently ~0.0002 m/pulse.
+    # Verify with a 5 m / 10 m straight-line calibration before production use.
+    left_meter_per_pulse: 0.0002
+    right_meter_per_pulse: 0.0002
     left_encoder_sign: 1.0
     right_encoder_sign: 1.0
 
