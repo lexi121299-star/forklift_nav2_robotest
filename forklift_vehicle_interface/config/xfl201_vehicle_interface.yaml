@@ -1,6 +1,6 @@
 xfl201_vehicle_interface:
   ros__parameters:
-    dry_run: true
+    dry_run: false
     can_interface: can0
     command_timeout_sec: 0.5
     control_rate_hz: 20.0
@@ -14,13 +14,16 @@ xfl201_vehicle_interface:
 
     # Supplier confirmed XFL201 is steered, not differential:
     # steering angle must be sent; left/right RPM are travel-speed commands.
-    drive_wheel_radius_m: 0.15
-    drive_gear_ratio: 1.0
+    # Supplier confirmed: wheel diameter 450 mm, drive gear ratio 26.75.
+    drive_wheel_radius_m: 0.225
+    drive_gear_ratio: 26.75
     drive_wheel_base_m: 1.47
 
-    # TODO supplier confirm: use these for 0x209/0x20A encoder odometry.
-    left_meter_per_pulse: 0.0
-    right_meter_per_pulse: 0.0
+    # Initial odometry scale for 0x209/0x20A.
+    # Assumption until field calibration: counters are motor-side encoder counts
+    # at 1024 counts/rev, so meter_per_pulse = pi*0.45/(26.75*1024).
+    left_meter_per_pulse: 0.000051610568564376714
+    right_meter_per_pulse: 0.000051610568564376714
     left_encoder_sign: 1.0
     right_encoder_sign: 1.0
 

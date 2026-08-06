@@ -480,9 +480,12 @@ delta_yaw = delta_s / pivot_turn_radius
 
 ```yaml
 encoder_counts_per_motor_rev: TBD
-drive_gear_ratio: TBD
-drive_wheel_radius_m: TBD
+drive_gear_ratio: 26.75
+drive_wheel_radius_m: 0.225
 drive_wheel_base_m: 1.47
+front_track_width_m: 0.936
+left_meter_per_pulse: 0.000051610568564376714   # initial: assumes motor-side 1024 counts/rev
+right_meter_per_pulse: 0.000051610568564376714  # replace after 5m/10m field calibration
 pivot_turn_radius_m: 1.743  # 暂按 Wa 外轮廓转弯半径占位，后续实车标定
 pivot_center_x_offset_m: 0.0
 left_encoder_sign: 1
