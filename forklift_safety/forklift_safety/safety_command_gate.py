@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import ast
 import math
+from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
 import rclpy
 from forklift_msgs.msg import ForkliftControlCommand, ForkliftFaultState, ForkliftVehicleState
 from forklift_msgs.srv import SetEmergencyStop
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
-from std_msgs.msg import String
+from rclpy.time import Time
+from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformListener
 
 try:
     from nav2_msgs.msg import Costmap as Nav2Costmap
@@ -19,6 +22,17 @@ except ImportError:
 
 Point2D = Tuple[float, float]
 Pose2D = Tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class PalletExemptionZone:
+    """Small oriented rectangle containing the selected pallet face."""
+
+    x: float
+    y: float
+    yaw: float
+    half_length: float
+    half_width: float
 
 
 def positive(value: float, fallback: float) -> float:
@@ -130,6 +144,24 @@ def transform_point(point: Point2D, pose: Pose2D) -> Point2D:
     )
 
 
+def point_in_pallet_exemption(
+    point: Point2D,
+    zone: Optional[PalletExemptionZone],
+) -> bool:
+    """Return whether a world point is inside the active pallet rectangle."""
+
+    if zone is None:
+        return False
+    dx = point[0] - zone.x
+    dy = point[1] - zone.y
+    local_x = dx * math.cos(zone.yaw) + dy * math.sin(zone.yaw)
+    local_y = -dx * math.sin(zone.yaw) + dy * math.cos(zone.yaw)
+    return (
+        abs(local_x) <= zone.half_length
+        and abs(local_y) <= zone.half_width
+    )
+
+
 def world_to_map(costmap: Any, x: float, y: float) -> Optional[Tuple[int, int]]:
     width, height, resolution, origin = costmap_metadata(costmap)
     yaw = yaw_from_quaternion(origin.orientation)
@@ -171,6 +203,7 @@ def footprint_collision_at_pose(
     sample_spacing: float,
     cost_threshold: int,
     unknown_is_collision: bool,
+    pallet_exemption: Optional[PalletExemptionZone] = None,
 ) -> Tuple[bool, str]:
     error = costmap_error(costmap)
     if error:
@@ -190,6 +223,8 @@ def footprint_collision_at_pose(
                 continue
             max_cost = max(max_cost, cost)
             if cost >= cost_threshold:
+                if point_in_pallet_exemption((x, y), pallet_exemption):
+                    continue
                 return True, f'footprint collision: cost {cost} >= {cost_threshold}'
     return False, f'footprint clear: max cost {max_cost}'
 
@@ -251,6 +286,7 @@ def footprint_sweep_collision(
     sample_spacing: float,
     cost_threshold: int,
     unknown_is_collision: bool,
+    pallet_exemption: Optional[PalletExemptionZone] = None,
 ) -> Tuple[bool, str]:
     for pose in predicted_poses_for_command(
         initial_pose,
@@ -269,6 +305,7 @@ def footprint_sweep_collision(
             sample_spacing,
             cost_threshold,
             unknown_is_collision,
+            pallet_exemption,
         )
         if collision:
             return True, reason
@@ -444,6 +481,20 @@ class SafetyCommandGate(Node):
         self.declare_parameter('unknown_is_collision', True)
         self.declare_parameter('collision_check_horizon_sec', 1.0)
         self.declare_parameter('collision_check_time_step_sec', 0.1)
+        self.declare_parameter('pallet_exemption_enabled', True)
+        self.declare_parameter(
+            'pallet_exemption_pose_topic',
+            '/forklift/pallet_approach/exemption_pose',
+        )
+        self.declare_parameter(
+            'pallet_exemption_active_topic',
+            '/forklift/pallet_approach/exemption_active',
+        )
+        self.declare_parameter('pallet_exemption_timeout_sec', 0.5)
+        self.declare_parameter('pallet_exemption_length_m', 0.50)
+        self.declare_parameter('pallet_exemption_width_m', 1.30)
+        self.declare_parameter('pallet_exemption_reverse_only', True)
+        self.declare_parameter('pallet_exemption_cost_threshold', 254)
         self.declare_parameter('emergency_stop_active', False)
         self.declare_parameter('allow_recovery_twist', True)
         self.declare_parameter('allow_recovery_backoff', True)
@@ -507,6 +558,30 @@ class SafetyCommandGate(Node):
             'collision_check_time_step_sec',
             0.1,
         )
+        self._pallet_exemption_enabled = bool(
+            self.get_parameter('pallet_exemption_enabled').value
+        )
+        self._pallet_exemption_pose_topic = str(
+            self.get_parameter('pallet_exemption_pose_topic').value
+        )
+        self._pallet_exemption_active_topic = str(
+            self.get_parameter('pallet_exemption_active_topic').value
+        )
+        self._pallet_exemption_timeout_sec = self._positive_param(
+            'pallet_exemption_timeout_sec', 0.5
+        )
+        self._pallet_exemption_half_length = 0.5 * self._positive_param(
+            'pallet_exemption_length_m', 0.50
+        )
+        self._pallet_exemption_half_width = 0.5 * self._positive_param(
+            'pallet_exemption_width_m', 1.30
+        )
+        self._pallet_exemption_reverse_only = bool(
+            self.get_parameter('pallet_exemption_reverse_only').value
+        )
+        self._pallet_exemption_cost_threshold = int(
+            self.get_parameter('pallet_exemption_cost_threshold').value
+        )
         self._emergency_stop = bool(self.get_parameter('emergency_stop_active').value)
         self._allow_recovery_twist = bool(self.get_parameter('allow_recovery_twist').value)
         self._allow_recovery_backoff = bool(self.get_parameter('allow_recovery_backoff').value)
@@ -550,6 +625,11 @@ class SafetyCommandGate(Node):
         self._last_costmap_time = self.get_clock().now()
         self._last_costmap_error = ''
         self._last_reason = ''
+        self._pallet_exemption_active = False
+        self._last_pallet_exemption_time = self.get_clock().now()
+        self._pallet_exemption_pose: Optional[PoseStamped] = None
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         self._command_pub = self.create_publisher(
             ForkliftControlCommand,
@@ -618,6 +698,19 @@ class SafetyCommandGate(Node):
                     self._on_costmap,
                     10,
                 )
+        if self._pallet_exemption_enabled:
+            self.create_subscription(
+                PoseStamped,
+                self._pallet_exemption_pose_topic,
+                self._on_pallet_exemption_pose,
+                10,
+            )
+            self.create_subscription(
+                Bool,
+                self._pallet_exemption_active_topic,
+                self._on_pallet_exemption_active,
+                10,
+            )
         self.create_service(
             SetEmergencyStop,
             '/forklift_safety/set_emergency_stop',
@@ -669,6 +762,13 @@ class SafetyCommandGate(Node):
         self._last_costmap_error = costmap_error(msg)
         if not self._last_costmap_error:
             self._last_costmap = msg
+
+    def _on_pallet_exemption_pose(self, msg: PoseStamped) -> None:
+        self._pallet_exemption_pose = msg
+
+    def _on_pallet_exemption_active(self, msg: Bool) -> None:
+        self._pallet_exemption_active = bool(msg.data)
+        self._last_pallet_exemption_time = self.get_clock().now()
 
     def _on_set_emergency_stop(
         self,
@@ -812,6 +912,14 @@ class SafetyCommandGate(Node):
         if self._last_pose is None:
             return 'collision pose missing'
 
+        pallet_exemption = self._active_pallet_exemption(command)
+        cost_threshold = self._footprint_collision_cost_threshold
+        if pallet_exemption is not None:
+            cost_threshold = max(
+                cost_threshold,
+                self._pallet_exemption_cost_threshold,
+            )
+
         collision, reason = footprint_sweep_collision(
             self._last_costmap,
             self._footprint,
@@ -824,10 +932,66 @@ class SafetyCommandGate(Node):
             self._collision_check_time_step_sec,
             self._pivot_steering_angle_rad,
             self._footprint_sample_spacing,
-            self._footprint_collision_cost_threshold,
+            cost_threshold,
             self._unknown_is_collision,
+            pallet_exemption,
         )
         return reason if collision else ''
+
+    def _active_pallet_exemption(
+        self,
+        command: ForkliftControlCommand,
+    ) -> Optional[PalletExemptionZone]:
+        if not self._pallet_exemption_enabled:
+            return None
+        if not self._pallet_exemption_active:
+            return None
+        if self._pallet_exemption_reverse_only and direction(command) != -1:
+            return None
+        age = (
+            self.get_clock().now() - self._last_pallet_exemption_time
+        ).nanoseconds / 1e9
+        if age > self._pallet_exemption_timeout_sec:
+            return None
+        target = self._pallet_exemption_pose
+        costmap = self._last_costmap
+        if target is None or costmap is None:
+            return None
+        costmap_frame = str(getattr(costmap.header, 'frame_id', ''))
+        target_frame = str(target.header.frame_id)
+        if not costmap_frame or not target_frame:
+            return None
+
+        target_yaw = yaw_from_quaternion(target.pose.orientation)
+        center_x = float(target.pose.position.x)
+        center_y = float(target.pose.position.y)
+        if target_frame != costmap_frame:
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    costmap_frame,
+                    target_frame,
+                    Time(),
+                )
+            except Exception:
+                return None
+            transform_yaw = yaw_from_quaternion(transform.transform.rotation)
+            center_x, center_y = transform_point(
+                (center_x, center_y),
+                (
+                    float(transform.transform.translation.x),
+                    float(transform.transform.translation.y),
+                    transform_yaw,
+                ),
+            )
+            target_yaw += transform_yaw
+
+        return PalletExemptionZone(
+            x=center_x,
+            y=center_y,
+            yaw=target_yaw,
+            half_length=self._pallet_exemption_half_length,
+            half_width=self._pallet_exemption_half_width,
+        )
 
     def _publish_status(self, reason: str) -> None:
         status = String()

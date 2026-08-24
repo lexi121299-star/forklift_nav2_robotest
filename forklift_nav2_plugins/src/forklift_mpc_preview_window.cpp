@@ -46,4 +46,16 @@ MpcPreviewWindow makeMpcPreviewWindowFromIndex(
   return window;
 }
 
+bool isMpcPreviewConsumed(
+  const MpcPreviewWindow & window,
+  std::size_t trajectory_size)
+{
+  if (!window.valid || trajectory_size == 0u) {
+    return false;
+  }
+  return window.points.size() == 1u ||
+         window.length <= 1e-6 ||
+         window.start_index + 1u >= trajectory_size;
+}
+
 }  // namespace forklift_nav2_plugins

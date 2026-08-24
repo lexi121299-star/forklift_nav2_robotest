@@ -6,6 +6,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
 
 from forklift_safety.safety_command_gate import (
+    PalletExemptionZone,
     apply_drive_envelope,
     clamp_control_command,
     costmap_error,
@@ -14,6 +15,7 @@ from forklift_safety.safety_command_gate import (
     footprint_collision_at_pose,
     footprint_sweep_collision,
     parse_footprint,
+    point_in_pallet_exemption,
     predicted_poses_for_command,
     recovery_command_from_twist,
     stop_command,
@@ -225,6 +227,61 @@ def test_footprint_collision_at_pose_blocks_lethal_edge_cell():
 
     assert collision is True
     assert reason.startswith('footprint collision: cost')
+
+
+def test_pallet_exemption_ignores_only_lethal_cells_inside_target_box():
+    costmap = make_costmap()
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+    set_cost(costmap, 0.1, 0.0, 100)
+    zone = PalletExemptionZone(
+        x=0.1,
+        y=0.0,
+        yaw=0.0,
+        half_length=0.05,
+        half_width=0.15,
+    )
+
+    collision, reason = footprint_collision_at_pose(
+        costmap,
+        footprint,
+        (0.0, 0.0, 0.0),
+        sample_spacing=0.05,
+        cost_threshold=100,
+        unknown_is_collision=True,
+        pallet_exemption=zone,
+    )
+
+    assert collision is False
+    assert reason == 'footprint clear: max cost 100'
+
+    set_cost(costmap, -0.1, 0.0, 100)
+    collision, reason = footprint_collision_at_pose(
+        costmap,
+        footprint,
+        (0.0, 0.0, 0.0),
+        sample_spacing=0.05,
+        cost_threshold=100,
+        unknown_is_collision=True,
+        pallet_exemption=zone,
+    )
+
+    assert collision is True
+    assert reason == 'footprint collision: cost 100 >= 100'
+
+
+def test_pallet_exemption_rectangle_respects_orientation():
+    zone = PalletExemptionZone(
+        x=2.0,
+        y=3.0,
+        yaw=math.pi / 2.0,
+        half_length=0.3,
+        half_width=0.6,
+    )
+
+    assert point_in_pallet_exemption((2.0, 3.25), zone) is True
+    assert point_in_pallet_exemption((2.7, 3.0), zone) is False
 
 
 def test_footprint_collision_can_treat_unknown_as_blocked():

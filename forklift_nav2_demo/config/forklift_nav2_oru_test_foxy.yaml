@@ -104,7 +104,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.2
-      movement_time_allowance: 30.0
+      movement_time_allowance: 40.0
 
     general_goal_checker:
       stateful: True
@@ -133,6 +133,9 @@ controller_server:
       pivot_velocity: 0.12
       pivot_yaw_tolerance: 0.05
       pivot_stop_velocity_threshold: 0.02
+      post_pivot_hold_duration_sec: 0.3
+      post_pivot_slowdown_duration_sec: 2.0
+      post_pivot_initial_max_speed: 0.12
       horizon_time: 1.8
       time_step: 0.2
       lookahead_distance: 0.9
@@ -140,6 +143,10 @@ controller_server:
       yaw_goal_tolerance: 0.25
       transform_tolerance: 0.2
       terminal_slowdown_distance: 0.6
+      terminal_approach_enabled: true
+      terminal_approach_max_speed: 0.06
+      terminal_approach_max_distance: 0.30
+      terminal_approach_heading_tolerance: 0.35
       # Terminal latch must be no looser than the controller's own terminal
       # tolerance.  A 0.25 m latch can stop FollowPath before Nav2 observes the
       # goal as reached, leaving the action active and turning later goals into
@@ -164,6 +171,13 @@ controller_server:
       curvature_slowdown_enabled: true
       curvature_slowdown_lateral_accel: 0.12
       min_curvature_speed: 0.08
+      heading_slowdown_threshold: 0.35
+      heading_slowdown_full_error: 0.70
+      heading_alignment_max_speed: 0.06
+      steering_slowdown_enabled: true
+      steering_slowdown_start_angle: 0.30
+      steering_slowdown_full_angle: 0.90
+      steering_slowdown_max_speed: 0.12
       safety_gate_enabled: true
       safety_emergency_stop_active: false
       safety_stop_distance: 0.55

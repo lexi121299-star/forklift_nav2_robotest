@@ -26,6 +26,17 @@ def generate_launch_description():
     unknown_is_collision = LaunchConfiguration('unknown_is_collision')
     collision_check_horizon_sec = LaunchConfiguration('collision_check_horizon_sec')
     collision_check_time_step_sec = LaunchConfiguration('collision_check_time_step_sec')
+    pallet_exemption_enabled = LaunchConfiguration('pallet_exemption_enabled')
+    pallet_exemption_pose_topic = LaunchConfiguration('pallet_exemption_pose_topic')
+    pallet_exemption_active_topic = LaunchConfiguration(
+        'pallet_exemption_active_topic')
+    pallet_exemption_timeout_sec = LaunchConfiguration('pallet_exemption_timeout_sec')
+    pallet_exemption_length_m = LaunchConfiguration('pallet_exemption_length_m')
+    pallet_exemption_width_m = LaunchConfiguration('pallet_exemption_width_m')
+    pallet_exemption_reverse_only = LaunchConfiguration(
+        'pallet_exemption_reverse_only')
+    pallet_exemption_cost_threshold = LaunchConfiguration(
+        'pallet_exemption_cost_threshold')
     max_forward_velocity_mps = LaunchConfiguration('max_forward_velocity_mps')
     max_reverse_velocity_mps = LaunchConfiguration('max_reverse_velocity_mps')
     max_recovery_velocity_mps = LaunchConfiguration('max_recovery_velocity_mps')
@@ -67,6 +78,18 @@ def generate_launch_description():
         DeclareLaunchArgument('unknown_is_collision', default_value='true'),
         DeclareLaunchArgument('collision_check_horizon_sec', default_value='1.0'),
         DeclareLaunchArgument('collision_check_time_step_sec', default_value='0.1'),
+        DeclareLaunchArgument('pallet_exemption_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'pallet_exemption_pose_topic',
+            default_value='/forklift/pallet_approach/exemption_pose'),
+        DeclareLaunchArgument(
+            'pallet_exemption_active_topic',
+            default_value='/forklift/pallet_approach/exemption_active'),
+        DeclareLaunchArgument('pallet_exemption_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument('pallet_exemption_length_m', default_value='0.50'),
+        DeclareLaunchArgument('pallet_exemption_width_m', default_value='1.30'),
+        DeclareLaunchArgument('pallet_exemption_reverse_only', default_value='true'),
+        DeclareLaunchArgument('pallet_exemption_cost_threshold', default_value='254'),
         DeclareLaunchArgument('max_forward_velocity_mps', default_value='0.45'),
         DeclareLaunchArgument('max_reverse_velocity_mps', default_value='0.15'),
         DeclareLaunchArgument('max_recovery_velocity_mps', default_value='0.10'),
@@ -112,6 +135,14 @@ def generate_launch_description():
                 'unknown_is_collision': unknown_is_collision,
                 'collision_check_horizon_sec': collision_check_horizon_sec,
                 'collision_check_time_step_sec': collision_check_time_step_sec,
+                'pallet_exemption_enabled': pallet_exemption_enabled,
+                'pallet_exemption_pose_topic': pallet_exemption_pose_topic,
+                'pallet_exemption_active_topic': pallet_exemption_active_topic,
+                'pallet_exemption_timeout_sec': pallet_exemption_timeout_sec,
+                'pallet_exemption_length_m': pallet_exemption_length_m,
+                'pallet_exemption_width_m': pallet_exemption_width_m,
+                'pallet_exemption_reverse_only': pallet_exemption_reverse_only,
+                'pallet_exemption_cost_threshold': pallet_exemption_cost_threshold,
                 'max_forward_velocity_mps': max_forward_velocity_mps,
                 'max_reverse_velocity_mps': max_reverse_velocity_mps,
                 'max_recovery_velocity_mps': max_recovery_velocity_mps,

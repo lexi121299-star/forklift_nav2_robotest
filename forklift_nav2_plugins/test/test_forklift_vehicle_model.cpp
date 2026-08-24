@@ -61,6 +61,27 @@ TEST(ForkliftVehicleModel, PivotTurnRespectsSteeringAndDirectionSigns)
   EXPECT_GT(vehicle_model.angularVelocity({-0.4, -0.5 * kPi}), 0.0);
 }
 
+TEST(ForkliftVehicleModel, PivotYawDirectionCanBeInvertedIndependently)
+{
+  const ForkliftVehicleModel vehicle_model({
+    1.2,
+    0.5 * kPi,
+    1.6,
+    1.0,
+    0.5,
+    1.0,
+    true,
+    0.5 * kPi,
+    0.03,
+    0.6,
+    0.0,
+    true});
+
+  EXPECT_LT(vehicle_model.angularVelocity({0.4, 0.5 * kPi}), 0.0);
+  EXPECT_GT(vehicle_model.angularVelocity({0.4, -0.5 * kPi}), 0.0);
+  EXPECT_GT(vehicle_model.angularVelocity({-0.4, 0.5 * kPi}), 0.0);
+}
+
 TEST(ForkliftVehicleModel, PredictPivotTurnChangesYawWithoutTranslation)
 {
   const ForkliftVehicleModel vehicle_model({

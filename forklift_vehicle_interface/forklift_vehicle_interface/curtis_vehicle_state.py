@@ -32,6 +32,8 @@ class CurtisFeedbackState:
     drive_wheel_radius_m: float = 0.2285
     drive_gear_ratio: float = 26.75
     drive_track_width_m: float = 0.937
+    drive_feedback_sign: float = 1.0
+    odom_angular_scale: float = 1.0
     max_integration_dt_sec: float = 0.20
 
     enabled: bool = False
@@ -70,6 +72,7 @@ class CurtisFeedbackState:
     reverse_relay: bool = False
     main_contactor: bool = False
     auto_mode_input: bool = False
+    soft_emergency_stop_input: bool = False
     slowdown_switch_input: bool = False
 
     odom: CurtisOdomState = field(default_factory=CurtisOdomState)
@@ -154,7 +157,8 @@ class CurtisFeedbackState:
         self.reverse_relay = bool(decoded['reverse_relay'])
         self.main_contactor = bool(decoded['main_contactor'])
         self.auto_mode_input = bool(decoded['auto_mode_input'])
-        self.soft_emergency_stop = bool(decoded['soft_emergency_stop_input'])
+        self.soft_emergency_stop_input = bool(decoded['soft_emergency_stop_input'])
+        self.soft_emergency_stop = not self.soft_emergency_stop_input
         self.parking_brake = bool(decoded['parking_brake_input'])
         self.slowdown_switch_input = bool(decoded['slowdown_switch_input'])
         self.lift_valve_output = bool(decoded['lift_valve_output'])
@@ -181,7 +185,10 @@ class CurtisFeedbackState:
         linear = 0.5 * (left + right)
         angular = 0.0
         if self.drive_track_width_m > 1e-6:
-            angular = (right - left) / self.drive_track_width_m
+            angular = (
+                self.odom_angular_scale *
+                (right - left) / self.drive_track_width_m
+            )
 
         heading = self.odom.yaw + 0.5 * angular * dt
         self.odom.x += linear * math.cos(heading) * dt
@@ -193,7 +200,8 @@ class CurtisFeedbackState:
     def _rpm_to_mps(self, rpm: float) -> float:
         gear_ratio = max(self.drive_gear_ratio, 1e-6)
         wheel_rpm = rpm / gear_ratio
-        return wheel_rpm * (2.0 * math.pi * self.drive_wheel_radius_m) / 60.0
+        direction = -1.0 if self.drive_feedback_sign < 0.0 else 1.0
+        return direction * wheel_rpm * (2.0 * math.pi * self.drive_wheel_radius_m) / 60.0
 
 
 def _normalize_angle(angle: float) -> float:

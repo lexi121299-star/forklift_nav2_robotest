@@ -267,7 +267,7 @@ TEST(ForkliftMpcTrajectory, HighCurvatureReportsTurningRadiusAndSpeedLimit)
   EXPECT_NEAR(result.trajectory[1].speed_limit, 0.08, 1e-9);
 }
 
-TEST(ForkliftMpcTrajectory, HighCurvatureCanRequestPivotSteering)
+TEST(ForkliftMpcTrajectory, HighCurvatureDoesNotImplyPivotMotion)
 {
   nav_msgs::msg::Path path;
   path.poses.push_back(makePose(0.0, 0.0));
@@ -278,14 +278,17 @@ TEST(ForkliftMpcTrajectory, HighCurvatureCanRequestPivotSteering)
   options.enable_curvature_slowdown = true;
   options.curvature_slowdown_lateral_accel = 0.05;
   options.min_curvature_speed = 0.08;
+  options.min_turning_radius = 0.60;
   options.max_velocity = 1.0;
 
   const auto result = processPathToMpcTrajectory(path, pivotVehicleModel(), options);
 
   ASSERT_EQ(result.trajectory.size(), 3u);
-  EXPECT_NEAR(result.trajectory[1].steering_angle, 0.5 * kPi, 1e-9);
-  EXPECT_NEAR(result.trajectory[1].state.phi, 0.5 * kPi, 1e-9);
-  EXPECT_NEAR(result.trajectory[1].speed_limit, 1.0, 1e-9);
+  EXPECT_EQ(result.diagnostics.pivot_motion_points, 0u);
+  EXPECT_FALSE(result.trajectory[1].pivot_motion);
+  EXPECT_NEAR(result.trajectory[1].steering_angle, std::atan(1.2 / 0.60), 1e-9);
+  EXPECT_NEAR(result.trajectory[1].state.phi, std::atan(1.2 / 0.60), 1e-9);
+  EXPECT_NEAR(result.trajectory[1].speed_limit, 0.08, 1e-9);
 }
 
 TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
@@ -304,6 +307,10 @@ TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
   MpcTrajectoryOptions options;
   options.detect_pivot_turns = true;
   options.pivot_rear_axle_x_offset = rear_axle_x_offset;
+  options.enable_curvature_slowdown = true;
+  options.curvature_slowdown_lateral_accel = 0.05;
+  options.min_curvature_speed = 0.08;
+  options.min_turning_radius = 0.60;
   options.max_velocity = 1.0;
 
   const auto result = processPathToMpcTrajectory(path, rearAxlePivotVehicleModel(), options);
@@ -318,6 +325,40 @@ TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
   EXPECT_NEAR(result.trajectory[1].state.theta, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[0].steering_angle, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[1].steering_angle, 0.5 * kPi, 1e-9);
+  EXPECT_NEAR(result.trajectory[0].speed_limit, 1.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].speed_limit, 1.0, 1e-9);
+}
+
+TEST(ForkliftMpcTrajectory, ResamplingPreservesExplicitSamePositionPivot)
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  path.poses.push_back(makePose(0.0, 0.0, 0.0));
+  path.poses.push_back(makePose(0.0, 0.0, 0.5 * kPi));
+  path.poses.push_back(makePose(0.0, 1.0, 0.5 * kPi));
+  path.poses.push_back(makePose(0.0, 2.0, 0.5 * kPi));
+
+  MpcTrajectoryOptions options;
+  options.detect_pivot_turns = true;
+  options.enable_smoothing = true;
+  options.smoothing_iterations = 1;
+  options.enable_resampling = true;
+  options.resample_spacing = 0.10;
+  options.min_turning_radius = 0.60;
+  options.max_velocity = 1.0;
+
+  const auto result = processPathToMpcTrajectory(
+    path, pivotVehicleModel(), options);
+
+  ASSERT_GT(result.trajectory.size(), 10u);
+  EXPECT_EQ(result.diagnostics.pivot_motion_points, 2u);
+  EXPECT_TRUE(result.trajectory[0].pivot_motion);
+  EXPECT_TRUE(result.trajectory[1].pivot_motion);
+  EXPECT_NEAR(result.trajectory[0].state.x, result.trajectory[1].state.x, 1e-9);
+  EXPECT_NEAR(result.trajectory[0].state.y, result.trajectory[1].state.y, 1e-9);
+  EXPECT_NEAR(result.trajectory[0].state.theta, 0.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].state.theta, 0.5 * kPi, 1e-9);
+  EXPECT_FALSE(result.trajectory.back().pivot_motion);
 }
 
 TEST(ForkliftMpcTrajectory, TrajectoryToPathUsesEstimatedYaw)

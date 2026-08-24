@@ -56,7 +56,7 @@ class ForkliftScanSelfFilter(Node):
         super().__init__('forklift_scan_self_filter')
         self.declare_parameter('input_topic', '/scan_raw')
         self.declare_parameter('output_topic', '/scan')
-        self.declare_parameter('sensor_x', 0.25)
+        self.declare_parameter('sensor_x', 0.0)
         self.declare_parameter('sensor_y', 0.0)
         self.declare_parameter('sensor_yaw', 0.0)
         self.declare_parameter(

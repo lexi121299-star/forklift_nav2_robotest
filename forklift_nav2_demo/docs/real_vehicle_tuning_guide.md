@@ -114,6 +114,21 @@ map ─(AMCL)→ odom ─(里程计源)→ base_footprint ─┬→ base_link �
   - 激光位置 `base_link→base_scan`:[base_scan_joint :212](../urdf/forklift_diff_drive.urdf.xacro#L212) `xyz="前后 左右 高" rpy="roll pitch yaw"`（米 / 弧度）
 - 方式 B（无 URDF）:launch 里 `tf2_ros static_transform_publisher`,参数序 **`x y z yaw pitch roll`(先 yaw,和 URDF 的 rpy 相反——常见填错点)**。
 
+> 当前感知输出的 `/scan` 已约定为以后轴中心 `base_link` 为虚拟扫描原点，
+> 因此 URDF 中 `base_link→base_scan` 使用 `xyz="0 0 0" rpy="0 0 0"`。
+> 如果后续改回物理雷达中心的原始 LaserScan，必须重新写入实测安装外参。
+> 真车 launch 已运行 `robot_state_publisher`，修改 URDF 后会自动发布这段静态 TF，
+> 不需要修改 planner 或 costmap 算法。
+
+**视觉生成障碍物消息时的帧约定**
+
+- 若视觉输出 `/scan`（`sensor_msgs/msg/LaserScan`）是在 `base_scan` 坐标系中表达，必须设置
+  `header.frame_id="base_scan"`，并保证 URDF 中存在准确的 `base_link→base_scan`。
+- 若消息在相机自身坐标系中表达，例如 `header.frame_id="camera_link"`，则应在 URDF 中新增并标定
+  `base_link→camera_link`；不要只修改消息帧名来冒充 `base_scan`。
+- 消息中的 `header.stamp` 必须是实际采集/融合时刻，不能用明显滞后的处理完成时间代替。
+- `header.frame_id`、TF 子坐标系名称必须逐字一致；TF 外参和视觉输出坐标也必须采用同一套定义。
+
 **必须盯的 6 点**
 
 1. **帧名对齐激光驱动**:URDF 里激光 link 名要 = `/scan` 的 `header.frame_id`（常见 `laser`/`laser_link`）,否则 AMCL 连不上、costmap 没激光。
@@ -128,6 +143,7 @@ map ─(AMCL)→ odom ─(里程计源)→ base_footprint ─┬→ base_link �
 ```bash
 ros2 run tf2_tools view_frames                 # 看树连通、单根
 ros2 run tf2_ros tf2_echo base_link base_scan  # 数值对不对得上尺子
+ros2 topic echo /scan --once                   # header.frame_id 和时间戳是否正确
 ```
 RViz:Fixed Frame=map + LaserScan,**看点云贴不贴墙线**。贴=对;错位=回查第 2/3 点。
 
@@ -143,6 +159,74 @@ RViz:Fixed Frame=map + LaserScan,**看点云贴不贴墙线**。贴=对;错位=�
 1. **原点 = 后驱动/转向轴中心,+x 前、+y 左**（告诉他们这一句是主干）。
 2. ⚠️ **关键确认**:他们发的**里程计必须以这个后轴点为参考**。若他们 odom 实际算的是别的点,AMCL 会发散,现象像"定位坏了"其实是**原点不一致**——所以不能只通知,要确认一致。
 3. 即便 TF 归他们,**footprint 按后轴量、`rear_axle_x_offset=0` 仍是你的活**——这两个跟着同一个 base_link 走,别落下。
+
+### 1.5.7 视觉 tracked object 接口预留
+
+当前 Nav2 **不直接消费 tracked object**，仍使用 `/scan` 构建 costmap。为了后续增加动态障碍物预测，
+视觉/跟踪模块建议同时预留以下接口；它和 `/scan` 来自同一套感知结果，不要求维护两套检测算法。
+
+建议话题：
+
+```text
+/perception/tracked_objects
+forklift_msgs/msg/TrackedObjectArray
+```
+
+`TrackedObjectArray.msg`：
+
+```text
+# 所有 object 的 pose/twist/accel 均在这个坐标系、这个采集/融合时刻下表达。
+std_msgs/Header header
+forklift_msgs/TrackedObject[] objects
+```
+
+`TrackedObject.msg`：
+
+```text
+# 同一个真实目标在连续帧中必须保持相同 ID。
+uint64 track_id
+
+uint8 CLASS_UNKNOWN=0
+uint8 CLASS_PERSON=1
+uint8 CLASS_VEHICLE=2
+uint8 CLASS_FORKLIFT=3
+uint8 CLASS_PALLET=4
+uint8 CLASS_STATIC_OBSTACLE=5
+uint8 classification
+
+# 概率范围均为 [0.0, 1.0]。
+float32 existence_probability
+float32 classification_probability
+
+# pose.position 是目标包围盒中心；orientation 表达目标朝向。
+geometry_msgs/PoseWithCovariance pose
+
+# 目标相对固定坐标系的线速度/角速度，必须补偿自车运动。
+geometry_msgs/TwistWithCovariance twist
+
+# 暂时估计不出来时允许填 0，但 covariance 要表达不确定性。
+geometry_msgs/AccelWithCovariance accel
+
+# 三维包围盒尺寸，单位 m：x=长、y=宽、z=高。
+geometry_msgs/Vector3 size
+
+# 从本次 track 建立到当前 header.stamp 的持续时间及有效观测次数。
+builtin_interfaces/Duration tracking_duration
+uint32 observation_count
+```
+
+接口约定：
+
+- `header.stamp` 使用本帧实际采集/融合时间，不使用消息发布完成时间。
+- 动态预测推荐 `header.frame_id="odom"`：`odom` 连续、不随 AMCL 校正跳变；发布前应按时间戳把相机坐标转换到 `odom`。
+- `twist` 必须是目标相对 `odom` 的速度，不能直接使用目标在相机画面中的相对速度，否则静止货架会因叉车运动而被误判为动态目标。
+- `track_id` 在目标连续可见和短时遮挡期间保持稳定；进程重启后允许重新分配，planning 不应假设 ID 永久有效。
+- `pose.covariance`、`twist.covariance`、`accel.covariance` 是 ROS 标准 6×6 row-major 协方差；未知不能冒充为高精度全零，应填入合理的不确定性。
+- 二维导航至少保证 `pose.x/y/yaw`、`twist.linear.x/y`、`size.x/y` 有效；z、高度和角速度建议保留。
+- 未来轨迹不放进 `TrackedObject`。后续由独立 prediction 节点订阅该话题，再发布带 `time_from_start` 的预测轨迹，职责更清楚。
+
+落地这两个 `.msg` 时，`forklift_msgs` 还需要在 `CMakeLists.txt` 和 `package.xml` 中增加
+`geometry_msgs`、`builtin_interfaces` 依赖。接口未接入 prediction 前，不影响现有 `/scan` 和 Nav2 链路。
 
 ---
 

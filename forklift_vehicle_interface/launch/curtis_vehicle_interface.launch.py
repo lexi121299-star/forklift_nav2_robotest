@@ -23,6 +23,11 @@ def generate_launch_description():
     pivot_turn_radius_m = LaunchConfiguration('pivot_turn_radius_m')
     max_drive_rpm = LaunchConfiguration('max_drive_rpm')
     min_drive_rpm = LaunchConfiguration('min_drive_rpm')
+    invert_drive_direction = LaunchConfiguration('invert_drive_direction')
+    invert_feedback_drive_direction = LaunchConfiguration(
+        'invert_feedback_drive_direction')
+    odom_angular_scale = LaunchConfiguration('odom_angular_scale')
+    invert_steering_angle = LaunchConfiguration('invert_steering_angle')
 
     interface = Node(
         package='forklift_vehicle_interface',
@@ -48,6 +53,10 @@ def generate_launch_description():
             'pivot_turn_radius_m': pivot_turn_radius_m,
             'max_drive_rpm': max_drive_rpm,
             'min_drive_rpm': min_drive_rpm,
+            'invert_drive_direction': invert_drive_direction,
+            'invert_feedback_drive_direction': invert_feedback_drive_direction,
+            'odom_angular_scale': odom_angular_scale,
+            'invert_steering_angle': invert_steering_angle,
         }],
     )
 
@@ -70,5 +79,17 @@ def generate_launch_description():
         DeclareLaunchArgument('pivot_turn_radius_m', default_value='0.6'),
         DeclareLaunchArgument('max_drive_rpm', default_value='2485.0'),
         DeclareLaunchArgument('min_drive_rpm', default_value='100.0'),
+        DeclareLaunchArgument('invert_drive_direction', default_value='false'),
+        DeclareLaunchArgument(
+            'invert_feedback_drive_direction',
+            default_value='false',
+            description='Invert decoded drive RPM before odometry integration.'),
+        DeclareLaunchArgument(
+            'odom_angular_scale',
+            default_value='1.0',
+            description=(
+                'Scale the odometry yaw rate independently from longitudinal '
+                'drive feedback; use -1.0 to invert only yaw.')),
+        DeclareLaunchArgument('invert_steering_angle', default_value='false'),
         interface,
     ])

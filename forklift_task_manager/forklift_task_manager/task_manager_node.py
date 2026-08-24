@@ -22,14 +22,29 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from rclpy.time import Time
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
+from tf2_ros import Buffer, TransformListener
 
-from .route_model import PoseTarget, RouteConfigError, RouteDefinition
+from .pallet_approach import (
+    PalletApproachConfig,
+    PalletApproachError,
+    build_pallet_approach,
+    build_pallet_approach_route,
+    geometry_pose_targets,
+    pallet_exemption_active_for_distance,
+)
+from .route_model import (
+    PoseTarget,
+    RelativeMoveTarget,
+    RouteConfigError,
+    RouteDefinition,
+)
 from .route_model import load_routes, load_stations
 from .pallet_model import PalletConfigError, load_pallet_pickup_config
 from .pallet_pickup_state_machine import PalletPickupStateMachine
-from .state_machine import PAUSED, RECOVERING, RUNNING, SUCCEEDED
+from .state_machine import FAILED, IDLE, PAUSED, RECOVERING, RUNNING, SUCCEEDED
 from .state_machine import TaskStateMachine
 
 
@@ -292,6 +307,123 @@ class PickupDeviceActions:
         send_future.add_done_callback(goal_response)
 
 
+class TaskMotionAdapter:
+    """Dispatch route segments to Nav2 or the low-speed motion adapter."""
+
+    def __init__(
+        self,
+        node: Node,
+        navigator: Nav2Navigator,
+        devices: PickupDeviceActions,
+        base_frame_id: str,
+        pallet_exemption_callback: Callable[[Optional[PoseTarget]], None],
+    ) -> None:
+        self._node = node
+        self._navigator = navigator
+        self._devices = devices
+        self._base_frame_id = base_frame_id
+        self._pallet_exemption_callback = pallet_exemption_callback
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, node)
+
+    def send_goal(self, target, done_callback) -> None:
+        if isinstance(target, RelativeMoveTarget):
+            ready, message = self._relative_start_is_valid(target)
+            if not ready:
+                done_callback(False, message)
+                return
+            exemption_pose = self._pallet_exemption_pose(target)
+            self._pallet_exemption_callback(exemption_pose)
+
+            def relative_done(success, message, _result) -> None:
+                self._pallet_exemption_callback(None)
+                done_callback(success, message)
+
+            self._devices.move_relative(
+                distance_m=target.distance_m,
+                max_speed_mps=target.max_speed_mps,
+                timeout_sec=target.timeout_sec,
+                done_callback=relative_done,
+            )
+            return
+        self._navigator.send_goal(target, done_callback)
+
+    def cancel_goal(self) -> None:
+        self._navigator.cancel_goal()
+        self._devices.cancel_all()
+        self._pallet_exemption_callback(None)
+
+    def planar_distance_to(self, target: PoseTarget) -> float:
+        transform = self._tf_buffer.lookup_transform(
+            target.frame_id,
+            self._base_frame_id,
+            Time(),
+        )
+        translation = transform.transform.translation
+        return math.hypot(
+            translation.x - target.x,
+            translation.y - target.y,
+        )
+
+    @staticmethod
+    def _pallet_exemption_pose(
+        target: RelativeMoveTarget,
+    ) -> Optional[PoseTarget]:
+        if (
+            target.pallet_exemption_x is None
+            or target.pallet_exemption_y is None
+            or target.pallet_exemption_yaw is None
+        ):
+            return None
+        return PoseTarget(
+            name='pallet_exemption',
+            x=target.pallet_exemption_x,
+            y=target.pallet_exemption_y,
+            yaw=target.pallet_exemption_yaw,
+            frame_id=target.frame_id,
+        )
+
+    def _relative_start_is_valid(self, target: RelativeMoveTarget):
+        if (
+            target.expected_start_x is None
+            or target.expected_start_y is None
+            or target.expected_start_yaw is None
+        ):
+            return True, ''
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                target.frame_id,
+                self._base_frame_id,
+                Time(),
+            )
+        except Exception as exc:
+            return False, 'relative motion start TF unavailable: {}'.format(exc)
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        position_error = math.hypot(
+            translation.x - target.expected_start_x,
+            translation.y - target.expected_start_y,
+        )
+        heading_error = abs(math.atan2(
+            math.sin(yaw - target.expected_start_yaw),
+            math.cos(yaw - target.expected_start_yaw),
+        ))
+        if position_error > target.max_start_position_error_m:
+            return False, (
+                'relative motion start position error {:.3f} m exceeds {:.3f} m'
+            ).format(position_error, target.max_start_position_error_m)
+        if heading_error > target.max_start_heading_error_rad:
+            return False, (
+                'relative motion start heading error {:.3f} rad exceeds {:.3f} rad'
+            ).format(heading_error, target.max_start_heading_error_rad)
+        return True, ''
+
+
 class ForkliftTaskManager(Node):
     """Headless route sequencer that delegates every motion segment to Nav2."""
 
@@ -320,6 +452,19 @@ class ForkliftTaskManager(Node):
             '/forklift/fine_motion/move_relative',
         )
         self.declare_parameter('enforce_pallet_approach_station', True)
+        self.declare_parameter('rviz_goal_mode', 'navigation')
+        self.declare_parameter('pallet_standoff_distance_m', 1.80)
+        self.declare_parameter('pallet_final_approach_distance_m', 1.00)
+        self.declare_parameter('pallet_alignment_runup_distance_m', 0.60)
+        self.declare_parameter('pallet_final_approach_speed_mps', 0.10)
+        self.declare_parameter('pallet_final_approach_timeout_sec', 20.0)
+        self.declare_parameter('pallet_max_start_position_error_m', 0.35)
+        self.declare_parameter('pallet_max_start_heading_error_rad', 0.20)
+        self.declare_parameter('pallet_forks_on_negative_x', True)
+        self.declare_parameter('pallet_arrow_points_outward', True)
+        self.declare_parameter('pallet_base_frame_id', 'base_link')
+        self.declare_parameter('pallet_exemption_activation_distance_m', 4.0)
+        self.declare_parameter('pallet_exemption_deactivation_distance_m', 4.5)
 
         stations_file = self.get_parameter('stations_file').value
         routes_file = self.get_parameter('routes_file').value
@@ -331,6 +476,64 @@ class ForkliftTaskManager(Node):
         move_relative_action_name = self.get_parameter('move_relative_action').value
         self._enforce_pallet_approach_station = bool(
             self.get_parameter('enforce_pallet_approach_station').value
+        )
+        self._rviz_goal_mode = str(
+            self.get_parameter('rviz_goal_mode').value
+        ).strip().lower()
+        if self._rviz_goal_mode not in {'navigation', 'pallet_approach'}:
+            raise ValueError(
+                'rviz_goal_mode must be navigation or pallet_approach'
+            )
+        self._pallet_exemption_activation_distance_m = float(
+            self.get_parameter('pallet_exemption_activation_distance_m').value
+        )
+        self._pallet_exemption_deactivation_distance_m = float(
+            self.get_parameter('pallet_exemption_deactivation_distance_m').value
+        )
+        if (
+            not math.isfinite(self._pallet_exemption_activation_distance_m)
+            or self._pallet_exemption_activation_distance_m <= 0.0
+        ):
+            raise ValueError(
+                'pallet_exemption_activation_distance_m must be positive'
+            )
+        if (
+            not math.isfinite(self._pallet_exemption_deactivation_distance_m)
+            or self._pallet_exemption_deactivation_distance_m
+            <= self._pallet_exemption_activation_distance_m
+        ):
+            raise ValueError(
+                'pallet_exemption_deactivation_distance_m must be greater than '
+                'pallet_exemption_activation_distance_m'
+            )
+        self._pallet_approach_config = PalletApproachConfig(
+            standoff_distance_m=float(
+                self.get_parameter('pallet_standoff_distance_m').value
+            ),
+            final_approach_distance_m=float(
+                self.get_parameter('pallet_final_approach_distance_m').value
+            ),
+            alignment_runup_distance_m=float(
+                self.get_parameter('pallet_alignment_runup_distance_m').value
+            ),
+            final_approach_speed_mps=float(
+                self.get_parameter('pallet_final_approach_speed_mps').value
+            ),
+            final_approach_timeout_sec=float(
+                self.get_parameter('pallet_final_approach_timeout_sec').value
+            ),
+            max_start_position_error_m=float(
+                self.get_parameter('pallet_max_start_position_error_m').value
+            ),
+            max_start_heading_error_rad=float(
+                self.get_parameter('pallet_max_start_heading_error_rad').value
+            ),
+            forks_on_negative_x=bool(
+                self.get_parameter('pallet_forks_on_negative_x').value
+            ),
+            arrow_points_outward=bool(
+                self.get_parameter('pallet_arrow_points_outward').value
+            ),
         )
 
         try:
@@ -353,18 +556,45 @@ class ForkliftTaskManager(Node):
         self._status_pub = self.create_publisher(
             TaskStatus, '/forklift/task_status', status_qos
         )
-
-        self._navigator = Nav2Navigator(self, action_name)
-        self._machine = TaskStateMachine(
-            self._navigator,
-            max_retries=max_retries,
-            status_callback=self._publish_navigation_status,
+        self._approach_pose_pubs = {
+            name: self.create_publisher(
+                PoseStamped,
+                '/forklift/pallet_approach/{}_pose'.format(name),
+                status_qos,
+            )
+            for name in ('alignment', 'pre_approach', 'stop')
+        }
+        self._pallet_exemption_pose_pub = self.create_publisher(
+            PoseStamped,
+            '/forklift/pallet_approach/exemption_pose',
+            status_qos,
         )
+        self._pallet_exemption_active_pub = self.create_publisher(
+            Bool,
+            '/forklift/pallet_approach/exemption_active',
+            status_qos,
+        )
+        self._pallet_exemption_target: Optional[PoseTarget] = None
+        self._pallet_exemption_active = False
+
         self._pickup_devices = PickupDeviceActions(
             self,
             fork_action_name,
             detect_action_name,
             move_relative_action_name,
+        )
+        self._nav2_navigator = Nav2Navigator(self, action_name)
+        self._navigator = TaskMotionAdapter(
+            self,
+            self._nav2_navigator,
+            self._pickup_devices,
+            str(self.get_parameter('pallet_base_frame_id').value),
+            self._set_pallet_exemption,
+        )
+        self._machine = TaskStateMachine(
+            self._navigator,
+            max_retries=max_retries,
+            status_callback=self._publish_navigation_status,
         )
         self._pickup_machine = PalletPickupStateMachine(
             self._pickup_devices,
@@ -400,10 +630,13 @@ class ForkliftTaskManager(Node):
         self.create_subscription(
             String, '/forklift/safety_gate/status', self._safety_status, 10
         )
+        self.create_timer(0.1, self._update_pallet_exemption)
+        self._publish_pallet_exemption()
         self._publish_navigation_status(self._machine)
         self.get_logger().info(
-            'Loaded {} stations, {} routes, and {} pallet slots.'.format(
-                len(self._stations), len(self._routes), len(self._pallet_config.slots)
+            'Loaded {} stations, {} routes, and {} pallet slots; RViz goal mode={}.'.format(
+                len(self._stations), len(self._routes), len(self._pallet_config.slots),
+                self._rviz_goal_mode,
             )
         )
 
@@ -632,9 +865,21 @@ class ForkliftTaskManager(Node):
                 'Ignoring /goal_pose while another task is active; cancel it first.'
             )
             return
-        yaw = 2.0 * math.atan2(
-            pose.pose.orientation.z, pose.pose.orientation.w
+        orientation = pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (
+                orientation.w * orientation.z
+                + orientation.x * orientation.y
+            ),
+            1.0 - 2.0 * (
+                orientation.y * orientation.y
+                + orientation.z * orientation.z
+            ),
         )
+        if self._rviz_goal_mode == 'pallet_approach':
+            self._start_rviz_pallet_approach(pose, yaw)
+            return
+
         target = PoseTarget(
             name='goal_pose',
             x=float(pose.pose.position.x),
@@ -651,6 +896,136 @@ class ForkliftTaskManager(Node):
         if not accepted:
             self.get_logger().warning(message)
 
+    def _start_rviz_pallet_approach(
+        self,
+        pallet_pose: PoseStamped,
+        pallet_yaw: float,
+    ) -> None:
+        try:
+            geometry = build_pallet_approach(
+                pallet_x=float(pallet_pose.pose.position.x),
+                pallet_y=float(pallet_pose.pose.position.y),
+                pallet_yaw=pallet_yaw,
+                frame_id=pallet_pose.header.frame_id or 'map',
+                config=self._pallet_approach_config,
+            )
+        except PalletApproachError as exc:
+            self.get_logger().error(
+                'Rejecting RViz pallet goal: {}'.format(exc)
+            )
+            return
+
+        for name, target in zip(
+            ('alignment', 'pre_approach', 'stop'),
+            geometry_pose_targets(geometry),
+        ):
+            self._publish_approach_pose(name, target)
+
+        route = build_pallet_approach_route(geometry)
+        route_exemption = TaskMotionAdapter._pallet_exemption_pose(
+            geometry.final_motion
+        )
+        self._arm_pallet_exemption(route_exemption)
+        accepted, message = self._machine.start(route, loop=False)
+        if not accepted:
+            self._clear_pallet_exemption()
+            self.get_logger().warning(message)
+            return
+        self.get_logger().info(
+            'Accepted pallet goal ({:.3f}, {:.3f}, yaw {:.3f}); '
+            'stop=({:.3f}, {:.3f}), final_motion={:.3f} m at {:.3f} m/s.'.format(
+                pallet_pose.pose.position.x,
+                pallet_pose.pose.position.y,
+                pallet_yaw,
+                geometry.stop.x,
+                geometry.stop.y,
+                geometry.final_motion.distance_m,
+                geometry.final_motion.max_speed_mps,
+            )
+        )
+
+    def _publish_approach_pose(self, name: str, target: PoseTarget) -> None:
+        pose = PoseStamped()
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.header.frame_id = target.frame_id
+        pose.pose.position.x = target.x
+        pose.pose.position.y = target.y
+        pose.pose.orientation.z = math.sin(target.yaw * 0.5)
+        pose.pose.orientation.w = math.cos(target.yaw * 0.5)
+        self._approach_pose_pubs[name].publish(pose)
+
+    def _set_pallet_exemption(self, target: Optional[PoseTarget]) -> None:
+        # The final relative segment re-publishes the same pallet pose. A None
+        # callback means that segment ended; proximity, not segment completion,
+        # owns the lifetime of the exemption.
+        if target is not None:
+            self._arm_pallet_exemption(target)
+
+    def _arm_pallet_exemption(
+        self,
+        target: Optional[PoseTarget],
+    ) -> None:
+        self._pallet_exemption_target = target
+        self._pallet_exemption_active = False
+        self._update_pallet_exemption()
+
+    def _clear_pallet_exemption(self) -> None:
+        self._pallet_exemption_target = None
+        self._pallet_exemption_active = False
+        self._publish_pallet_exemption()
+
+    def _update_pallet_exemption(self) -> None:
+        target = self._pallet_exemption_target
+        if target is None:
+            self._publish_pallet_exemption()
+            return
+        try:
+            distance = self._navigator.planar_distance_to(target)
+        except Exception as exc:
+            self.get_logger().warning(
+                'Pallet exemption distance TF unavailable: {}'.format(exc),
+                throttle_duration_sec=2.0,
+            )
+            self._publish_pallet_exemption()
+            return
+
+        was_active = self._pallet_exemption_active
+        self._pallet_exemption_active = pallet_exemption_active_for_distance(
+            currently_active=was_active,
+            distance_m=distance,
+            activation_distance_m=self._pallet_exemption_activation_distance_m,
+            deactivation_distance_m=self._pallet_exemption_deactivation_distance_m,
+        )
+        if self._pallet_exemption_active and not was_active:
+            self.get_logger().info(
+                'Pallet scan exemption enabled at {:.3f} m from target.'.format(
+                    distance
+                )
+            )
+        elif was_active and not self._pallet_exemption_active:
+            self.get_logger().info(
+                'Pallet scan exemption disabled after leaving target area at '
+                '{:.3f} m.'.format(distance)
+            )
+            self._clear_pallet_exemption()
+            return
+        self._publish_pallet_exemption()
+
+    def _publish_pallet_exemption(self) -> None:
+        target = self._pallet_exemption_target
+        if target is not None:
+            pose = PoseStamped()
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.header.frame_id = target.frame_id
+            pose.pose.position.x = target.x
+            pose.pose.position.y = target.y
+            pose.pose.orientation.z = math.sin(target.yaw * 0.5)
+            pose.pose.orientation.w = math.cos(target.yaw * 0.5)
+            self._pallet_exemption_pose_pub.publish(pose)
+        active = Bool()
+        active.data = target is not None and self._pallet_exemption_active
+        self._pallet_exemption_active_pub.publish(active)
+
     def _safety_status(self, status: String) -> None:
         if self._machine.observe_safety_status(status.data):
             self.get_logger().warning(
@@ -666,6 +1041,12 @@ class ForkliftTaskManager(Node):
             self._last_completed_station = self._station_name_from_segment(
                 machine.current_segment
             )
+        if (
+            machine.state in {SUCCEEDED, FAILED, IDLE}
+            and self._pallet_exemption_target is not None
+            and not self._pallet_exemption_active
+        ):
+            self._clear_pallet_exemption()
         status = TaskStatus()
         status.state = machine.state
         status.active_route = machine.active_route

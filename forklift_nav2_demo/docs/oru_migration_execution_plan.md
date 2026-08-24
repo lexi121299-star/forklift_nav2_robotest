@@ -1310,6 +1310,12 @@ P8.2 剩余缺口（2026-06-18 已补完 8.2-4/5/6，下列为已闭环状态 + 
 
 P8.3 最低标准：
 
+> 详细的 tracked object、预测节点、controller 时间碰撞检查、行为状态机、ORU 时间维扩展和
+> 分阶段验收计划见 `dynamic_obstacle_prediction_plan.md`。实施顺序以该文档的 D0→D5 为准；
+> 第一版先完成预测 + 局部时序碰撞 + wait/replan，不直接把 ORU lattice 扩成四维搜索。
+> 多车会车的资源预约、调度/车端/safety 权责、死锁断联和车端避障缺口见
+> `fleet_coordination_and_onboard_avoidance.md`。
+
 - 动态障碍横穿或短时挡路时，车辆停车等待。
 - 障碍离开后，Nav2 不需要重启即可继续执行，或由上层重新触发当前目标。
 - 障碍持续挡住原路径时，触发重新规划。
@@ -1325,6 +1331,12 @@ P8.4 最低标准：
 - footprint 覆盖车体、叉臂和必要安全余量。
 - keepout 区、地图边缘、掉落风险区域不允许继续行驶。
 - safety 日志和诊断能说明停车、限速、等待、失败的原因，便于真车低速复盘。
+
+> **2026-07-06 范围决定：** safety gate 直接消费 `/scan`/点云的快速碰撞层暂缓，
+> 不阻塞当前 Gazebo、dry-run、架空轮台架和封闭场地最低速联调。当前沿用
+> `/scan → local costmap → controller + independent safety gate`。但必须先测端到端响应/制动距离；
+> 若延迟或停止余量不达标、速度/载荷提高，或进入人车混行，该层立即前移为 P8.4 必做项。
+> 详细边界和触发条件见 `fleet_coordination_and_onboard_avoidance.md` §1.1。
 
 ### P8.2 / P8.3 / P8.4 区别速查
 

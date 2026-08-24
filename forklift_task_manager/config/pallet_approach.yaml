@@ -1,0 +1,30 @@
+forklift_task_manager:
+  ros__parameters:
+    # Interpret RViz /goal_pose as the pallet pose, not the vehicle stop pose.
+    rviz_goal_mode: pallet_approach
+
+    # The RViz arrow points from the pallet toward the free aisle.
+    pallet_arrow_points_outward: true
+
+    # MIMA forks are behind base_link, on the vehicle -X side.
+    pallet_forks_on_negative_x: true
+
+    # base_link stops this far from the selected pallet pose.
+    pallet_standoff_distance_m: 1.80
+
+    # A* aligns the vehicle outside the stop pose, then MoveRelative covers
+    # this final straight distance. It is sent as a negative distance for
+    # rear-fork vehicles.
+    pallet_final_approach_distance_m: 1.00
+    pallet_alignment_runup_distance_m: 0.60
+    pallet_final_approach_speed_mps: 0.10
+    pallet_final_approach_timeout_sec: 20.0
+    pallet_max_start_position_error_m: 0.35
+    pallet_max_start_heading_error_rad: 0.20
+    pallet_base_frame_id: base_link
+
+    # Arm the selected pallet-only scan exemption before the final straight
+    # motion. Keep it active while stopped at the pallet, and release it only
+    # after the vehicle has left the area. The gap provides hysteresis.
+    pallet_exemption_activation_distance_m: 4.0
+    pallet_exemption_deactivation_distance_m: 4.5

@@ -33,6 +33,10 @@ MpcPreviewWindow makeMpcPreviewWindowFromIndex(
   std::size_t start_index,
   const MpcPreviewWindowOptions & options = {});
 
+bool isMpcPreviewConsumed(
+  const MpcPreviewWindow & window,
+  std::size_t trajectory_size);
+
 }  // namespace forklift_nav2_plugins
 
 #endif  // FORKLIFT_NAV2_PLUGINS__FORKLIFT_MPC_PREVIEW_WINDOW_HPP_

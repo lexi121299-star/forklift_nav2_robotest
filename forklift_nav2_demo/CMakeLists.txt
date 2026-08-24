@@ -4,7 +4,7 @@ project(forklift_nav2_demo)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY launch urdf config worlds docs behavior_trees
+  DIRECTORY launch urdf config worlds docs behavior_trees rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -77,6 +77,12 @@ install(
   PROGRAMS scripts/forklift_scan_self_filter.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME forklift_scan_self_filter
+)
+
+install(
+  PROGRAMS scripts/map_odom_localization_adapter.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME map_odom_localization_adapter
 )
 
 ament_package()

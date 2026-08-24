@@ -2,7 +2,7 @@
 
 from typing import Callable, Optional
 
-from .route_model import PoseTarget, RouteDefinition
+from .route_model import RouteDefinition, TaskTarget
 
 
 IDLE = 'IDLE'
@@ -48,7 +48,7 @@ class TaskStateMachine:
         return len(self.route.targets) if self.route is not None else 0
 
     @property
-    def current_target(self) -> Optional[PoseTarget]:
+    def current_target(self) -> Optional[TaskTarget]:
         if (
             self.route is None
             or self.segment_index < 0
@@ -155,7 +155,12 @@ class TaskStateMachine:
         self._set_state(SUCCEEDED)
 
     def _segment_failed(self, message: str) -> None:
-        if self._retry_count < self.max_retries:
+        target = self.current_target
+        retryable = bool(getattr(target, 'retryable', True))
+        if not retryable:
+            self._fail(message)
+            return
+        if retryable and self._retry_count < self.max_retries:
             self._retry_count += 1
             self.reason = '{}; retry {}/{}'.format(
                 message, self._retry_count, self.max_retries
@@ -164,9 +169,7 @@ class TaskStateMachine:
             self._set_state(RUNNING)
             self._dispatch_current()
             return
-        self._fail(
-            '{} after {} retries'.format(message, self.max_retries)
-        )
+        self._fail('{} after {} retries'.format(message, self.max_retries))
 
     def _fail(self, reason: str) -> None:
         self.reason = reason

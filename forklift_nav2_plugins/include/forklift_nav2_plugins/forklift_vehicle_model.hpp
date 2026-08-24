@@ -19,6 +19,7 @@ struct ForkliftVehicleParameters
   double pivot_steering_tolerance{0.03};
   double pivot_turn_radius{0.6};
   double rear_axle_x_offset{0.0};
+  bool invert_pivot_yaw_direction{false};
 };
 
 struct ForkliftVehicleState

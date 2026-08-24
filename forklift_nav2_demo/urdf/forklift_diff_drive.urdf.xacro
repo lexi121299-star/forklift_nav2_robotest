@@ -210,7 +210,7 @@
   <joint name="base_scan_joint" type="fixed">
     <parent link="base_link"/>
     <child link="base_scan"/>
-    <origin xyz="0.25 0 0.30" rpy="0 0 0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
   <gazebo reference="base_link">

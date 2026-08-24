@@ -2,6 +2,9 @@
 
 这份文档用于规划后续把当前 `forklift_nav2_demo` 仿真项目升级成一套可以逐步上真车的 ROS2 forklift 导航系统。
 
+Task Manager、调度系统、规划控制、安全层和当前 package 关系图见：
+[`task_manager_dispatch_flow.md`](task_manager_dispatch_flow.md)。
+
 核心原则：
 
 - 不直接修改 `/opt/ros/humble` 里的 Nav2 源码。
@@ -772,4 +775,3 @@ Controller:
 ```
 
 等最小插件能被 Nav2 加载后，再开始把 ORU 的 `orunav_motion_planner` 拆出来迁移。这样每一步都有可运行系统，不会陷入“搬了一大套 ORU 但不知道哪里坏了”的状态。
-

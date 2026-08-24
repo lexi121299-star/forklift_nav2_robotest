@@ -99,5 +99,17 @@ TEST(ForkliftMpcPreviewWindow, StartIndexPastEndUsesLastPoint)
   EXPECT_DOUBLE_EQ(window.points.front().state.x, 2.0);
 }
 
+TEST(ForkliftMpcPreviewWindow, DetectsConsumedTerminalWindow)
+{
+  const auto trajectory = makeStraightTrajectory(4);
+
+  const auto active = makeMpcPreviewWindowFromIndex(trajectory, 2, {5});
+  const auto consumed = makeMpcPreviewWindowFromIndex(trajectory, 3, {5});
+
+  EXPECT_FALSE(isMpcPreviewConsumed(active, trajectory.size()));
+  EXPECT_TRUE(isMpcPreviewConsumed(consumed, trajectory.size()));
+  EXPECT_FALSE(isMpcPreviewConsumed(MpcPreviewWindow{}, trajectory.size()));
+}
+
 }  // namespace
 }  // namespace forklift_nav2_plugins

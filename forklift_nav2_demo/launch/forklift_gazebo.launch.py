@@ -175,7 +175,7 @@ def generate_launch_description():
         parameters=[{
             'input_topic': scan_raw_topic,
             'output_topic': scan_filtered_topic,
-            'sensor_x': 0.25,
+            'sensor_x': 0.0,
             'sensor_y': 0.0,
             'sensor_yaw': 0.0,
             'footprint': '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]',

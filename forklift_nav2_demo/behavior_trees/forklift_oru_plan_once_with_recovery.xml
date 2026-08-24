@@ -9,21 +9,25 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="2" name="NavigateRecovery">
-      <ForkliftPlanOnceSequence name="PlanOnceThenFollow">
+      <Sequence name="PlanOnceThenFollow">
         <RecoveryNode number_of_retries="1" name="ComputePathToPose">
           <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-          <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Sequence name="RefreshGlobalCostmap">
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <Wait wait_duration="1"/>
+          </Sequence>
         </RecoveryNode>
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="FollowPath"/>
           <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
         </RecoveryNode>
-      </ForkliftPlanOnceSequence>
+      </Sequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <Sequence name="RecoveryActions">
           <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
           <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait wait_duration="1"/>
         </Sequence>
       </ReactiveFallback>
     </RecoveryNode>

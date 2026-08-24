@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from typing import Iterable, List, Optional, Tuple
 
@@ -51,6 +52,10 @@ class CurtisVehicleInterface(Node):
         self.declare_parameter('pivot_turn_radius_m', 0.6)
         self.declare_parameter('max_drive_rpm', 2485.0)
         self.declare_parameter('min_drive_rpm', 100.0)
+        self.declare_parameter('invert_drive_direction', False)
+        self.declare_parameter('invert_feedback_drive_direction', False)
+        self.declare_parameter('odom_angular_scale', 1.0)
+        self.declare_parameter('invert_steering_angle', False)
         self.declare_parameter('max_integration_dt_sec', 0.20)
         self.declare_parameter('max_rx_frames_per_cycle', 32)
 
@@ -81,11 +86,28 @@ class CurtisVehicleInterface(Node):
         self._pivot_turn_radius_m = self._positive_param('pivot_turn_radius_m', 0.6)
         self._max_drive_rpm = self._positive_param('max_drive_rpm', 2485.0)
         self._min_drive_rpm = max(0.0, float(self.get_parameter('min_drive_rpm').value))
+        self._invert_drive_direction = self._bool_param('invert_drive_direction', False)
+        self._invert_feedback_drive_direction = self._bool_param(
+            'invert_feedback_drive_direction', False
+        )
+        self._odom_angular_scale = float(
+            self.get_parameter('odom_angular_scale').value
+        )
+        if not math.isfinite(self._odom_angular_scale):
+            self.get_logger().warning(
+                'Parameter odom_angular_scale must be finite; using fallback 1.0.'
+            )
+            self._odom_angular_scale = 1.0
+        self._invert_steering_angle = self._bool_param('invert_steering_angle', False)
 
         self._feedback = CurtisFeedbackState(
             drive_wheel_radius_m=self._drive_wheel_radius_m,
             drive_gear_ratio=self._drive_gear_ratio,
             drive_track_width_m=self._drive_track_width_m,
+            drive_feedback_sign=(
+                -1.0 if self._invert_feedback_drive_direction else 1.0
+            ),
+            odom_angular_scale=self._odom_angular_scale,
             max_integration_dt_sec=self._positive_param('max_integration_dt_sec', 0.20),
         )
 
@@ -284,11 +306,26 @@ class CurtisVehicleInterface(Node):
             min_drive_rpm=self._min_drive_rpm,
         )
 
+    def _command_for_curtis(self, command: ForkliftControlCommand) -> ForkliftControlCommand:
+        curtis_command = copy.deepcopy(command)
+
+        if self._invert_drive_direction:
+            curtis_command.velocity_mps = -curtis_command.velocity_mps
+            curtis_command.forward = command.reverse
+            curtis_command.reverse = command.forward
+
+        if self._invert_steering_angle:
+            curtis_command.steering_angle_rad = -curtis_command.steering_angle_rad
+            curtis_command.steering_angle_deg = -curtis_command.steering_angle_deg
+
+        curtis_command.drive_rpm = self._derive_drive_rpm(curtis_command)
+        return curtis_command
+
     def _send_command(self, command: ForkliftControlCommand, stop_reason: str) -> None:
-        command.drive_rpm = self._derive_drive_rpm(command)
-        frame_203 = encode_0x203(command)
-        frame_303 = encode_0x303(command)
-        frame_403 = encode_0x403(command)
+        curtis_command = self._command_for_curtis(command)
+        frame_203 = encode_0x203(curtis_command)
+        frame_303 = encode_0x303(curtis_command)
+        frame_403 = encode_0x403(curtis_command)
         if self._dry_run:
             self._log_tx_frames(frame_203, frame_303, frame_403, stop_reason)
             return
@@ -376,7 +413,7 @@ class CurtisVehicleInterface(Node):
         msg.reverse_relay = self._feedback.reverse_relay
         msg.main_contactor = self._feedback.main_contactor
         msg.auto_mode_input = self._feedback.auto_mode_input
-        msg.soft_emergency_stop_input = self._feedback.soft_emergency_stop
+        msg.soft_emergency_stop_input = self._feedback.soft_emergency_stop_input
         msg.parking_brake_input = self._feedback.parking_brake
         msg.slowdown_switch_input = self._feedback.slowdown_switch_input
         self._io_state_pub.publish(msg)
