@@ -128,6 +128,11 @@ private:
   std::vector<Cell> simplifyAStarPath(
     const std::vector<Cell> & cells,
     unsigned int max_lookahead) const;
+  bool isAStarSearchPoseTraversable(
+    const Cell & cell, double yaw) const;
+  bool resolveAStarCell(
+    const Cell & requested, double yaw, double tolerance,
+    Cell & resolved) const;
   bool isAStarShortcutTraversable(const Cell & start, const Cell & goal) const;
   nav_msgs::msg::Path smoothAStarPathWithBSpline(
     const nav_msgs::msg::Path & path,
@@ -148,6 +153,29 @@ private:
     nav_msgs::msg::Path & pivot_path,
     double & heading_error,
     double & max_curvature,
+    std::size_t & rejected_index,
+    AStarPathValidationFailure & failure) const;
+  bool buildAStarSegmentedFallbackPath(
+    const nav_msgs::msg::Path & astar_path,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal,
+    nav_msgs::msg::Path & segmented_path,
+    std::size_t & pivot_count,
+    double & max_curvature,
+    std::size_t & rejected_index,
+    AStarPathValidationFailure & failure) const;
+  bool buildAStarDepartureFallbackPath(
+    const Cell & start_cell, double start_yaw, const Cell & goal_cell,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal,
+    nav_msgs::msg::Path & departure_path,
+    double & departure_distance,
+    std::size_t & pivot_count,
+    double & max_curvature,
+    std::size_t & rejected_index,
+    AStarPathValidationFailure & failure) const;
+  bool validateAStarPivotSweep(
+    double wx, double wy, double start_yaw, double target_yaw,
     std::size_t & rejected_index,
     AStarPathValidationFailure & failure) const;
   const char * aStarValidationFailureName(
@@ -268,6 +296,12 @@ private:
   bool astar_start_pivot_enabled_{true};
   double astar_start_pivot_threshold_{0.7853981634};
   double astar_pivot_collision_sample_angle_{0.0872664626};
+  bool astar_segmented_fallback_enabled_{true};
+  double astar_segmented_pivot_threshold_{0.20};
+  bool astar_departure_fallback_enabled_{true};
+  double astar_departure_min_distance_{0.50};
+  double astar_departure_max_distance_{2.50};
+  double astar_departure_step_distance_{0.25};
 
   bool use_lattice_planner_{false};
   bool lattice_fallback_to_astar_{false};

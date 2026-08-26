@@ -207,6 +207,24 @@ void OruGlobalPlanner::configure(
     node, name_ + ".astar_pivot_collision_sample_angle",
     rclcpp::ParameterValue(astar_pivot_collision_sample_angle_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_segmented_fallback_enabled",
+    rclcpp::ParameterValue(astar_segmented_fallback_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_segmented_pivot_threshold",
+    rclcpp::ParameterValue(astar_segmented_pivot_threshold_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_departure_fallback_enabled",
+    rclcpp::ParameterValue(astar_departure_fallback_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_departure_min_distance",
+    rclcpp::ParameterValue(astar_departure_min_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_departure_max_distance",
+    rclcpp::ParameterValue(astar_departure_max_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_departure_step_distance",
+    rclcpp::ParameterValue(astar_departure_step_distance_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".use_lattice_planner",
     rclcpp::ParameterValue(use_lattice_planner_));
   nav2_util::declare_parameter_if_not_declared(
@@ -369,6 +387,24 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".astar_pivot_collision_sample_angle",
     astar_pivot_collision_sample_angle_);
+  node->get_parameter(
+    name_ + ".astar_segmented_fallback_enabled",
+    astar_segmented_fallback_enabled_);
+  node->get_parameter(
+    name_ + ".astar_segmented_pivot_threshold",
+    astar_segmented_pivot_threshold_);
+  node->get_parameter(
+    name_ + ".astar_departure_fallback_enabled",
+    astar_departure_fallback_enabled_);
+  node->get_parameter(
+    name_ + ".astar_departure_min_distance",
+    astar_departure_min_distance_);
+  node->get_parameter(
+    name_ + ".astar_departure_max_distance",
+    astar_departure_max_distance_);
+  node->get_parameter(
+    name_ + ".astar_departure_step_distance",
+    astar_departure_step_distance_);
   node->get_parameter(name_ + ".use_lattice_planner", use_lattice_planner_);
   node->get_parameter(
     name_ + ".lattice_fallback_to_astar",
@@ -493,6 +529,14 @@ void OruGlobalPlanner::configure(
     std::clamp(astar_start_pivot_threshold_, 0.20, M_PI);
   astar_pivot_collision_sample_angle_ =
     std::clamp(astar_pivot_collision_sample_angle_, 0.01, 0.20);
+  astar_segmented_pivot_threshold_ =
+    std::clamp(astar_segmented_pivot_threshold_, 0.20, M_PI);
+  astar_departure_min_distance_ =
+    std::clamp(astar_departure_min_distance_, 0.10, 5.0);
+  astar_departure_max_distance_ = std::clamp(
+    astar_departure_max_distance_, astar_departure_min_distance_, 10.0);
+  astar_departure_step_distance_ =
+    std::clamp(astar_departure_step_distance_, 0.05, 1.0);
   lattice_heading_bins_ = std::clamp(lattice_heading_bins_, 4u, 72u);
   lattice_step_distance_ = std::clamp(lattice_step_distance_, 0.05, 2.0);
   lattice_arc_radius_ = std::clamp(lattice_arc_radius_, 0.05, 20.0);
@@ -549,6 +593,8 @@ void OruGlobalPlanner::configure(
     "astar_bspline=%s bspline_spacing=%.2f bspline_min_radius=%.2f "
     "bspline_start_tangent=%.2f bspline_retries=%u "
     "astar_start_pivot=%s pivot_threshold=%.2f pivot_sample_angle=%.2f "
+    "segmented_fallback=%s segmented_pivot_threshold=%.2f "
+    "departure_fallback=%s departure_distance=%.2f..%.2f step=%.2f "
     "use_lattice=%s "
     "lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
     "lattice_goal_tolerance=%.2f lattice_reverse=%s "
@@ -565,6 +611,11 @@ void OruGlobalPlanner::configure(
     astar_bspline_start_tangent_distance_, astar_bspline_retry_count_,
     astar_start_pivot_enabled_ ? "true" : "false",
     astar_start_pivot_threshold_, astar_pivot_collision_sample_angle_,
+    astar_segmented_fallback_enabled_ ? "true" : "false",
+    astar_segmented_pivot_threshold_,
+    astar_departure_fallback_enabled_ ? "true" : "false",
+    astar_departure_min_distance_, astar_departure_max_distance_,
+    astar_departure_step_distance_,
     use_lattice_planner_ ? "true" : "false", lattice_heading_bins_,
     lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_,
     lattice_reverse_enabled_ ? "true" : "false",
@@ -676,13 +727,72 @@ OruGlobalPlanner::createPlan(
       "Lattice planner failed; falling back to 2D costmap A*");
   }
 
-  const auto cells = searchAStar(planning_start_cell, goal_cell);
+  Cell astar_start_cell = start_cell;
+  if (!isAStarSearchPoseTraversable(astar_start_cell, start_yaw)) {
+    RCLCPP_WARN(
+      logger_,
+      "A* start pose violates the configured shortcut safety cost %d",
+      astar_shortcut_cost_threshold_);
+    if (!resolveAStarCell(
+        start_cell, start_yaw, start_tolerance_, astar_start_cell))
+    {
+      throw nav2_core::PlannerException(
+              "No A* start pose satisfies the configured safety cost inside "
+              "start_tolerance");
+    }
+  }
+
+  auto planning_start = start;
+  if (astar_start_cell.x != start_cell.x ||
+    astar_start_cell.y != start_cell.y)
+  {
+    double planning_start_x = 0.0;
+    double planning_start_y = 0.0;
+    costmap_->mapToWorld(
+      astar_start_cell.x, astar_start_cell.y,
+      planning_start_x, planning_start_y);
+    planning_start.pose.position.x = planning_start_x;
+    planning_start.pose.position.y = planning_start_y;
+    RCLCPP_WARN(
+      logger_,
+      "A* output starts at resolved traversable pose (%.3f, %.3f), "
+      "%.3f m from requested start",
+      planning_start_x, planning_start_y,
+      std::hypot(
+        planning_start_x - start.pose.position.x,
+        planning_start_y - start.pose.position.y));
+  }
+
+  const auto cells = searchAStar(astar_start_cell, goal_cell);
   if (cells.empty()) {
+    if (astar_departure_fallback_enabled_) {
+      nav_msgs::msg::Path departure_path;
+      double departure_distance = 0.0;
+      std::size_t departure_pivots = 0u;
+      double departure_curvature = 0.0;
+      std::size_t departure_rejected_index = 0u;
+      AStarPathValidationFailure departure_failure =
+        AStarPathValidationFailure::NONE;
+      if (buildAStarDepartureFallbackPath(
+          astar_start_cell, start_yaw, goal_cell, planning_start, goal,
+          departure_path, departure_distance, departure_pivots,
+          departure_curvature, departure_rejected_index,
+          departure_failure))
+      {
+        RCLCPP_WARN(
+          logger_,
+          "A* direct search failed; accepted departure fallback: "
+          "distance=%.2f m samples=%zu pivots=%zu",
+          departure_distance, departure_path.poses.size(),
+          departure_pivots);
+        return departure_path;
+      }
+    }
     throw nav2_core::PlannerException("OruGlobalPlanner could not find a path");
   }
 
   const auto smoothed_cells = simplifyAStarPath(cells);
-  const auto astar_path = buildPath(smoothed_cells, start, goal);
+  const auto astar_path = buildPath(smoothed_cells, planning_start, goal);
   if (!astar_bspline_smoothing_enabled_) {
     return astar_path;
   }
@@ -692,8 +802,8 @@ OruGlobalPlanner::createPlan(
 
   const auto & first_route_point = astar_path.poses[1].pose.position;
   const double route_yaw = std::atan2(
-    first_route_point.y - start.pose.position.y,
-    first_route_point.x - start.pose.position.x);
+    first_route_point.y - planning_start.pose.position.y,
+    first_route_point.x - planning_start.pose.position.x);
   const double initial_heading_error = std::abs(
     normalizeAngle(route_yaw - start_yaw));
   const bool pivot_preferred =
@@ -709,7 +819,7 @@ OruGlobalPlanner::createPlan(
       AStarPathValidationFailure::NONE;
     pivot_attempted = true;
     if (buildAStarStartPivotPath(
-        astar_path, start, goal, pivot_path, pivot_heading_error,
+        astar_path, planning_start, goal, pivot_path, pivot_heading_error,
         pivot_max_curvature, pivot_rejected_index, pivot_failure))
     {
       RCLCPP_INFO(
@@ -727,7 +837,8 @@ OruGlobalPlanner::createPlan(
       aStarValidationFailureName(pivot_failure), pivot_rejected_index);
   }
 
-  const auto smooth_path = smoothAStarPathWithBSpline(astar_path, start, goal);
+  const auto smooth_path = smoothAStarPathWithBSpline(
+    astar_path, planning_start, goal);
   double max_curvature = 0.0;
   std::size_t rejected_index = 0u;
   AStarPathValidationFailure failure = AStarPathValidationFailure::NONE;
@@ -768,7 +879,7 @@ OruGlobalPlanner::createPlan(
     AStarPathValidationFailure pivot_failure =
       AStarPathValidationFailure::NONE;
     if (buildAStarStartPivotPath(
-        astar_path, start, goal, pivot_path, pivot_heading_error,
+        astar_path, planning_start, goal, pivot_path, pivot_heading_error,
         pivot_max_curvature, pivot_rejected_index, pivot_failure))
     {
       RCLCPP_WARN(
@@ -795,15 +906,16 @@ OruGlobalPlanner::createPlan(
     retry < astar_bspline_retry_count_ && retry_lookahead >= 2u; ++retry)
   {
     const auto retry_cells = simplifyAStarPath(cells, retry_lookahead);
-    const auto retry_astar_path = buildPath(retry_cells, start, goal);
+    const auto retry_astar_path = buildPath(
+      retry_cells, planning_start, goal);
     if (retry_astar_path.poses.size() < 2u) {
       break;
     }
 
     const auto & retry_route_point = retry_astar_path.poses[1].pose.position;
     const double retry_route_yaw = std::atan2(
-      retry_route_point.y - start.pose.position.y,
-      retry_route_point.x - start.pose.position.x);
+      retry_route_point.y - planning_start.pose.position.y,
+      retry_route_point.x - planning_start.pose.position.x);
     const double retry_heading_error = std::abs(
       normalizeAngle(retry_route_yaw - start_yaw));
 
@@ -817,7 +929,7 @@ OruGlobalPlanner::createPlan(
       AStarPathValidationFailure retry_pivot_failure =
         AStarPathValidationFailure::NONE;
       if (buildAStarStartPivotPath(
-          retry_astar_path, start, goal, retry_pivot_path,
+          retry_astar_path, planning_start, goal, retry_pivot_path,
           retry_pivot_heading_error, retry_pivot_max_curvature,
           retry_pivot_rejected_index, retry_pivot_failure))
       {
@@ -832,7 +944,7 @@ OruGlobalPlanner::createPlan(
     }
 
     const auto retry_smooth_path =
-      smoothAStarPathWithBSpline(retry_astar_path, start, goal);
+      smoothAStarPathWithBSpline(retry_astar_path, planning_start, goal);
     double retry_max_curvature = 0.0;
     std::size_t retry_rejected_index = 0u;
     AStarPathValidationFailure retry_failure =
@@ -864,6 +976,66 @@ OruGlobalPlanner::createPlan(
       break;
     }
     retry_lookahead = std::max(2u, retry_lookahead / 2u);
+  }
+
+  if (astar_segmented_fallback_enabled_) {
+    nav_msgs::msg::Path segmented_path;
+    std::size_t pivot_count = 0u;
+    double segmented_max_curvature = 0.0;
+    std::size_t segmented_rejected_index = 0u;
+    AStarPathValidationFailure segmented_failure =
+      AStarPathValidationFailure::NONE;
+    if (buildAStarSegmentedFallbackPath(
+        astar_path, planning_start, goal, segmented_path, pivot_count,
+        segmented_max_curvature, segmented_rejected_index,
+        segmented_failure))
+    {
+      RCLCPP_WARN(
+        logger_,
+        "A* global B-spline retries exhausted; accepted validated segmented "
+        "fallback: anchors=%zu samples=%zu pivots=%zu",
+        astar_path.poses.size(), segmented_path.poses.size(), pivot_count);
+      return segmented_path;
+    }
+    failure = segmented_failure;
+    rejected_index = segmented_rejected_index;
+    max_curvature = segmented_max_curvature;
+    RCLCPP_WARN(
+      logger_,
+      "A* segmented fallback rejected: reason=%s sample=%zu",
+      aStarValidationFailureName(segmented_failure),
+      segmented_rejected_index);
+  }
+
+  if (astar_departure_fallback_enabled_) {
+    nav_msgs::msg::Path departure_path;
+    double departure_distance = 0.0;
+    std::size_t departure_pivots = 0u;
+    double departure_curvature = 0.0;
+    std::size_t departure_rejected_index = 0u;
+    AStarPathValidationFailure departure_failure =
+      AStarPathValidationFailure::NONE;
+    if (buildAStarDepartureFallbackPath(
+        astar_start_cell, start_yaw, goal_cell, planning_start, goal,
+        departure_path, departure_distance, departure_pivots,
+        departure_curvature, departure_rejected_index,
+        departure_failure))
+    {
+      RCLCPP_WARN(
+        logger_,
+        "A* smoothing and direct segmentation failed; accepted departure "
+        "fallback: distance=%.2f m samples=%zu pivots=%zu",
+        departure_distance, departure_path.poses.size(), departure_pivots);
+      return departure_path;
+    }
+    failure = departure_failure;
+    rejected_index = departure_rejected_index;
+    max_curvature = departure_curvature;
+    RCLCPP_WARN(
+      logger_,
+      "A* departure fallback rejected: reason=%s sample=%zu",
+      aStarValidationFailureName(departure_failure),
+      departure_rejected_index);
   }
 
   throw nav2_core::PlannerException(
@@ -937,13 +1109,11 @@ OruGlobalPlanner::searchAStar(const Cell & start, const Cell & goal) const
         static_cast<unsigned int>(next_y)};
       const auto next_index = toIndex(next_cell.x, next_cell.y);
 
-      if (closed[next_index] || !isTraversable(next_cell.x, next_cell.y)) {
-        continue;
-      }
-
       const double next_yaw =
         std::atan2(static_cast<double>(dy), static_cast<double>(dx));
-      if (!isFootprintTraversable(next_cell.x, next_cell.y, next_yaw)) {
+      if (closed[next_index] ||
+        !isAStarSearchPoseTraversable(next_cell, next_yaw))
+      {
         continue;
       }
 
@@ -1041,6 +1211,69 @@ OruGlobalPlanner::simplifyAStarPath(
     "with lookahead=%u",
     cells.size(), simplified.size(), max_lookahead);
   return simplified;
+}
+
+bool OruGlobalPlanner::isAStarSearchPoseTraversable(
+  const Cell & cell, double yaw) const
+{
+  if (!costmap_) {
+    return false;
+  }
+  double wx = 0.0;
+  double wy = 0.0;
+  costmap_->mapToWorld(cell.x, cell.y, wx, wy);
+  AStarPathValidationFailure failure = AStarPathValidationFailure::NONE;
+  return isAStarSmoothedPoseTraversable(wx, wy, yaw, failure);
+}
+
+bool OruGlobalPlanner::resolveAStarCell(
+  const Cell & requested, double yaw, double tolerance,
+  Cell & resolved) const
+{
+  if (isAStarSearchPoseTraversable(requested, yaw)) {
+    resolved = requested;
+    return true;
+  }
+  if (!costmap_ || tolerance <= 0.0) {
+    return false;
+  }
+
+  const int tolerance_cells = static_cast<int>(
+    std::ceil(tolerance / costmap_->getResolution()));
+  double best_distance_cells = std::numeric_limits<double>::infinity();
+  bool found = false;
+  for (int dy = -tolerance_cells; dy <= tolerance_cells; ++dy) {
+    for (int dx = -tolerance_cells; dx <= tolerance_cells; ++dx) {
+      const double distance_cells = std::hypot(dx, dy);
+      if (distance_cells > static_cast<double>(tolerance_cells) ||
+        distance_cells >= best_distance_cells)
+      {
+        continue;
+      }
+      const int candidate_x = static_cast<int>(requested.x) + dx;
+      const int candidate_y = static_cast<int>(requested.y) + dy;
+      if (!isInBounds(candidate_x, candidate_y)) {
+        continue;
+      }
+      const Cell candidate{
+        static_cast<unsigned int>(candidate_x),
+        static_cast<unsigned int>(candidate_y)};
+      if (!isAStarSearchPoseTraversable(candidate, yaw)) {
+        continue;
+      }
+      resolved = candidate;
+      best_distance_cells = distance_cells;
+      found = true;
+    }
+  }
+
+  if (found) {
+    RCLCPP_WARN(
+      logger_,
+      "A* safety-cost start resolution selected a pose %.3f m away",
+      best_distance_cells * costmap_->getResolution());
+  }
+  return found;
 }
 
 bool OruGlobalPlanner::isAStarShortcutTraversable(
@@ -1380,27 +1613,17 @@ bool OruGlobalPlanner::buildAStarStartPivotPath(
     return false;
   }
 
-  // Validate the full in-place rotation before adding a pivot marker to the
-  // path. This samples the complete footprint sweep, not just its start/end.
-  const auto sweep_samples = std::max(
-    1u, static_cast<unsigned int>(std::ceil(
-      std::abs(heading_error) / astar_pivot_collision_sample_angle_)));
-  for (unsigned int i = 0u; i <= sweep_samples; ++i) {
-    const double ratio =
-      static_cast<double>(i) / static_cast<double>(sweep_samples);
-    const double yaw = normalizeAngle(start_yaw + ratio * heading_error);
-    if (!isAStarSmoothedPoseTraversable(
-        start.pose.position.x, start.pose.position.y, yaw, failure))
-    {
-      rejected_index = i;
-      RCLCPP_WARN(
-        logger_,
-        "A* start-pivot sweep rejected: reason=%s sample=%u/%u "
-        "pose=(%.3f, %.3f, yaw=%.3f)",
-        aStarValidationFailureName(failure), i, sweep_samples,
-        start.pose.position.x, start.pose.position.y, yaw);
-      return false;
-    }
+  if (!validateAStarPivotSweep(
+      start.pose.position.x, start.pose.position.y, start_yaw, route_yaw,
+      rejected_index, failure))
+  {
+    RCLCPP_WARN(
+      logger_,
+      "A* start-pivot sweep rejected: reason=%s sample=%zu "
+      "pose=(%.3f, %.3f)",
+      aStarValidationFailureName(failure), rejected_index,
+      start.pose.position.x, start.pose.position.y);
+    return false;
   }
 
   auto route_start = start;
@@ -1440,6 +1663,331 @@ bool OruGlobalPlanner::buildAStarStartPivotPath(
 
   return validateAStarSmoothedPath(
     pivot_path, max_curvature, rejected_index, failure);
+}
+
+bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
+  const nav_msgs::msg::Path & astar_path,
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path & segmented_path,
+  std::size_t & pivot_count,
+  double & max_curvature,
+  std::size_t & rejected_index,
+  AStarPathValidationFailure & failure) const
+{
+  segmented_path = nav_msgs::msg::Path();
+  segmented_path.header = astar_path.header;
+  pivot_count = 0u;
+  max_curvature = 0.0;
+  rejected_index = 0u;
+  failure = AStarPathValidationFailure::NONE;
+  if (astar_path.poses.size() < 2u) {
+    failure = AStarPathValidationFailure::EMPTY_PATH;
+    return false;
+  }
+
+  std::vector<double> segment_yaws;
+  segment_yaws.reserve(astar_path.poses.size() - 1u);
+  for (std::size_t i = 0u; i + 1u < astar_path.poses.size(); ++i) {
+    const auto & from = astar_path.poses[i].pose.position;
+    const auto & to = astar_path.poses[i + 1u].pose.position;
+    if (std::hypot(to.x - from.x, to.y - from.y) <= 1e-6) {
+      failure = AStarPathValidationFailure::EMPTY_PATH;
+      rejected_index = i;
+      return false;
+    }
+    segment_yaws.push_back(std::atan2(to.y - from.y, to.x - from.x));
+  }
+
+  const auto append_pose = [&segmented_path](
+      const geometry_msgs::msg::Point & point, double yaw) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = segmented_path.header;
+      pose.pose.position = point;
+      pose.pose.orientation =
+        nav2_util::geometry_utils::orientationAroundZAxis(yaw);
+      segmented_path.poses.push_back(pose);
+    };
+
+  const double start_yaw = tf2::getYaw(start.pose.orientation);
+  const double first_route_yaw = segment_yaws.front();
+  const double initial_heading_change =
+    normalizeAngle(first_route_yaw - start_yaw);
+  if (std::abs(initial_heading_change) >= astar_segmented_pivot_threshold_) {
+    if (!validateAStarPivotSweep(
+        start.pose.position.x, start.pose.position.y,
+        start_yaw, first_route_yaw, rejected_index, failure))
+    {
+      RCLCPP_WARN(
+        logger_,
+        "A* segmented initial pivot rejected: reason=%s sample=%zu "
+        "pose=(%.3f, %.3f) yaw=%.3f->%.3f",
+        aStarValidationFailureName(failure), rejected_index,
+        start.pose.position.x, start.pose.position.y,
+        start_yaw, first_route_yaw);
+      return false;
+    }
+    append_pose(start.pose.position, start_yaw);
+    append_pose(start.pose.position, first_route_yaw);
+    ++pivot_count;
+  } else {
+    append_pose(start.pose.position, first_route_yaw);
+  }
+
+  for (std::size_t segment = 0u; segment < segment_yaws.size(); ++segment) {
+    const auto & from = astar_path.poses[segment].pose.position;
+    const auto & to = astar_path.poses[segment + 1u].pose.position;
+    const double dx = to.x - from.x;
+    const double dy = to.y - from.y;
+    const double length = std::hypot(dx, dy);
+    const auto sample_count = std::max(
+      1u, static_cast<unsigned int>(std::ceil(
+        length / astar_bspline_sample_spacing_)));
+    for (unsigned int sample = 1u; sample <= sample_count; ++sample) {
+      const double ratio =
+        static_cast<double>(sample) / static_cast<double>(sample_count);
+      geometry_msgs::msg::Point point;
+      point.x = from.x + ratio * dx;
+      point.y = from.y + ratio * dy;
+      point.z = start.pose.position.z;
+      append_pose(point, segment_yaws[segment]);
+    }
+
+    if (segment + 1u >= segment_yaws.size()) {
+      continue;
+    }
+    const double next_yaw = segment_yaws[segment + 1u];
+    const double heading_change =
+      normalizeAngle(next_yaw - segment_yaws[segment]);
+    if (std::abs(heading_change) < 1e-3) {
+      continue;
+    }
+    if (std::abs(heading_change) < astar_segmented_pivot_threshold_) {
+      failure = AStarPathValidationFailure::CURVATURE;
+      rejected_index = segmented_path.poses.size() - 1u;
+      RCLCPP_WARN(
+        logger_,
+        "A* segmented corner is below pivot threshold but not straight: "
+        "sample=%zu pose=(%.3f, %.3f) heading_change=%.3f",
+        rejected_index, to.x, to.y, heading_change);
+      return false;
+    }
+    if (!validateAStarPivotSweep(
+        to.x, to.y, segment_yaws[segment], next_yaw,
+        rejected_index, failure))
+    {
+      rejected_index += segmented_path.poses.size();
+      RCLCPP_WARN(
+        logger_,
+        "A* segmented internal pivot rejected: reason=%s sample=%zu "
+        "pose=(%.3f, %.3f) yaw=%.3f->%.3f",
+        aStarValidationFailureName(failure), rejected_index,
+        to.x, to.y, segment_yaws[segment], next_yaw);
+      return false;
+    }
+    append_pose(to, next_yaw);
+    ++pivot_count;
+  }
+
+  if (use_final_approach_orientation_) {
+    const double final_yaw = tf2::getYaw(goal.pose.orientation);
+    const double heading_change = normalizeAngle(
+      final_yaw - segment_yaws.back());
+    if (std::abs(heading_change) >= astar_segmented_pivot_threshold_) {
+      const auto & final_position = segmented_path.poses.back().pose.position;
+      if (!validateAStarPivotSweep(
+          final_position.x, final_position.y, segment_yaws.back(), final_yaw,
+          rejected_index, failure))
+      {
+        rejected_index += segmented_path.poses.size();
+        return false;
+      }
+      append_pose(final_position, final_yaw);
+      ++pivot_count;
+    } else {
+      segmented_path.poses.back().pose.orientation = goal.pose.orientation;
+    }
+  }
+
+  return validateAStarSmoothedPath(
+    segmented_path, max_curvature, rejected_index, failure);
+}
+
+bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
+  const Cell & start_cell, double start_yaw, const Cell & goal_cell,
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path & departure_path,
+  double & departure_distance,
+  std::size_t & pivot_count,
+  double & max_curvature,
+  std::size_t & rejected_index,
+  AStarPathValidationFailure & failure) const
+{
+  departure_path = nav_msgs::msg::Path();
+  departure_distance = 0.0;
+  pivot_count = 0u;
+  max_curvature = 0.0;
+  rejected_index = 0u;
+  failure = AStarPathValidationFailure::EMPTY_PATH;
+  if (!costmap_ || astar_departure_max_distance_ <= 0.0) {
+    return false;
+  }
+
+  Cell previous_candidate = start_cell;
+  bool have_previous_candidate = true;
+  for (double requested_distance = astar_departure_min_distance_;
+    requested_distance <= astar_departure_max_distance_ + 1e-9;
+    requested_distance += astar_departure_step_distance_)
+  {
+    const double requested_x = start.pose.position.x +
+      requested_distance * std::cos(start_yaw);
+    const double requested_y = start.pose.position.y +
+      requested_distance * std::sin(start_yaw);
+    Cell candidate_cell{};
+    if (!costmap_->worldToMap(
+        requested_x, requested_y, candidate_cell.x, candidate_cell.y))
+    {
+      break;
+    }
+    if (have_previous_candidate &&
+      candidate_cell.x == previous_candidate.x &&
+      candidate_cell.y == previous_candidate.y)
+    {
+      continue;
+    }
+    previous_candidate = candidate_cell;
+    have_previous_candidate = true;
+    if (!isAStarShortcutTraversable(start_cell, candidate_cell)) {
+      continue;
+    }
+
+    double candidate_x = 0.0;
+    double candidate_y = 0.0;
+    costmap_->mapToWorld(
+      candidate_cell.x, candidate_cell.y, candidate_x, candidate_y);
+    const double actual_distance = std::hypot(
+      candidate_x - start.pose.position.x,
+      candidate_y - start.pose.position.y);
+    if (actual_distance <= 1e-6) {
+      continue;
+    }
+    const double departure_yaw = std::atan2(
+      candidate_y - start.pose.position.y,
+      candidate_x - start.pose.position.x);
+    if (std::abs(normalizeAngle(departure_yaw - start_yaw)) > 0.10) {
+      continue;
+    }
+
+    const auto candidate_cells = searchAStar(candidate_cell, goal_cell);
+    if (candidate_cells.empty()) {
+      continue;
+    }
+    const auto candidate_anchors = simplifyAStarPath(candidate_cells);
+    auto candidate_start = start;
+    candidate_start.pose.position.x = candidate_x;
+    candidate_start.pose.position.y = candidate_y;
+    candidate_start.pose.orientation =
+      nav2_util::geometry_utils::orientationAroundZAxis(departure_yaw);
+    const auto candidate_astar_path = buildPath(
+      candidate_anchors, candidate_start, goal);
+
+    nav_msgs::msg::Path candidate_segmented_path;
+    std::size_t candidate_pivot_count = 0u;
+    double candidate_max_curvature = 0.0;
+    std::size_t candidate_rejected_index = 0u;
+    AStarPathValidationFailure candidate_failure =
+      AStarPathValidationFailure::NONE;
+    if (!buildAStarSegmentedFallbackPath(
+        candidate_astar_path, candidate_start, goal,
+        candidate_segmented_path, candidate_pivot_count,
+        candidate_max_curvature, candidate_rejected_index,
+        candidate_failure))
+    {
+      failure = candidate_failure;
+      rejected_index = candidate_rejected_index;
+      continue;
+    }
+
+    departure_path.header = candidate_segmented_path.header;
+    const auto append_pose = [this, &departure_path](
+        const geometry_msgs::msg::PoseStamped & pose) {
+        if (!departure_path.poses.empty()) {
+          const auto & previous = departure_path.poses.back().pose;
+          if (std::hypot(
+              pose.pose.position.x - previous.position.x,
+              pose.pose.position.y - previous.position.y) <= 1e-6 &&
+            std::abs(normalizeAngle(
+              tf2::getYaw(pose.pose.orientation) -
+              tf2::getYaw(previous.orientation))) <= 1e-6)
+          {
+            return;
+          }
+        }
+        departure_path.poses.push_back(pose);
+      };
+
+    const auto departure_samples = std::max(
+      1u, static_cast<unsigned int>(std::ceil(
+        actual_distance / astar_bspline_sample_spacing_)));
+    for (unsigned int sample = 0u; sample <= departure_samples; ++sample) {
+      const double ratio =
+        static_cast<double>(sample) / static_cast<double>(departure_samples);
+      geometry_msgs::msg::PoseStamped pose = start;
+      pose.header = departure_path.header;
+      pose.pose.position.x = start.pose.position.x +
+        ratio * (candidate_x - start.pose.position.x);
+      pose.pose.position.y = start.pose.position.y +
+        ratio * (candidate_y - start.pose.position.y);
+      pose.pose.orientation =
+        nav2_util::geometry_utils::orientationAroundZAxis(departure_yaw);
+      append_pose(pose);
+    }
+    for (const auto & pose : candidate_segmented_path.poses) {
+      append_pose(pose);
+    }
+
+    if (!validateAStarSmoothedPath(
+        departure_path, max_curvature, rejected_index, failure))
+    {
+      departure_path = nav_msgs::msg::Path();
+      continue;
+    }
+
+    departure_distance = actual_distance;
+    pivot_count = candidate_pivot_count;
+    RCLCPP_INFO(
+      logger_,
+      "A* departure candidate accepted: distance=%.3f m "
+      "pivot_pose=(%.3f, %.3f) samples=%zu pivots=%zu",
+      departure_distance, candidate_x, candidate_y,
+      departure_path.poses.size(), pivot_count);
+    return true;
+  }
+  return false;
+}
+
+bool OruGlobalPlanner::validateAStarPivotSweep(
+  double wx, double wy, double start_yaw, double target_yaw,
+  std::size_t & rejected_index,
+  AStarPathValidationFailure & failure) const
+{
+  rejected_index = 0u;
+  failure = AStarPathValidationFailure::NONE;
+  const double heading_change = normalizeAngle(target_yaw - start_yaw);
+  const auto sweep_samples = std::max(
+    1u, static_cast<unsigned int>(std::ceil(
+      std::abs(heading_change) / astar_pivot_collision_sample_angle_)));
+  for (unsigned int sample = 0u; sample <= sweep_samples; ++sample) {
+    const double ratio =
+      static_cast<double>(sample) / static_cast<double>(sweep_samples);
+    const double yaw = normalizeAngle(start_yaw + ratio * heading_change);
+    if (!isAStarSmoothedPoseTraversable(wx, wy, yaw, failure)) {
+      rejected_index = sample;
+      return false;
+    }
+  }
+  return true;
 }
 
 const char * OruGlobalPlanner::aStarValidationFailureName(

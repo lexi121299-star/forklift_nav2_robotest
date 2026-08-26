@@ -456,6 +456,18 @@ planner_server:
       astar_start_pivot_enabled: true
       astar_start_pivot_threshold: 0.7853981634
       astar_pivot_collision_sample_angle: 0.0872664626
+      # A valid grid route must not be discarded only because one global
+      # B-spline leaves its free-space corridor. Fall back to validated straight
+      # motion blocks joined by explicit, swept-footprint-checked pivots.
+      astar_segmented_fallback_enabled: true
+      astar_segmented_pivot_threshold: 0.20
+      # If the current footprint cannot rotate safely, first drive straight in
+      # the measured vehicle heading and retry A* from an open pivot staging
+      # pose. This supports multi-turn routes around a nearby rack or pillar.
+      astar_departure_fallback_enabled: true
+      astar_departure_min_distance: 0.50
+      astar_departure_max_distance: 2.50
+      astar_departure_step_distance: 0.25
       # Keep the final path heading aligned with the approach segment. RViz goal
       # yaw is intentionally ignored so reaching the point cannot trigger a
       # large terminal steering/pivot maneuver.
