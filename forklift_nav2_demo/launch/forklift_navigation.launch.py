@@ -265,7 +265,7 @@ def generate_launch_description():
             description=(
                 'Start the independent /forklift/control_cmd_raw to '
                 '/forklift/control_cmd gate.')),
-        DeclareLaunchArgument('bridge_wheel_base', default_value='1.2'),
+        DeclareLaunchArgument('bridge_wheel_base', default_value='1.4'),
         DeclareLaunchArgument('bridge_max_velocity_mps', default_value='0.45'),
         DeclareLaunchArgument(
             'bridge_max_steering_angle_rad',
@@ -278,7 +278,7 @@ def generate_launch_description():
         DeclareLaunchArgument('bridge_pivot_steering_tolerance_rad', default_value='0.03'),
         DeclareLaunchArgument('bridge_pivot_turn_radius', default_value='0.6'),
         DeclareLaunchArgument('bridge_pivot_angular_velocity_radps', default_value='0.5'),
-        DeclareLaunchArgument('safety_rear_axle_x_offset', default_value='-0.34'),
+        DeclareLaunchArgument('safety_rear_axle_x_offset', default_value='0.0'),
         DeclareLaunchArgument('bridge_command_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('bridge_control_rate_hz', default_value='20.0'),
         DeclareLaunchArgument(

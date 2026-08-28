@@ -20,7 +20,7 @@ class SimCommandBridge(Node):
     def __init__(self) -> None:
         super().__init__('sim_command_bridge')
 
-        self.declare_parameter('wheel_base', 1.2)
+        self.declare_parameter('wheel_base', 1.4)
         self.declare_parameter('max_velocity_mps', 0.4)
         self.declare_parameter('max_steering_angle_rad', 0.55)
         self.declare_parameter('max_angular_velocity_radps', 0.8)
@@ -36,7 +36,7 @@ class SimCommandBridge(Node):
         self.declare_parameter('twist_fallback_timeout_sec', 0.5)
         self.declare_parameter('publish_tf', False)
 
-        self._wheel_base = self._positive_param('wheel_base', 1.2)
+        self._wheel_base = self._positive_param('wheel_base', 1.4)
         self._max_velocity_mps = self._positive_param('max_velocity_mps', 0.4)
         self._max_steering_angle_rad = self._positive_param('max_steering_angle_rad', 0.55)
         self._max_angular_velocity_radps = self._positive_param(

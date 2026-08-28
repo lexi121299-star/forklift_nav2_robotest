@@ -72,7 +72,7 @@ def generate_launch_description():
         DeclareLaunchArgument('collision_check_enabled', default_value='true'),
         DeclareLaunchArgument(
             'footprint',
-            default_value='[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'),
+            default_value='[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'),
         DeclareLaunchArgument('footprint_sample_spacing', default_value='0.05'),
         DeclareLaunchArgument('footprint_collision_cost_threshold', default_value='253'),
         DeclareLaunchArgument('unknown_is_collision', default_value='true'),
@@ -102,7 +102,7 @@ def generate_launch_description():
         DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
         DeclareLaunchArgument('wheel_base', default_value='1.4'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
-        DeclareLaunchArgument('rear_axle_x_offset', default_value='-0.34'),
+        DeclareLaunchArgument('rear_axle_x_offset', default_value='0.0'),
         DeclareLaunchArgument(
             'pivot_steering_angle_rad',
             default_value='1.5707963267948966'),

@@ -85,6 +85,10 @@ public:
     planner.astar_departure_max_distance_ = 2.50;
     planner.astar_departure_step_distance_ = 0.25;
     planner.cost_travel_multiplier_ = 2.0;
+    planner.footprint_cost_travel_multiplier_ = 2.0;
+    planner.astar_preferred_footprint_cost_threshold_ =
+      nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
+    planner.astar_start_clearance_relax_distance_ = 1.25;
     planner.lattice_turn_cost_multiplier_ = 0.25;
     planner.lattice_obstacle_cost_multiplier_ = 1.0;
     planner.lattice_goal_heading_cost_multiplier_ = 0.25;
@@ -131,6 +135,43 @@ public:
     return planner.isAStarShortcutTraversable(
       {start.x, start.y},
       {goal.x, goal.y});
+  }
+
+  static bool aStarRouteShortcutTraversable(
+    OruGlobalPlanner & planner,
+    const CellPoint & start,
+    const CellPoint & goal,
+    const CellPoint & route_start)
+  {
+    const OruGlobalPlanner::Cell route_start_cell{
+      route_start.x, route_start.y};
+    return planner.isAStarShortcutTraversable(
+      {start.x, start.y}, {goal.x, goal.y}, &route_start_cell);
+  }
+
+  static double aStarTraversalCost(
+    OruGlobalPlanner & planner,
+    const CellPoint & cell,
+    int dx,
+    int dy)
+  {
+    planner.astar_footprint_cost_cache_.clear();
+    return planner.traversalCost(cell.x, cell.y, dx, dy);
+  }
+
+  static void configureAStarFootprintClearance(
+    OruGlobalPlanner & planner,
+    int hard_cost_threshold,
+    int preferred_cost_threshold,
+    double start_relax_distance,
+    double footprint_cost_multiplier)
+  {
+    planner.lethal_cost_threshold_ = hard_cost_threshold;
+    planner.astar_shortcut_cost_threshold_ = hard_cost_threshold;
+    planner.astar_preferred_footprint_cost_threshold_ =
+      preferred_cost_threshold;
+    planner.astar_start_clearance_relax_distance_ = start_relax_distance;
+    planner.footprint_cost_travel_multiplier_ = footprint_cost_multiplier;
   }
 
   static std::vector<CellPoint> searchAStar(
@@ -260,6 +301,52 @@ public:
       astar_path, start, goal, segmented_path, pivot_count,
       max_curvature, rejected_index, failure);
     return segmented_path;
+  }
+
+  static void setSegmentedPivotThreshold(
+    OruGlobalPlanner & planner, double threshold)
+  {
+    planner.astar_segmented_pivot_threshold_ = threshold;
+  }
+
+  static std::vector<CellPoint> trimAStarGoalDogleg(
+    OruGlobalPlanner & planner,
+    const std::vector<CellPoint> & points,
+    double goal_x, double goal_y, double tolerance)
+  {
+    planner.astar_goal_endpoint_tolerance_ = tolerance;
+    std::vector<OruGlobalPlanner::Cell> cells;
+    cells.reserve(points.size());
+    for (const auto & point : points) {
+      cells.push_back({point.x, point.y});
+    }
+    geometry_msgs::msg::PoseStamped goal;
+    goal.pose.position.x = goal_x;
+    goal.pose.position.y = goal_y;
+    const auto trimmed = planner.trimAStarGoalDogleg(cells, goal);
+    std::vector<CellPoint> result;
+    result.reserve(trimmed.size());
+    for (const auto & cell : trimmed) {
+      result.push_back({cell.x, cell.y});
+    }
+    return result;
+  }
+
+  static bool departurePathInitiallyBacktracks(
+    OruGlobalPlanner & planner,
+    const std::vector<std::array<double, 2>> & points,
+    double departure_x, double departure_y, double departure_yaw)
+  {
+    nav_msgs::msg::Path path;
+    for (const auto & point : points) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.pose.position.x = point[0];
+      pose.pose.position.y = point[1];
+      pose.pose.orientation.w = 1.0;
+      path.poses.push_back(pose);
+    }
+    return planner.departurePathInitiallyBacktracks(
+      path, departure_x, departure_y, departure_yaw);
   }
 
   static void enableSquareFootprintCollisionCheck(
@@ -637,6 +724,74 @@ TEST(OruGlobalPlanner, AStarSearchUsesSameSafetyCostAsFinalValidation) {
   EXPECT_GT(path.size(), 10u);
 }
 
+TEST(OruGlobalPlanner, AStarTraversalPenalizesCostUnderCompleteFootprint) {
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(
+    planner, 0.10);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 253, 1.25, 6.0);
+
+  const OruGlobalPlannerTestAccess::CellPoint route_cell{20, 20};
+  const double clear_cost =
+    OruGlobalPlannerTestAccess::aStarTraversalCost(
+    planner, route_cell, 1, 0);
+
+  costmap.setCost(20, 18, 200);
+  const double footprint_cost =
+    OruGlobalPlannerTestAccess::aStarTraversalCost(
+    planner, route_cell, 1, 0);
+
+  EXPECT_GT(footprint_cost, clear_cost);
+  EXPECT_EQ(costmap.getCost(route_cell.x, route_cell.y), 0u);
+}
+
+TEST(OruGlobalPlanner, AStarTraversalPenalizesObstacleInsideFootprint) {
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(
+    planner, 0.50);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 253, 1.25, 6.0);
+
+  const OruGlobalPlannerTestAccess::CellPoint route_cell{20, 20};
+  const double clear_cost =
+    OruGlobalPlannerTestAccess::aStarTraversalCost(
+    planner, route_cell, 1, 0);
+
+  // This cell is neither under base_link nor on the footprint outline.
+  costmap.setCost(24, 24, 200);
+  const double interior_cost =
+    OruGlobalPlannerTestAccess::aStarTraversalCost(
+    planner, route_cell, 1, 0);
+
+  EXPECT_GT(interior_cost, clear_cost);
+  EXPECT_EQ(costmap.getCost(route_cell.x, route_cell.y), 0u);
+}
+
+TEST(OruGlobalPlanner, AStarShortcutKeepsClearanceAfterLeavingStart) {
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(
+    planner, 0.05);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 253, 1.25, 6.0);
+
+  costmap.setCost(50, 20, nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE);
+  EXPECT_FALSE(
+    OruGlobalPlannerTestAccess::aStarRouteShortcutTraversable(
+      planner, {10, 20}, {70, 20}, {10, 20}));
+
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 253, 3.0, 6.0);
+  EXPECT_TRUE(
+    OruGlobalPlannerTestAccess::aStarRouteShortcutTraversable(
+      planner, {10, 20}, {70, 20}, {10, 20}));
+}
+
 TEST(OruGlobalPlanner, AStarBSplineStartsAlongVehicleHeadingAndIsTrackable) {
   nav2_costmap_2d::Costmap2D costmap(200, 200, 0.05, 0.0, 0.0);
   OruGlobalPlanner planner;
@@ -731,6 +886,82 @@ TEST(OruGlobalPlanner, AStarSegmentedFallbackKeepsRouteWithExplicitPivot) {
   EXPECT_TRUE(found_pivot);
 }
 
+TEST(OruGlobalPlanner, AStarSegmentedFallbackAcceptsNineDegreeCorner) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::setSegmentedPivotThreshold(planner, 0.15);
+
+  bool valid = false;
+  std::size_t pivot_count = 0u;
+  const auto path =
+    OruGlobalPlannerTestAccess::buildAStarSegmentedFallbackPath(
+    planner, {{1.0, 1.0}, {4.0, 1.0}, {6.96, 1.48}},
+    0.0, valid, pivot_count);
+
+  EXPECT_TRUE(valid);
+  EXPECT_EQ(pivot_count, 1u);
+  EXPECT_FALSE(path.poses.empty());
+}
+
+TEST(OruGlobalPlanner, AStarTrimsSharpTerminalDoglegInsideGoalTolerance) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::setSegmentedPivotThreshold(planner, 0.15);
+
+  const auto trimmed = OruGlobalPlannerTestAccess::trimAStarGoalDogleg(
+    planner, {{10u, 10u}, {20u, 10u}, {20u, 14u}},
+    1.025, 0.725, 0.28);
+
+  ASSERT_EQ(trimmed.size(), 2u);
+  EXPECT_EQ(trimmed.back().x, 20u);
+  EXPECT_EQ(trimmed.back().y, 10u);
+}
+
+TEST(OruGlobalPlanner, AStarKeepsStraightTerminalApproachInsideTolerance) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  const auto trimmed = OruGlobalPlannerTestAccess::trimAStarGoalDogleg(
+    planner, {{10u, 10u}, {20u, 10u}, {24u, 10u}},
+    1.225, 0.525, 0.28);
+
+  EXPECT_EQ(trimmed.size(), 3u);
+}
+
+TEST(OruGlobalPlanner, AStarValidationRejectsObstacleInsideFootprint) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(
+    planner, 0.50);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 253, 1.25, 6.0);
+
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  for (double x : {2.0, 2.1}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path.header;
+    pose.pose.position.x = x;
+    pose.pose.position.y = 2.0;
+    pose.pose.orientation.w = 1.0;
+    path.poses.push_back(pose);
+  }
+  unsigned int obstacle_x = 0u;
+  unsigned int obstacle_y = 0u;
+  ASSERT_TRUE(costmap.worldToMap(2.20, 2.20, obstacle_x, obstacle_y));
+  costmap.setCost(
+    obstacle_x, obstacle_y, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  const auto validation =
+    OruGlobalPlannerTestAccess::validateAStarPath(planner, path);
+  EXPECT_FALSE(validation.valid);
+  EXPECT_EQ(validation.failure, "footprint");
+}
+
 TEST(OruGlobalPlanner, AStarSegmentedFallbackChecksCompletePivotSweep) {
   nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
   OruGlobalPlanner planner;
@@ -753,6 +984,26 @@ TEST(OruGlobalPlanner, AStarSegmentedFallbackChecksCompletePivotSweep) {
 
   EXPECT_FALSE(valid);
   EXPECT_TRUE(path.poses.empty() || pivot_count == 0u);
+}
+
+TEST(OruGlobalPlanner, AStarDepartureRejectsImmediateBacktrack) {
+  OruGlobalPlanner planner;
+
+  EXPECT_TRUE(
+    OruGlobalPlannerTestAccess::departurePathInitiallyBacktracks(
+      planner,
+      {{1.0, 0.0}, {1.0, 0.0}, {0.95, 0.0}, {0.80, 0.0}},
+      1.0, 0.0, 0.0));
+}
+
+TEST(OruGlobalPlanner, AStarDepartureAllowsForwardRoute) {
+  OruGlobalPlanner planner;
+
+  EXPECT_FALSE(
+    OruGlobalPlannerTestAccess::departurePathInitiallyBacktracks(
+      planner,
+      {{1.0, 0.0}, {1.0, 0.0}, {1.05, -0.10}, {1.20, -0.20}},
+      1.0, 0.0, 0.0));
 }
 
 TEST(OruGlobalPlanner, AStarBSplineRejectsObstacleIntroducedAfterSmoothing) {

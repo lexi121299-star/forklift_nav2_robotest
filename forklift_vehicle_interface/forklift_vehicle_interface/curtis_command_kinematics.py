@@ -1,7 +1,7 @@
 """Convert a (velocity, steering) ROS command into the Curtis 0x203 行驶速度.
 
 The MK320 dual-drive forklift drives from two differential wheels on a common
-axle (URDF: wheels at base_link x=-0.34, the MPC ``rear_axle_x_offset`` point).
+axle. The production frame convention places that axle at ``base_link`` x=0.
 Per the AGV protocol「注意事项 5」the ``行驶速度`` field (0x203 BYTE1-2,
 0..4000 rpm) carries the **outer** drive wheel speed during a turn; the Curtis
 controller derives the inner wheel itself.
@@ -75,7 +75,7 @@ def drive_rpm_from_command(
         omega = speed / _positive(float(pivot_turn_radius_m), 0.6)
     else:
         v_x = speed
-        omega = speed * math.tan(steering) / _positive(float(wheel_base_m), 1.2)
+        omega = speed * math.tan(steering) / _positive(float(wheel_base_m), 1.4)
 
     # Outer wheel speed: max(|v_x - w*t/2|, |v_x + w*t/2|) == |v_x| + |w|*t/2.
     v_outer = abs(v_x) + abs(omega) * 0.5 * track_width_m

@@ -8,7 +8,7 @@ namespace forklift_nav2_plugins
 
 struct ForkliftVehicleParameters
 {
-  double wheel_base{1.2};
+  double wheel_base{1.4};
   double max_steering_angle{0.55};
   double max_steering_angle_velocity{0.7};
   double max_velocity{0.45};

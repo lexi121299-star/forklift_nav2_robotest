@@ -152,7 +152,7 @@ private:
   MpcTrajectory global_trajectory_;
   MpcPreviewWindow last_preview_window_;
 
-  double wheel_base_{1.2};
+  double wheel_base_{1.4};
   double max_velocity_{0.45};
   double min_velocity_{0.0};
   double max_reverse_velocity_{0.0};
@@ -169,6 +169,7 @@ private:
   double pivot_velocity_{0.12};
   double pivot_yaw_tolerance_{0.05};
   double pivot_stop_velocity_threshold_{0.02};
+  double pivot_activation_distance_{0.20};
   bool pivot_step_enabled_{true};
   double pivot_step_angle_{0.3490658503988659};
   double pivot_step_hold_duration_sec_{0.15};

@@ -37,6 +37,9 @@ bool isMpcPreviewConsumed(
   const MpcPreviewWindow & window,
   std::size_t trajectory_size);
 
+MpcPreviewWindow truncateMpcPreviewBeforeFirstPivot(
+  const MpcPreviewWindow & window);
+
 }  // namespace forklift_nav2_plugins
 
 #endif  // FORKLIFT_NAV2_PLUGINS__FORKLIFT_MPC_PREVIEW_WINDOW_HPP_

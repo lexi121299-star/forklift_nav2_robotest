@@ -178,7 +178,7 @@ def generate_launch_description():
             'sensor_x': 0.0,
             'sensor_y': 0.0,
             'sensor_yaw': 0.0,
-            'footprint': '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]',
+            'footprint': '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]',
         }],
     )
 
@@ -200,7 +200,7 @@ def generate_launch_description():
             'use_sim_command_bridge',
             default_value='false',
             description='Start the simulation bridge from /forklift/control_cmd to /cmd_vel.'),
-        DeclareLaunchArgument('bridge_wheel_base', default_value='1.2'),
+        DeclareLaunchArgument('bridge_wheel_base', default_value='1.4'),
         DeclareLaunchArgument('bridge_max_velocity_mps', default_value='0.45'),
         DeclareLaunchArgument(
             'bridge_max_steering_angle_rad',

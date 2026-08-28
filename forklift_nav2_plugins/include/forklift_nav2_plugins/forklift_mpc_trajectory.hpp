@@ -89,6 +89,12 @@ std::size_t nearestTrajectoryIndex(
   const MpcState & state,
   std::size_t start_index = 0);
 
+std::size_t nearestTrajectoryIndexInRange(
+  const MpcTrajectory & trajectory,
+  const MpcState & state,
+  std::size_t start_index,
+  std::size_t end_index);
+
 }  // namespace forklift_nav2_plugins
 
 #endif  // FORKLIFT_NAV2_PLUGINS__FORKLIFT_MPC_TRAJECTORY_HPP_

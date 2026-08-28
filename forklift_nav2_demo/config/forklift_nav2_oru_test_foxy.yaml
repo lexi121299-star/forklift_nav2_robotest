@@ -117,7 +117,7 @@ controller_server:
     # Forklift MPC controller parameters
     FollowPath:
       plugin: "forklift_nav2_plugins/ForkliftMpcController"
-      wheel_base: 1.2
+      wheel_base: 1.4
       max_velocity: 0.45
       min_velocity: 0.06
       max_reverse_velocity: 0.15
@@ -129,7 +129,7 @@ controller_server:
       pivot_steering_angle: 1.5707963267948966
       pivot_steering_tolerance: 0.03
       pivot_turn_radius: 0.6
-      rear_axle_x_offset: -0.34
+      rear_axle_x_offset: 0.0
       pivot_velocity: 0.12
       pivot_yaw_tolerance: 0.05
       pivot_stop_velocity_threshold: 0.02
@@ -216,7 +216,7 @@ local_costmap:
       width: 6
       height: 6
       resolution: 0.05
-      footprint: "[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]"
+      footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -270,7 +270,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: True
-      footprint: "[[0.50, 0.35], [0.50, -0.35], [-0.70, -0.35], [-0.70, 0.35]]"
+      footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
       resolution: 0.05
       track_unknown_space: true
       # obstacle_layer added so the global planner avoids real obstacles that are
@@ -387,7 +387,7 @@ planner_server:
       lattice_pivot_enabled: true
       lattice_pivot_angle: 0.3926990817
       lattice_pivot_turn_cost: 2.0
-      lattice_rear_axle_x_offset: -0.34
+      lattice_rear_axle_x_offset: 0.0
       # Near the goal with a large remaining heading error, fix heading by pivot only
       # and suppress reverse so terminal nudges do not destabilise the controller.
       lattice_pivot_terminal_radius: 0.6

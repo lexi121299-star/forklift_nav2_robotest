@@ -115,7 +115,10 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
+      # Match the controller terminal tolerance. The 2026-08-27 run consumed
+      # its path at 0.281 m, then replanned a needless 96 degree pivot for the
+      # final few centimetres.
+      xy_goal_tolerance: 0.30
       # Production pickup/navigation goals are position goals. Do not turn the
       # steering through large angles after the vehicle reaches the target point.
       yaw_goal_tolerance: 3.141592653589793
@@ -123,16 +126,18 @@ controller_server:
     # Forklift MPC controller parameters
     FollowPath:
       plugin: "forklift_nav2_plugins/ForkliftMpcController"
-      wheel_base: 1.2
+      # 2MKC20M30LV205 drawing: drive axle to support/steering axle is 1.400 m.
+      wheel_base: 1.4
       # The latest straight-line run tracked 0.45 m/s cleanly. Raise the
       # cruise limit slightly while keeping the existing curve/obstacle limits.
       max_velocity: 0.47
       min_velocity: 0.06
       max_reverse_velocity: 0.15
       max_steering_angle: 1.5707963267948966
-      # Limit steering command steps to about 0.06 rad at the 0.2 s MPC step.
-      # This matches the conservative value loaded in the 2026-08-24 test.
-      max_steering_angle_velocity: 0.3
+      # computeVelocityCommands runs at 10 Hz while the prediction step is
+      # 0.2 s. A 0.15 rad/s model limit bounds successive real commands to
+      # roughly 0.03 rad and reduces delayed left/right over-correction.
+      max_steering_angle_velocity: 0.15
       max_acceleration: 0.5
       max_angular_velocity: 0.8
       allow_pivot_turn: true
@@ -147,6 +152,10 @@ controller_server:
       pivot_velocity: 0.12
       pivot_yaw_tolerance: 0.05
       pivot_stop_velocity_threshold: 0.02
+      # A pivot marker inside the preview window is still an upcoming maneuver.
+      # Drive the departure/approach segment first and latch the pivot only at
+      # its actual position.
+      pivot_activation_distance: 0.20
       # Execute large pivot turns as fixed 20 degree closed-loop segments. Stop
       # the drive briefly between segments so a fresh localization update can
       # be applied before committing to the next angle.
@@ -171,8 +180,8 @@ controller_server:
       new_goal_steering_hold_duration_sec: 0.2
       horizon_time: 1.8
       time_step: 0.2
-      lookahead_distance: 1.4
-      xy_goal_tolerance: 0.08
+      lookahead_distance: 1.8
+      xy_goal_tolerance: 0.30
       yaw_goal_tolerance: 3.141592653589793
       transform_tolerance: 0.2
       terminal_slowdown_distance: 0.6
@@ -187,7 +196,7 @@ controller_server:
       # goal as reached, leaving the action active and turning later goals into
       # preemption requests against a controller that is still latched.
       goal_latch_enabled: true
-      goal_latch_xy_tolerance: 0.08
+      goal_latch_xy_tolerance: 0.30
       goal_latch_yaw_tolerance: 3.141592653589793
       velocity_samples: 8
       steering_samples: 11
@@ -227,12 +236,14 @@ controller_server:
       safety_slowdown_distance: 1.25
       safety_min_speed: 0.05
       safety_sample_spacing: 0.10
-      # P8 projects the current footprint straight ahead before a steering
-      # candidate is selected. Treat only lethal cells as an immediate stop so
-      # an inscribed inflation cell (253) beside a safe curved path cannot cause
-      # a false stop. MPC trajectory collision checking remains at 253 below.
+      # The global planner penalizes inflation touched by the complete footprint
+      # and rejects lethal cost 254. At execution time, treat cost 253 as a
+      # clearance warning rather than a physical collision so a vehicle already
+      # touching that band can follow the validated escape route. Lethal cost
+      # 254, unknown space, and the full footprint prediction remain blocked by
+      # both the MPC controller and the independent gate.
       safety_collision_cost_threshold: 254
-      collision_cost_threshold: 253
+      collision_cost_threshold: 254
       # Task Manager activates this heartbeat only near the selected pallet.
       # While active, allow the MPC trajectory through cost 253 inflation;
       # lethal cost 254 remains blocked and the independent Safety Gate still
@@ -241,16 +252,16 @@ controller_server:
       pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
       pallet_exemption_timeout_sec: 0.5
       pallet_exemption_cost_threshold: 254
-      path_distance_weight: 8.0
+      path_distance_weight: 6.0
       local_goal_weight: 14.0
       global_goal_weight: 2.0
-      heading_weight: 2.0
+      heading_weight: 5.0
       obstacle_weight: 12.0
-      smoothness_weight: 1.0
+      smoothness_weight: 4.0
       # Penalize rapid absolute steering target changes. The controller also
       # uses measured steering feedback below, so this damps corrections based
       # on what the steering actuator has actually reached.
-      steering_change_weight: 20.0
+      steering_change_weight: 60.0
       velocity_reward_weight: 1.2
       publish_control_cmd: true
       control_cmd_topic: "/forklift/control_cmd_raw"
@@ -283,10 +294,9 @@ local_costmap:
       height: 8
       resolution: 0.05
       transform_tolerance: 0.5
-      # Footprint is measured in base_link. The real vehicle base_link is at the
-      # drive/rear axle center, so this is the old simulation footprint shifted
-      # by +0.34 m from the former body reference.
-      footprint: "[[1.183, 0.58], [1.183, -0.58], [-1.703, -0.58], [-1.703, 0.58]]"
+      # 2MKC20M30LV205 envelope in base_link: drive axle at x=0, forks toward
+      # -X. Axle-to-fork-tip=0.370+1.220=1.590 m; rear extent=1.709 m.
+      footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
       footprint_padding: 0.05
       plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
@@ -344,7 +354,7 @@ global_costmap:
       use_sim_time: false
       # Match the local costmap and safety gate footprint. Do not use the old
       # small global footprint, otherwise the planner may route too close to racks.
-      footprint: "[[1.183, 0.58], [1.183, -0.58], [-1.703, -0.58], [-1.703, 0.58]]"
+      footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
       footprint_padding: 0.05
       resolution: 0.05
       track_unknown_space: true
@@ -426,9 +436,17 @@ planner_server:
       use_diagonal: true
       prevent_corner_cutting: true
       use_footprint_collision_check: true
-      footprint_collision_cost_threshold: 253
-      lethal_cost_threshold: 253
+      # Full-footprint collision checks distinguish the inflation warning band
+      # (253) from a physical lethal obstacle (254). This lets a vehicle already
+      # inside the warning band pivot/leave when its swept body does not touch a
+      # lethal cell, matching the controller and independent Safety Gate.
+      footprint_collision_cost_threshold: 254
+      lethal_cost_threshold: 254
       cost_travel_multiplier: 2.0
+      # Penalize the highest inflation cost touched by the complete footprint,
+      # not only the base_link center cell. This moves A* away from racks while
+      # keeping cost 253 traversable when no wider route exists.
+      footprint_cost_travel_multiplier: 10.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
       goal_tolerance: 1.5
@@ -437,9 +455,13 @@ planner_server:
       # traversable for the configured forklift footprint.
       astar_path_smoothing_enabled: true
       astar_shortcut_max_lookahead: 400
-      # A shortcut may cross only low-cost free space. This protects the 0.10 m
-      # padded footprint from being pulled through an inflated rack/pillar zone.
-      astar_shortcut_cost_threshold: 128
+      # The complete padded footprint is checked at every sample, so cost 253
+      # may be used as clearance while lethal cost 254 remains forbidden.
+      astar_shortcut_cost_threshold: 254
+      # Once the vehicle has left a constrained start, do not let line-of-sight
+      # simplification pull the route back through the inscribed inflation band.
+      astar_preferred_footprint_cost_threshold: 253
+      astar_start_clearance_relax_distance: 1.25
       # Convert the sparse A* anchors into a continuous-curvature path. The
       # first tangent follows the measured vehicle yaw, so an A* corner cannot
       # be mistaken for a +/-90 degree pivot command by the controller.
@@ -460,13 +482,21 @@ planner_server:
       # B-spline leaves its free-space corridor. Fall back to validated straight
       # motion blocks joined by explicit, swept-footprint-checked pivots.
       astar_segmented_fallback_enabled: true
-      astar_segmented_pivot_threshold: 0.20
+      # Prefer validated straight motion blocks joined by explicit pivots on
+      # the real vehicle. This avoids spending seconds on global B-spline and
+      # departure retries for routes that are naturally segmented.
+      astar_prefer_segmented_path: true
+      astar_segmented_pivot_threshold: 0.15
+      # Remove only a sharp terminal dogleg after the path is already inside
+      # the 0.30 m controller goal tolerance. Straight final approaches still
+      # run to the selected goal, while tiny endpoint pivots are avoided.
+      astar_goal_endpoint_tolerance: 0.28
       # If the current footprint cannot rotate safely, first drive straight in
       # the measured vehicle heading and retry A* from an open pivot staging
       # pose. This supports multi-turn routes around a nearby rack or pillar.
       astar_departure_fallback_enabled: true
       astar_departure_min_distance: 0.50
-      astar_departure_max_distance: 2.50
+      astar_departure_max_distance: 5.00
       astar_departure_step_distance: 0.25
       # Keep the final path heading aligned with the approach segment. RViz goal
       # yaw is intentionally ignored so reaching the point cannot trigger a

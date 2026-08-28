@@ -4,6 +4,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "forklift_oru_planner/oru_lattice_core.hpp"
@@ -101,7 +102,8 @@ private:
     OUT_OF_BOUNDS,
     CELL_COST,
     FOOTPRINT,
-    CURVATURE
+    CURVATURE,
+    BACKTRACK
   };
 
   struct LatticeSearchStats
@@ -128,12 +130,17 @@ private:
   std::vector<Cell> simplifyAStarPath(
     const std::vector<Cell> & cells,
     unsigned int max_lookahead) const;
+  std::vector<Cell> trimAStarGoalDogleg(
+    const std::vector<Cell> & cells,
+    const geometry_msgs::msg::PoseStamped & goal) const;
   bool isAStarSearchPoseTraversable(
     const Cell & cell, double yaw) const;
   bool resolveAStarCell(
     const Cell & requested, double yaw, double tolerance,
     Cell & resolved) const;
-  bool isAStarShortcutTraversable(const Cell & start, const Cell & goal) const;
+  bool isAStarShortcutTraversable(
+    const Cell & start, const Cell & goal,
+    const Cell * route_start = nullptr) const;
   nav_msgs::msg::Path smoothAStarPathWithBSpline(
     const nav_msgs::msg::Path & path,
     const geometry_msgs::msg::PoseStamped & start,
@@ -146,6 +153,10 @@ private:
   bool isAStarSmoothedPoseTraversable(
     double wx, double wy, double yaw,
     AStarPathValidationFailure & failure) const;
+  double sampledFootprintCostAtPose(double wx, double wy, double yaw) const;
+  double fullFootprintCostAtPose(double wx, double wy, double yaw) const;
+  double cachedAStarFootprintCost(
+    unsigned int x, unsigned int y, double yaw) const;
   bool buildAStarStartPivotPath(
     const nav_msgs::msg::Path & astar_path,
     const geometry_msgs::msg::PoseStamped & start,
@@ -174,6 +185,9 @@ private:
     double & max_curvature,
     std::size_t & rejected_index,
     AStarPathValidationFailure & failure) const;
+  bool departurePathInitiallyBacktracks(
+    const nav_msgs::msg::Path & path, double departure_x,
+    double departure_y, double departure_yaw) const;
   bool validateAStarPivotSweep(
     double wx, double wy, double start_yaw, double target_yaw,
     std::size_t & rejected_index,
@@ -281,6 +295,7 @@ private:
   int footprint_collision_cost_threshold_{
     nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE};
   double cost_travel_multiplier_{2.0};
+  double footprint_cost_travel_multiplier_{2.0};
   double unknown_cost_penalty_{5.0};
   double start_tolerance_{1.0};
   double goal_tolerance_{0.5};
@@ -288,6 +303,9 @@ private:
   bool astar_path_smoothing_enabled_{true};
   unsigned int astar_shortcut_max_lookahead_{400};
   int astar_shortcut_cost_threshold_{128};
+  int astar_preferred_footprint_cost_threshold_{
+    nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE};
+  double astar_start_clearance_relax_distance_{1.25};
   bool astar_bspline_smoothing_enabled_{true};
   double astar_bspline_sample_spacing_{0.05};
   double astar_bspline_min_turning_radius_{0.60};
@@ -297,11 +315,15 @@ private:
   double astar_start_pivot_threshold_{0.7853981634};
   double astar_pivot_collision_sample_angle_{0.0872664626};
   bool astar_segmented_fallback_enabled_{true};
+  bool astar_prefer_segmented_path_{false};
   double astar_segmented_pivot_threshold_{0.20};
+  double astar_goal_endpoint_tolerance_{0.0};
   bool astar_departure_fallback_enabled_{true};
   double astar_departure_min_distance_{0.50};
   double astar_departure_max_distance_{2.50};
   double astar_departure_step_distance_{0.25};
+  mutable std::unordered_map<unsigned long long, double>
+  astar_footprint_cost_cache_;
 
   bool use_lattice_planner_{false};
   bool lattice_fallback_to_astar_{false};
@@ -323,7 +345,7 @@ private:
   bool lattice_pivot_enabled_{false};
   double lattice_pivot_angle_{0.0};
   double lattice_pivot_turn_cost_{0.35};
-  double lattice_rear_axle_x_offset_{-0.34};
+  double lattice_rear_axle_x_offset_{0.0};
   // Terminal pivot regime: near the goal but with a large remaining heading
   // error, correct heading by pivot only and suppress reverse so it does not
   // pollute the terminal nudge (which destabilised the controller and drove it

@@ -61,7 +61,7 @@ class ForkliftScanSelfFilter(Node):
         self.declare_parameter('sensor_yaw', 0.0)
         self.declare_parameter(
             'footprint',
-            '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]')
+            '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]')
 
         input_topic = str(self.get_parameter('input_topic').value)
         output_topic = str(self.get_parameter('output_topic').value)

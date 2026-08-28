@@ -25,12 +25,37 @@ constexpr unsigned int kNoParent = std::numeric_limits<unsigned int>::max();
 constexpr unsigned int kLatticeDirectionCount = 3;
 constexpr double kMaxNonObstacleCost =
   static_cast<double>(nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE - 1);
+constexpr unsigned int kAStarHeadingCount = 8u;
 
 struct Point2D
 {
   double x{0.0};
   double y{0.0};
 };
+
+bool pointInsideConvexFootprint(
+  double x, double y, const nav2_costmap_2d::Footprint & footprint)
+{
+  if (footprint.size() < 3u) {
+    return false;
+  }
+  double reference_cross = 0.0;
+  for (std::size_t i = 0u; i < footprint.size(); ++i) {
+    const auto & a = footprint[i];
+    const auto & b = footprint[(i + 1u) % footprint.size()];
+    const double cross = (b.x - a.x) * (y - a.y) -
+      (b.y - a.y) * (x - a.x);
+    if (std::abs(cross) <= 1e-9) {
+      continue;
+    }
+    if (reference_cross == 0.0) {
+      reference_cross = cross;
+    } else if (reference_cross * cross < 0.0) {
+      return false;
+    }
+  }
+  return true;
+}
 
 Point2D evaluateClampedCubicBSpline(
   const std::vector<Point2D> & control_points,
@@ -163,6 +188,9 @@ void OruGlobalPlanner::configure(
     node, name_ + ".cost_travel_multiplier",
     rclcpp::ParameterValue(cost_travel_multiplier_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".footprint_cost_travel_multiplier",
+    rclcpp::ParameterValue(footprint_cost_travel_multiplier_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".unknown_cost_penalty",
     rclcpp::ParameterValue(unknown_cost_penalty_));
   nav2_util::declare_parameter_if_not_declared(
@@ -182,6 +210,12 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_shortcut_cost_threshold",
     rclcpp::ParameterValue(astar_shortcut_cost_threshold_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_preferred_footprint_cost_threshold",
+    rclcpp::ParameterValue(astar_preferred_footprint_cost_threshold_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_start_clearance_relax_distance",
+    rclcpp::ParameterValue(astar_start_clearance_relax_distance_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_bspline_smoothing_enabled",
     rclcpp::ParameterValue(astar_bspline_smoothing_enabled_));
@@ -210,8 +244,14 @@ void OruGlobalPlanner::configure(
     node, name_ + ".astar_segmented_fallback_enabled",
     rclcpp::ParameterValue(astar_segmented_fallback_enabled_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_prefer_segmented_path",
+    rclcpp::ParameterValue(astar_prefer_segmented_path_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_segmented_pivot_threshold",
     rclcpp::ParameterValue(astar_segmented_pivot_threshold_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_goal_endpoint_tolerance",
+    rclcpp::ParameterValue(astar_goal_endpoint_tolerance_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_departure_fallback_enabled",
     rclcpp::ParameterValue(astar_departure_fallback_enabled_));
@@ -338,6 +378,9 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".cost_travel_multiplier",
     cost_travel_multiplier_);
+  node->get_parameter(
+    name_ + ".footprint_cost_travel_multiplier",
+    footprint_cost_travel_multiplier_);
   node->get_parameter(name_ + ".unknown_cost_penalty", unknown_cost_penalty_);
   node->get_parameter(name_ + ".start_tolerance", start_tolerance_);
   node->get_parameter(name_ + ".goal_tolerance", goal_tolerance_);
@@ -360,6 +403,12 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".astar_shortcut_cost_threshold",
     astar_shortcut_cost_threshold_);
+  node->get_parameter(
+    name_ + ".astar_preferred_footprint_cost_threshold",
+    astar_preferred_footprint_cost_threshold_);
+  node->get_parameter(
+    name_ + ".astar_start_clearance_relax_distance",
+    astar_start_clearance_relax_distance_);
   node->get_parameter(
     name_ + ".astar_bspline_smoothing_enabled",
     astar_bspline_smoothing_enabled_);
@@ -391,8 +440,16 @@ void OruGlobalPlanner::configure(
     name_ + ".astar_segmented_fallback_enabled",
     astar_segmented_fallback_enabled_);
   node->get_parameter(
+    name_ + ".astar_prefer_segmented_path",
+    astar_prefer_segmented_path_);
+  node->get_parameter(
     name_ + ".astar_segmented_pivot_threshold",
     astar_segmented_pivot_threshold_);
+  node->get_parameter(
+    name_ + ".astar_goal_endpoint_tolerance",
+    astar_goal_endpoint_tolerance_);
+  astar_goal_endpoint_tolerance_ = std::max(
+    0.0, astar_goal_endpoint_tolerance_);
   node->get_parameter(
     name_ + ".astar_departure_fallback_enabled",
     astar_departure_fallback_enabled_);
@@ -511,12 +568,19 @@ void OruGlobalPlanner::configure(
   footprint_collision_cost_threshold_ =
     std::clamp(footprint_collision_cost_threshold_, 1, 255);
   cost_travel_multiplier_ = std::max(0.0, cost_travel_multiplier_);
+  footprint_cost_travel_multiplier_ =
+    std::max(0.0, footprint_cost_travel_multiplier_);
   unknown_cost_penalty_ = std::max(0.0, unknown_cost_penalty_);
   start_tolerance_ = std::max(0.0, start_tolerance_);
   goal_tolerance_ = std::max(0.0, goal_tolerance_);
   astar_shortcut_max_lookahead_ = std::max(2u, astar_shortcut_max_lookahead_);
   astar_shortcut_cost_threshold_ =
     std::clamp(astar_shortcut_cost_threshold_, 1, 255);
+  astar_preferred_footprint_cost_threshold_ = std::clamp(
+    astar_preferred_footprint_cost_threshold_, 1,
+    astar_shortcut_cost_threshold_);
+  astar_start_clearance_relax_distance_ =
+    std::max(0.0, astar_start_clearance_relax_distance_);
   astar_bspline_sample_spacing_ =
     std::clamp(astar_bspline_sample_spacing_, 0.01, 0.50);
   astar_bspline_min_turning_radius_ =
@@ -530,7 +594,7 @@ void OruGlobalPlanner::configure(
   astar_pivot_collision_sample_angle_ =
     std::clamp(astar_pivot_collision_sample_angle_, 0.01, 0.20);
   astar_segmented_pivot_threshold_ =
-    std::clamp(astar_segmented_pivot_threshold_, 0.20, M_PI);
+    std::clamp(astar_segmented_pivot_threshold_, 0.05, M_PI);
   astar_departure_min_distance_ =
     std::clamp(astar_departure_min_distance_, 0.10, 5.0);
   astar_departure_max_distance_ = std::clamp(
@@ -588,12 +652,14 @@ void OruGlobalPlanner::configure(
     logger_,
     "Configured %s in frame %s: allow_unknown=%s use_diagonal=%s "
     "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d "
-    "start_tolerance=%.2f "
+    "footprint_cost_multiplier=%.2f start_tolerance=%.2f "
     "astar_smoothing=%s astar_shortcut_lookahead=%u astar_shortcut_cost=%d "
+    "astar_preferred_footprint_cost=%d start_clearance_relax=%.2f "
     "astar_bspline=%s bspline_spacing=%.2f bspline_min_radius=%.2f "
     "bspline_start_tangent=%.2f bspline_retries=%u "
     "astar_start_pivot=%s pivot_threshold=%.2f pivot_sample_angle=%.2f "
-    "segmented_fallback=%s segmented_pivot_threshold=%.2f "
+    "segmented_fallback=%s prefer_segmented=%s "
+    "segmented_pivot_threshold=%.2f goal_endpoint_tolerance=%.2f "
     "departure_fallback=%s departure_distance=%.2f..%.2f step=%.2f "
     "use_lattice=%s "
     "lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
@@ -603,16 +669,19 @@ void OruGlobalPlanner::configure(
     name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false", footprint_.size(),
-    lethal_cost_threshold_, start_tolerance_,
+    lethal_cost_threshold_, footprint_cost_travel_multiplier_, start_tolerance_,
     astar_path_smoothing_enabled_ ? "true" : "false",
     astar_shortcut_max_lookahead_, astar_shortcut_cost_threshold_,
+    astar_preferred_footprint_cost_threshold_,
+    astar_start_clearance_relax_distance_,
     astar_bspline_smoothing_enabled_ ? "true" : "false",
     astar_bspline_sample_spacing_, astar_bspline_min_turning_radius_,
     astar_bspline_start_tangent_distance_, astar_bspline_retry_count_,
     astar_start_pivot_enabled_ ? "true" : "false",
     astar_start_pivot_threshold_, astar_pivot_collision_sample_angle_,
     astar_segmented_fallback_enabled_ ? "true" : "false",
-    astar_segmented_pivot_threshold_,
+    astar_prefer_segmented_path_ ? "true" : "false",
+    astar_segmented_pivot_threshold_, astar_goal_endpoint_tolerance_,
     astar_departure_fallback_enabled_ ? "true" : "false",
     astar_departure_min_distance_, astar_departure_max_distance_,
     astar_departure_step_distance_,
@@ -791,13 +860,41 @@ OruGlobalPlanner::createPlan(
     throw nav2_core::PlannerException("OruGlobalPlanner could not find a path");
   }
 
-  const auto smoothed_cells = simplifyAStarPath(cells);
+  const auto smoothed_cells = trimAStarGoalDogleg(
+    simplifyAStarPath(cells), goal);
   const auto astar_path = buildPath(smoothed_cells, planning_start, goal);
   if (!astar_bspline_smoothing_enabled_) {
     return astar_path;
   }
   if (astar_path.poses.size() < 2u) {
     return astar_path;
+  }
+
+  if (astar_prefer_segmented_path_ && astar_segmented_fallback_enabled_) {
+    nav_msgs::msg::Path segmented_path;
+    std::size_t pivot_count = 0u;
+    double segmented_max_curvature = 0.0;
+    std::size_t segmented_rejected_index = 0u;
+    AStarPathValidationFailure segmented_failure =
+      AStarPathValidationFailure::NONE;
+    if (buildAStarSegmentedFallbackPath(
+        astar_path, planning_start, goal, segmented_path, pivot_count,
+        segmented_max_curvature, segmented_rejected_index,
+        segmented_failure))
+    {
+      RCLCPP_INFO(
+        logger_,
+        "A* preferred segmented path accepted: anchors=%zu samples=%zu "
+        "pivots=%zu",
+        astar_path.poses.size(), segmented_path.poses.size(), pivot_count);
+      return segmented_path;
+    }
+    RCLCPP_WARN(
+      logger_,
+      "A* preferred segmented path rejected: reason=%s sample=%zu; "
+      "trying B-spline",
+      aStarValidationFailureName(segmented_failure),
+      segmented_rejected_index);
   }
 
   const auto & first_route_point = astar_path.poses[1].pose.position;
@@ -978,7 +1075,7 @@ OruGlobalPlanner::createPlan(
     retry_lookahead = std::max(2u, retry_lookahead / 2u);
   }
 
-  if (astar_segmented_fallback_enabled_) {
+  if (astar_segmented_fallback_enabled_ && !astar_prefer_segmented_path_) {
     nav_msgs::msg::Path segmented_path;
     std::size_t pivot_count = 0u;
     double segmented_max_curvature = 0.0;
@@ -1048,6 +1145,7 @@ OruGlobalPlanner::createPlan(
 std::vector<OruGlobalPlanner::Cell>
 OruGlobalPlanner::searchAStar(const Cell & start, const Cell & goal) const
 {
+  astar_footprint_cost_cache_.clear();
   const auto size_x = costmap_->getSizeInCellsX();
   const auto size_y = costmap_->getSizeInCellsY();
   const auto cell_count = size_x * size_y;
@@ -1196,7 +1294,8 @@ OruGlobalPlanner::simplifyAStarPath(
       anchor + static_cast<std::size_t>(max_lookahead));
     std::size_t candidate = farthest;
     while (candidate > anchor + 1 &&
-      !isAStarShortcutTraversable(cells[anchor], cells[candidate]))
+      !isAStarShortcutTraversable(
+        cells[anchor], cells[candidate], &cells.front()))
     {
       --candidate;
     }
@@ -1213,17 +1312,231 @@ OruGlobalPlanner::simplifyAStarPath(
   return simplified;
 }
 
+std::vector<OruGlobalPlanner::Cell>
+OruGlobalPlanner::trimAStarGoalDogleg(
+  const std::vector<Cell> & cells,
+  const geometry_msgs::msg::PoseStamped & goal) const
+{
+  if (!costmap_ || astar_goal_endpoint_tolerance_ <= 0.0 ||
+    cells.size() < 3u)
+  {
+    return cells;
+  }
+
+  const auto to_world = [this](const Cell & cell) {
+      std::array<double, 2> point{};
+      costmap_->mapToWorld(cell.x, cell.y, point[0], point[1]);
+      return point;
+    };
+  std::size_t keep_count = cells.size();
+  for (std::size_t vertex = cells.size() - 2u; vertex > 0u; --vertex) {
+    const auto before = to_world(cells[vertex - 1u]);
+    const auto candidate = to_world(cells[vertex]);
+    const auto after = to_world(cells[vertex + 1u]);
+    const double candidate_goal_distance = std::hypot(
+      candidate[0] - goal.pose.position.x,
+      candidate[1] - goal.pose.position.y);
+    if (candidate_goal_distance > astar_goal_endpoint_tolerance_) {
+      break;
+    }
+    const double incoming_yaw = std::atan2(
+      candidate[1] - before[1], candidate[0] - before[0]);
+    const double outgoing_yaw = std::atan2(
+      after[1] - candidate[1], after[0] - candidate[0]);
+    if (std::abs(normalizeAngle(outgoing_yaw - incoming_yaw)) >=
+      astar_segmented_pivot_threshold_)
+    {
+      keep_count = vertex + 1u;
+    }
+  }
+
+  auto trimmed = cells;
+  trimmed.resize(keep_count);
+
+  if (trimmed.size() != cells.size()) {
+    double endpoint_x = 0.0;
+    double endpoint_y = 0.0;
+    costmap_->mapToWorld(
+      trimmed.back().x, trimmed.back().y, endpoint_x, endpoint_y);
+    RCLCPP_INFO(
+      logger_,
+      "A* trimmed terminal dogleg inside goal tolerance: anchors=%zu->%zu "
+      "endpoint_distance=%.3f m",
+      cells.size(), trimmed.size(),
+      std::hypot(
+        endpoint_x - goal.pose.position.x,
+        endpoint_y - goal.pose.position.y));
+  }
+  return trimmed;
+}
+
 bool OruGlobalPlanner::isAStarSearchPoseTraversable(
   const Cell & cell, double yaw) const
 {
   if (!costmap_) {
     return false;
   }
+  const auto cell_cost = costmap_->getCost(cell.x, cell.y);
+  if ((cell_cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
+    (cell_cost != nav2_costmap_2d::NO_INFORMATION &&
+    (cell_cost >= static_cast<unsigned char>(lethal_cost_threshold_) ||
+    cell_cost >= static_cast<unsigned char>(astar_shortcut_cost_threshold_))))
+  {
+    return false;
+  }
+  if (!use_footprint_collision_check_ || footprint_.size() < 3u) {
+    return true;
+  }
+  const double footprint_cost = cachedAStarFootprintCost(cell.x, cell.y, yaw);
+  return footprint_cost >= 0.0 &&
+         (footprint_cost != nav2_costmap_2d::NO_INFORMATION || allow_unknown_) &&
+         (footprint_cost == nav2_costmap_2d::NO_INFORMATION ||
+         footprint_cost < static_cast<double>(astar_shortcut_cost_threshold_));
+}
+
+double OruGlobalPlanner::sampledFootprintCostAtPose(
+  double wx, double wy, double yaw) const
+{
+  if (!costmap_ || footprint_.size() < 3u || !footprint_collision_checker_) {
+    return -1.0;
+  }
+
+  const double outline_cost =
+    footprint_collision_checker_->footprintCostAtPose(wx, wy, yaw, footprint_);
+  if (outline_cost < 0.0) {
+    return outline_cost;
+  }
+  bool has_unknown = outline_cost == nav2_costmap_2d::NO_INFORMATION;
+  double maximum_known_cost = has_unknown ? 0.0 : outline_cost;
+  const double spacing = std::max(0.10, 4.0 * costmap_->getResolution());
+  double min_x = footprint_.front().x;
+  double max_x = footprint_.front().x;
+  double min_y = footprint_.front().y;
+  double max_y = footprint_.front().y;
+  for (const auto & point : footprint_) {
+    min_x = std::min(min_x, point.x);
+    max_x = std::max(max_x, point.x);
+    min_y = std::min(min_y, point.y);
+    max_y = std::max(max_y, point.y);
+  }
+
+  const double cos_yaw = std::cos(yaw);
+  const double sin_yaw = std::sin(yaw);
+  const auto sample_local_point = [&](double local_x, double local_y) {
+      if (!pointInsideConvexFootprint(local_x, local_y, footprint_)) {
+        return true;
+      }
+      const double sample_x = wx + cos_yaw * local_x - sin_yaw * local_y;
+      const double sample_y = wy + sin_yaw * local_x + cos_yaw * local_y;
+      unsigned int map_x = 0u;
+      unsigned int map_y = 0u;
+      if (!costmap_->worldToMap(sample_x, sample_y, map_x, map_y)) {
+        return false;
+      }
+      const auto cost = costmap_->getCost(map_x, map_y);
+      if (cost == nav2_costmap_2d::NO_INFORMATION) {
+        has_unknown = true;
+      } else {
+        maximum_known_cost = std::max(
+          maximum_known_cost, static_cast<double>(cost));
+      }
+      return true;
+    };
+
+  if (!sample_local_point(0.0, 0.0)) {
+    return -1.0;
+  }
+  for (double local_x = min_x + 0.5 * spacing;
+    local_x < max_x; local_x += spacing)
+  {
+    for (double local_y = min_y + 0.5 * spacing;
+      local_y < max_y; local_y += spacing)
+    {
+      if (!sample_local_point(local_x, local_y)) {
+        return -1.0;
+      }
+    }
+  }
+  if (maximum_known_cost >=
+    static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE))
+  {
+    return maximum_known_cost;
+  }
+  return has_unknown ?
+         static_cast<double>(nav2_costmap_2d::NO_INFORMATION) :
+         maximum_known_cost;
+}
+
+double OruGlobalPlanner::fullFootprintCostAtPose(
+  double wx, double wy, double yaw) const
+{
+  if (!costmap_ || footprint_.size() < 3u || !footprint_collision_checker_) {
+    return -1.0;
+  }
+  const double outline_cost =
+    footprint_collision_checker_->footprintCostAtPose(wx, wy, yaw, footprint_);
+  if (outline_cost < 0.0) {
+    return outline_cost;
+  }
+
+  nav2_costmap_2d::Footprint oriented_footprint;
+  nav2_costmap_2d::transformFootprint(
+    wx, wy, yaw, footprint_, oriented_footprint);
+  std::vector<nav2_costmap_2d::MapLocation> map_polygon;
+  map_polygon.reserve(oriented_footprint.size());
+  for (const auto & point : oriented_footprint) {
+    unsigned int map_x = 0u;
+    unsigned int map_y = 0u;
+    if (!costmap_->worldToMap(point.x, point.y, map_x, map_y)) {
+      return -1.0;
+    }
+    map_polygon.push_back({map_x, map_y});
+  }
+
+  std::vector<nav2_costmap_2d::MapLocation> footprint_cells;
+  costmap_->convexFillCells(map_polygon, footprint_cells);
+  bool has_unknown = outline_cost == nav2_costmap_2d::NO_INFORMATION;
+  double maximum_known_cost = has_unknown ? 0.0 : outline_cost;
+  for (const auto & cell : footprint_cells) {
+    const auto cost = costmap_->getCost(cell.x, cell.y);
+    if (cost == nav2_costmap_2d::NO_INFORMATION) {
+      has_unknown = true;
+    } else {
+      maximum_known_cost = std::max(
+        maximum_known_cost, static_cast<double>(cost));
+    }
+  }
+  if (maximum_known_cost >=
+    static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE))
+  {
+    return maximum_known_cost;
+  }
+  return has_unknown ?
+         static_cast<double>(nav2_costmap_2d::NO_INFORMATION) :
+         maximum_known_cost;
+}
+
+double OruGlobalPlanner::cachedAStarFootprintCost(
+  unsigned int x, unsigned int y, double yaw) const
+{
+  const double normalized = normalizeAngle(yaw);
+  const auto heading = static_cast<unsigned int>(std::llround(
+    normalized * static_cast<double>(kAStarHeadingCount) /
+    (2.0 * M_PI) + static_cast<double>(kAStarHeadingCount))) %
+    kAStarHeadingCount;
+  const unsigned long long key =
+    static_cast<unsigned long long>(toIndex(x, y)) * kAStarHeadingCount +
+    heading;
+  const auto found = astar_footprint_cost_cache_.find(key);
+  if (found != astar_footprint_cost_cache_.end()) {
+    return found->second;
+  }
   double wx = 0.0;
   double wy = 0.0;
-  costmap_->mapToWorld(cell.x, cell.y, wx, wy);
-  AStarPathValidationFailure failure = AStarPathValidationFailure::NONE;
-  return isAStarSmoothedPoseTraversable(wx, wy, yaw, failure);
+  costmap_->mapToWorld(x, y, wx, wy);
+  const double cost = sampledFootprintCostAtPose(wx, wy, yaw);
+  astar_footprint_cost_cache_.emplace(key, cost);
+  return cost;
 }
 
 bool OruGlobalPlanner::resolveAStarCell(
@@ -1278,7 +1591,8 @@ bool OruGlobalPlanner::resolveAStarCell(
 
 bool OruGlobalPlanner::isAStarShortcutTraversable(
   const Cell & start,
-  const Cell & goal) const
+  const Cell & goal,
+  const Cell * route_start) const
 {
   if (!costmap_) {
     return false;
@@ -1290,6 +1604,13 @@ bool OruGlobalPlanner::isAStarShortcutTraversable(
   double goal_y = 0.0;
   costmap_->mapToWorld(start.x, start.y, start_x, start_y);
   costmap_->mapToWorld(goal.x, goal.y, goal_x, goal_y);
+
+  double route_start_x = start_x;
+  double route_start_y = start_y;
+  if (route_start) {
+    costmap_->mapToWorld(
+      route_start->x, route_start->y, route_start_x, route_start_y);
+  }
 
   const double dx = goal_x - start_x;
   const double dy = goal_y - start_y;
@@ -1335,16 +1656,22 @@ bool OruGlobalPlanner::isAStarShortcutTraversable(
       if (!footprint_collision_checker_) {
         return false;
       }
-      const double footprint_cost =
-        footprint_collision_checker_->footprintCostAtPose(
-        wx, wy, yaw,
-        footprint_);
+      const double footprint_cost = sampledFootprintCostAtPose(wx, wy, yaw);
       if (footprint_cost < 0.0 ||
         (footprint_cost == nav2_costmap_2d::NO_INFORMATION &&
         !allow_unknown_) ||
         (footprint_cost != nav2_costmap_2d::NO_INFORMATION &&
         footprint_cost >=
         static_cast<double>(astar_shortcut_cost_threshold_)))
+      {
+        return false;
+      }
+      if (route_start &&
+        footprint_cost != nav2_costmap_2d::NO_INFORMATION &&
+        footprint_cost >=
+        static_cast<double>(astar_preferred_footprint_cost_threshold_) &&
+        std::hypot(wx - route_start_x, wy - route_start_y) >
+        astar_start_clearance_relax_distance_)
       {
         return false;
       }
@@ -1569,8 +1896,7 @@ bool OruGlobalPlanner::isAStarSmoothedPoseTraversable(
     failure = AStarPathValidationFailure::FOOTPRINT;
     return false;
   }
-  const double footprint_cost = footprint_collision_checker_->footprintCostAtPose(
-    wx, wy, yaw, footprint_);
+  const double footprint_cost = fullFootprintCostAtPose(wx, wy, yaw);
   if (footprint_cost < 0.0 ||
     (footprint_cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
     (footprint_cost != nav2_costmap_2d::NO_INFORMATION &&
@@ -1909,6 +2235,23 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
       continue;
     }
 
+    // A departure fallback exists to move the complete footprint out of a
+    // constrained start pose. Do not accept a route that immediately pivots
+    // around and drives back through the same constrained area; continue
+    // searching for a farther staging point instead.
+    if (departurePathInitiallyBacktracks(
+        candidate_segmented_path, candidate_x, candidate_y, departure_yaw))
+    {
+      RCLCPP_WARN(
+        logger_,
+        "A* departure candidate rejected: route initially backtracks at "
+        "pivot_pose=(%.3f, %.3f)",
+        candidate_x, candidate_y);
+      failure = AStarPathValidationFailure::BACKTRACK;
+      rejected_index = 0u;
+      continue;
+    }
+
     departure_path.header = candidate_segmented_path.header;
     const auto append_pose = [this, &departure_path](
         const geometry_msgs::msg::PoseStamped & pose) {
@@ -1967,6 +2310,25 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
   return false;
 }
 
+bool OruGlobalPlanner::departurePathInitiallyBacktracks(
+  const nav_msgs::msg::Path & path, double departure_x,
+  double departure_y, double departure_yaw) const
+{
+  const double minimum_motion = std::max(
+    0.10, 2.0 * astar_bspline_sample_spacing_);
+  const double heading_x = std::cos(departure_yaw);
+  const double heading_y = std::sin(departure_yaw);
+  for (const auto & pose : path.poses) {
+    const double dx = pose.pose.position.x - departure_x;
+    const double dy = pose.pose.position.y - departure_y;
+    if (std::hypot(dx, dy) < minimum_motion) {
+      continue;
+    }
+    return dx * heading_x + dy * heading_y < -0.05;
+  }
+  return false;
+}
+
 bool OruGlobalPlanner::validateAStarPivotSweep(
   double wx, double wy, double start_yaw, double target_yaw,
   std::size_t & rejected_index,
@@ -2006,6 +2368,8 @@ const char * OruGlobalPlanner::aStarValidationFailureName(
       return "footprint";
     case AStarPathValidationFailure::CURVATURE:
       return "curvature";
+    case AStarPathValidationFailure::BACKTRACK:
+      return "backtrack";
   }
   return "unknown";
 }
@@ -2381,16 +2745,14 @@ bool OruGlobalPlanner::isFootprintTraversable(
   double wy = 0.0;
   costmap_->mapToWorld(x, y, wx, wy);
 
-  const double footprint_cost =
-    footprint_collision_checker_->footprintCostAtPose(
-    wx, wy, yaw,
-    footprint_);
+  const double footprint_cost = fullFootprintCostAtPose(wx, wy, yaw);
 
   if (footprint_cost == nav2_costmap_2d::NO_INFORMATION) {
     return allow_unknown_;
   }
 
-  return footprint_cost < footprint_collision_cost_threshold_;
+  return footprint_cost >= 0.0 &&
+         footprint_cost < footprint_collision_cost_threshold_;
 }
 
 bool OruGlobalPlanner::isFootprintTraversableAtPose(
@@ -2401,16 +2763,14 @@ bool OruGlobalPlanner::isFootprintTraversableAtPose(
     return true;
   }
 
-  const double footprint_cost =
-    footprint_collision_checker_->footprintCostAtPose(
-    wx, wy, yaw,
-    footprint_);
+  const double footprint_cost = fullFootprintCostAtPose(wx, wy, yaw);
 
   if (footprint_cost == nav2_costmap_2d::NO_INFORMATION) {
     return allow_unknown_;
   }
 
-  return footprint_cost < footprint_collision_cost_threshold_;
+  return footprint_cost >= 0.0 &&
+         footprint_cost < footprint_collision_cost_threshold_;
 }
 
 bool OruGlobalPlanner::primitiveTraversable(
@@ -2561,7 +2921,23 @@ double OruGlobalPlanner::traversalCost(
 
   const double normalized_cost =
     static_cast<double>(cell_cost) / kMaxNonObstacleCost;
-  return distance_cost * (1.0 + cost_travel_multiplier_ * normalized_cost);
+  double footprint_penalty = 0.0;
+  if (use_footprint_collision_check_ && footprint_.size() >= 3 &&
+    footprint_collision_checker_)
+  {
+    const double yaw = std::atan2(
+      static_cast<double>(dy), static_cast<double>(dx));
+    const double footprint_cost = cachedAStarFootprintCost(x, y, yaw);
+    if (footprint_cost == nav2_costmap_2d::NO_INFORMATION) {
+      footprint_penalty = unknown_cost_penalty_;
+    } else if (footprint_cost > 0.0) {
+      footprint_penalty = footprint_cost_travel_multiplier_ *
+        std::min(footprint_cost, kMaxNonObstacleCost) /
+        kMaxNonObstacleCost;
+    }
+  }
+  return distance_cost * (
+    1.0 + cost_travel_multiplier_ * normalized_cost + footprint_penalty);
 }
 
 double OruGlobalPlanner::heuristic(const Cell & a, const Cell & b) const

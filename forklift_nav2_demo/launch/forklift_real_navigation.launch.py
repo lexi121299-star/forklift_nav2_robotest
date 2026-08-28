@@ -138,10 +138,14 @@ def generate_launch_description():
             'localization_topic': '/odom',
             'localization_message_type': 'odometry',
             'costmap_timeout_sec': '1.5',
+            # Cost 253 is the inflation layer's inscribed warning band. The
+            # planner still uses a stricter route threshold; the final gate
+            # blocks lethal cost 254 and unknown/out-of-map footprint samples.
+            'footprint_collision_cost_threshold': '254',
             'collision_check_horizon_sec': '0.6',
             'collision_check_time_step_sec': '0.1',
             'pallet_exemption_reverse_only': 'false',
-            'wheel_base': '1.2',
+            'wheel_base': '1.4',
             'rear_axle_x_offset': '0.0',
         }
         if footprint:

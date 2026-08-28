@@ -264,7 +264,7 @@ def predicted_poses_for_command(
             x = rear_x - rear_axle_x_offset * math.cos(yaw)
             y = rear_y - rear_axle_x_offset * math.sin(yaw)
         else:
-            yaw_rate = signed_velocity * math.tan(steering) / positive(wheel_base, 1.2)
+            yaw_rate = signed_velocity * math.tan(steering) / positive(wheel_base, 1.4)
             x += signed_velocity * math.cos(yaw) * step
             y += signed_velocity * math.sin(yaw) * step
             yaw += yaw_rate * step
@@ -474,7 +474,7 @@ class SafetyCommandGate(Node):
         self.declare_parameter('collision_check_enabled', True)
         self.declare_parameter(
             'footprint',
-            '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]',
+            '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]',
         )
         self.declare_parameter('footprint_sample_spacing', 0.05)
         self.declare_parameter('footprint_collision_cost_threshold', 253)
@@ -509,7 +509,7 @@ class SafetyCommandGate(Node):
         self.declare_parameter('drive_decel_time_sec', 3.0)
         self.declare_parameter('wheel_base', 1.4)
         self.declare_parameter('pivot_turn_radius', 0.6)
-        self.declare_parameter('rear_axle_x_offset', -0.34)
+        self.declare_parameter('rear_axle_x_offset', 0.0)
         self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
         self.declare_parameter('control_rate_hz', 20.0)
 
@@ -544,7 +544,7 @@ class SafetyCommandGate(Node):
         except (SyntaxError, ValueError, TypeError) as exc:
             self.get_logger().error(f'Invalid footprint parameter: {exc}')
             self._footprint = parse_footprint(
-                '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'
+                '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'
             )
         self._footprint_sample_spacing = self._positive_param('footprint_sample_spacing', 0.05)
         self._footprint_collision_cost_threshold = int(

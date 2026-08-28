@@ -204,11 +204,11 @@ def test_costmap_stop_reason_blocks_missing_timeout_and_invalid_data():
 
 def test_parse_footprint_matches_foxy_yaml_string():
     footprint = parse_footprint(
-        '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'
+        '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'
     )
 
-    assert footprint[0] == pytest.approx((0.843, 0.58))
-    assert footprint[2] == pytest.approx((-2.043, -0.58))
+    assert footprint[0] == pytest.approx((1.709, 0.610))
+    assert footprint[2] == pytest.approx((-1.590, -0.610))
 
 
 def test_footprint_collision_at_pose_blocks_lethal_edge_cell():

@@ -3,10 +3,21 @@
   <xacro:arg name="gazebo_cmd_vel_topic" default="cmd_vel"/>
   <xacro:arg name="gazebo_scan_topic" default="scan"/>
 
-  <xacro:property name="wheel_radius" value="0.16"/>
-  <xacro:property name="wheel_width" value="0.08"/>
-  <xacro:property name="wheel_separation" value="0.76"/>
-  <xacro:property name="base_z" value="0.22"/>
+  <!-- 2MKC20M30LV205 geometry. base_link is the drive-axle center and -X points to the forks. -->
+  <xacro:property name="drive_wheel_radius" value="0.2285"/>
+  <xacro:property name="drive_wheel_width" value="0.178"/>
+  <xacro:property name="drive_track_width" value="0.937"/>
+  <xacro:property name="support_wheel_radius" value="0.1905"/>
+  <xacro:property name="support_wheel_width" value="0.127"/>
+  <xacro:property name="support_track_width" value="0.183"/>
+  <xacro:property name="wheel_base" value="1.40"/>
+  <xacro:property name="base_z" value="${drive_wheel_radius}"/>
+  <xacro:property name="body_length" value="2.079"/>
+  <xacro:property name="body_width" value="1.220"/>
+  <xacro:property name="body_center_x" value="0.6695"/>
+  <xacro:property name="mast_x" value="-0.370"/>
+  <xacro:property name="fork_length" value="1.220"/>
+  <xacro:property name="fork_center_x" value="-0.980"/>
 
   <link name="base_footprint"/>
 
@@ -18,85 +29,85 @@
 
   <link name="base_link">
     <inertial>
-      <origin xyz="0 0 0"/>
+      <origin xyz="${body_center_x} 0 0"/>
       <mass value="28.0"/>
       <inertia ixx="1.20" ixy="0.0" ixz="0.0" iyy="3.40" iyz="0.0" izz="3.80"/>
     </inertial>
     <visual name="body_visual">
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin xyz="${body_center_x} 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="1.685 1.16 0.28"/>
+        <box size="${body_length} ${body_width} 0.26"/>
       </geometry>
       <material name="forklift_yellow">
         <color rgba="1.0 0.68 0.10 1.0"/>
       </material>
     </visual>
     <collision name="body_collision">
-      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <origin xyz="${body_center_x} 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="1.685 1.16 0.28"/>
+        <box size="${body_length} ${body_width} 0.26"/>
       </geometry>
     </collision>
 
     <visual name="counterweight_visual">
-      <origin xyz="0.73 0 0.02" rpy="0 0 0"/>
+      <origin xyz="1.55 0 0.02" rpy="0 0 0"/>
       <geometry>
-        <box size="0.24 1.06 0.34"/>
+        <box size="0.318 1.12 0.34"/>
       </geometry>
       <material name="dark_gray">
         <color rgba="0.08 0.09 0.10 1.0"/>
       </material>
     </visual>
     <collision name="counterweight_collision">
-      <origin xyz="0.73 0 0.02" rpy="0 0 0"/>
+      <origin xyz="1.55 0 0.02" rpy="0 0 0"/>
       <geometry>
-        <box size="0.24 1.06 0.34"/>
+        <box size="0.318 1.12 0.34"/>
       </geometry>
     </collision>
 
     <visual name="mast_visual">
-      <origin xyz="-0.843 0 0.30" rpy="0 0 0"/>
+      <origin xyz="${mast_x} 0 0.835" rpy="0 0 0"/>
       <geometry>
-        <box size="0.10 0.95 0.82"/>
+        <box size="0.10 0.97 1.917"/>
       </geometry>
       <material name="mast_gray">
         <color rgba="0.18 0.20 0.22 1.0"/>
       </material>
     </visual>
     <collision name="mast_collision">
-      <origin xyz="-0.843 0 0.30" rpy="0 0 0"/>
+      <origin xyz="${mast_x} 0 0.835" rpy="0 0 0"/>
       <geometry>
-        <box size="0.10 0.95 0.82"/>
+        <box size="0.10 0.97 1.917"/>
       </geometry>
     </collision>
 
     <visual name="fork_left_visual">
-      <origin xyz="-1.443 0.25 -0.13" rpy="0 0 0"/>
+      <origin xyz="${fork_center_x} 0.25 -0.1885" rpy="0 0 0"/>
       <geometry>
-        <box size="1.20 0.10 0.04"/>
+        <box size="${fork_length} 0.10 0.04"/>
       </geometry>
       <material name="fork_gray">
         <color rgba="0.32 0.34 0.35 1.0"/>
       </material>
     </visual>
     <collision name="fork_left_collision">
-      <origin xyz="-1.443 0.25 -0.13" rpy="0 0 0"/>
+      <origin xyz="${fork_center_x} 0.25 -0.1885" rpy="0 0 0"/>
       <geometry>
-        <box size="1.20 0.10 0.04"/>
+        <box size="${fork_length} 0.10 0.04"/>
       </geometry>
     </collision>
 
     <visual name="fork_right_visual">
-      <origin xyz="-1.443 -0.25 -0.13" rpy="0 0 0"/>
+      <origin xyz="${fork_center_x} -0.25 -0.1885" rpy="0 0 0"/>
       <geometry>
-        <box size="1.20 0.10 0.04"/>
+        <box size="${fork_length} 0.10 0.04"/>
       </geometry>
       <material name="fork_gray"/>
     </visual>
     <collision name="fork_right_collision">
-      <origin xyz="-1.443 -0.25 -0.13" rpy="0 0 0"/>
+      <origin xyz="${fork_center_x} -0.25 -0.1885" rpy="0 0 0"/>
       <geometry>
-        <box size="1.20 0.10 0.04"/>
+        <box size="${fork_length} 0.10 0.04"/>
       </geometry>
     </collision>
   </link>
@@ -110,7 +121,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        <cylinder radius="${drive_wheel_radius}" length="${drive_wheel_width}"/>
       </geometry>
       <material name="wheel_black">
         <color rgba="0.02 0.02 0.02 1.0"/>
@@ -119,7 +130,7 @@
     <collision>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        <cylinder radius="${drive_wheel_radius}" length="${drive_wheel_width}"/>
       </geometry>
     </collision>
   </link>
@@ -127,7 +138,7 @@
   <joint name="left_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="left_wheel_link"/>
-    <origin xyz="-0.34 ${wheel_separation / 2.0} -0.06" rpy="0 0 0"/>
+    <origin xyz="0 ${drive_track_width / 2.0} 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
@@ -140,14 +151,14 @@
     <visual>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        <cylinder radius="${drive_wheel_radius}" length="${drive_wheel_width}"/>
       </geometry>
       <material name="wheel_black"/>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        <cylinder radius="${drive_wheel_radius}" length="${drive_wheel_width}"/>
       </geometry>
     </collision>
   </link>
@@ -155,35 +166,64 @@
   <joint name="right_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child link="right_wheel_link"/>
-    <origin xyz="-0.34 ${-wheel_separation / 2.0} -0.06" rpy="0 0 0"/>
+    <origin xyz="0 ${-drive_track_width / 2.0} 0" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
-  <link name="front_caster_link">
+  <link name="left_support_wheel_link">
     <inertial>
       <origin xyz="0 0 0"/>
-      <mass value="0.4"/>
-      <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
     </inertial>
     <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <sphere radius="0.07"/>
+        <cylinder radius="${support_wheel_radius}" length="${support_wheel_width}"/>
       </geometry>
       <material name="caster_dark">
         <color rgba="0.05 0.05 0.05 1.0"/>
       </material>
     </visual>
     <collision>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
       <geometry>
-        <sphere radius="0.07"/>
+        <cylinder radius="${support_wheel_radius}" length="${support_wheel_width}"/>
       </geometry>
     </collision>
   </link>
 
-  <joint name="front_caster_joint" type="fixed">
+  <joint name="left_support_wheel_joint" type="fixed">
     <parent link="base_link"/>
-    <child link="front_caster_link"/>
-    <origin xyz="0.42 0 -0.15" rpy="0 0 0"/>
+    <child link="left_support_wheel_link"/>
+    <origin xyz="${wheel_base} ${support_track_width / 2.0} ${support_wheel_radius - drive_wheel_radius}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="right_support_wheel_link">
+    <inertial>
+      <origin xyz="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="${support_wheel_radius}" length="${support_wheel_width}"/>
+      </geometry>
+      <material name="caster_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="${support_wheel_radius}" length="${support_wheel_width}"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_support_wheel_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="right_support_wheel_link"/>
+    <origin xyz="${wheel_base} ${-support_track_width / 2.0} ${support_wheel_radius - drive_wheel_radius}" rpy="0 0 0"/>
   </joint>
 
   <link name="base_scan">
@@ -229,7 +269,13 @@
     <mu2>1.0</mu2>
   </gazebo>
 
-  <gazebo reference="front_caster_link">
+  <gazebo reference="left_support_wheel_link">
+    <material>Gazebo/Black</material>
+    <mu1>0.01</mu1>
+    <mu2>0.01</mu2>
+  </gazebo>
+
+  <gazebo reference="right_support_wheel_link">
     <material>Gazebo/Black</material>
     <mu1>0.01</mu1>
     <mu2>0.01</mu2>
@@ -278,8 +324,8 @@
       <update_rate>50</update_rate>
       <left_joint>left_wheel_joint</left_joint>
       <right_joint>right_wheel_joint</right_joint>
-      <wheel_separation>${wheel_separation}</wheel_separation>
-      <wheel_diameter>${2.0 * wheel_radius}</wheel_diameter>
+      <wheel_separation>${drive_track_width}</wheel_separation>
+      <wheel_diameter>${2.0 * drive_wheel_radius}</wheel_diameter>
       <max_wheel_torque>80</max_wheel_torque>
       <max_wheel_acceleration>1.0</max_wheel_acceleration>
       <publish_odom>true</publish_odom>

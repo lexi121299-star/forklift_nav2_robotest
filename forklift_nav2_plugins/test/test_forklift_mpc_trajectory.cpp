@@ -389,5 +389,19 @@ TEST(ForkliftMpcTrajectory, NearestTrajectoryIndexRespectsStartIndex)
   EXPECT_EQ(nearestTrajectoryIndex(trajectory, state, 1), 1u);
 }
 
+TEST(ForkliftMpcTrajectory, NearestTrajectoryRangeCannotSkipPendingPivot)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(1.0, 0.0));
+  path.poses.push_back(makePose(2.0, 0.0));
+  path.poses.push_back(makePose(1.0, 0.1));
+  const auto trajectory = pathToMpcTrajectory(path, testVehicleModel());
+  const auto state = makeMpcState(1.0, 0.09, 0.0, 0.0, testVehicleModel());
+
+  EXPECT_EQ(nearestTrajectoryIndex(trajectory, state), 3u);
+  EXPECT_EQ(nearestTrajectoryIndexInRange(trajectory, state, 0u, 2u), 1u);
+}
+
 }  // namespace
 }  // namespace forklift_nav2_plugins

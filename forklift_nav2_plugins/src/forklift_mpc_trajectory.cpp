@@ -616,4 +616,30 @@ std::size_t nearestTrajectoryIndex(
   return best_index;
 }
 
+std::size_t nearestTrajectoryIndexInRange(
+  const MpcTrajectory & trajectory,
+  const MpcState & state,
+  std::size_t start_index,
+  std::size_t end_index)
+{
+  if (trajectory.empty()) {
+    return 0;
+  }
+
+  const std::size_t start = std::min(start_index, trajectory.size() - 1);
+  const std::size_t end = std::clamp(end_index, start, trajectory.size() - 1);
+  double best_distance = std::numeric_limits<double>::infinity();
+  std::size_t best_index = start;
+  for (std::size_t i = start; i <= end; ++i) {
+    const double distance = std::hypot(
+      trajectory[i].state.x - state.x,
+      trajectory[i].state.y - state.y);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = i;
+    }
+  }
+  return best_index;
+}
+
 }  // namespace forklift_nav2_plugins
