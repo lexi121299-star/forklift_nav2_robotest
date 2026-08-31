@@ -152,10 +152,10 @@ controller_server:
       pivot_velocity: 0.12
       pivot_yaw_tolerance: 0.05
       pivot_stop_velocity_threshold: 0.02
-      # A pivot marker inside the preview window is still an upcoming maneuver.
-      # Drive the departure/approach segment first and latch the pivot only at
-      # its actual position.
-      pivot_activation_distance: 0.20
+      # Capture the planned pivot despite normal real-vehicle lateral tracking
+      # error. In the 2026-08-28 14:29 run the closest approach was 0.315 m, so
+      # the old 0.20 m threshold was missed and the vehicle drove past it.
+      pivot_activation_distance: 0.35
       # Execute large pivot turns as fixed 20 degree closed-loop segments. Stop
       # the drive briefly between segments so a fresh localization update can
       # be applied before committing to the next angle.
@@ -232,8 +232,8 @@ controller_server:
       candidate_score_abort_cycles: 5
       safety_gate_enabled: true
       safety_emergency_stop_active: false
-      safety_stop_distance: 0.55
-      safety_slowdown_distance: 1.25
+      safety_stop_distance: 0.75
+      safety_slowdown_distance: 1.50
       safety_min_speed: 0.05
       safety_sample_spacing: 0.10
       # The global planner penalizes inflation touched by the complete footprint

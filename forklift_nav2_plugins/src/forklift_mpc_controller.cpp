@@ -815,12 +815,13 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 
   // Release the terminal latch whenever a genuinely new goal arrives so the
   // controller can drive again; keep it engaged if the same goal is re-sent.
+  bool goal_changed = false;
   if (!path.poses.empty()) {
     const auto & goal_pose = path.poses.back();
     const double goal_x = goal_pose.pose.position.x;
     const double goal_y = goal_pose.pose.position.y;
     const double goal_yaw = poseYaw(goal_pose);
-    const bool goal_changed =
+    goal_changed =
       !has_last_goal_ ||
       std::hypot(goal_x - last_goal_x_, goal_y - last_goal_y_) >
       goal_latch_xy_tolerance_ ||
@@ -828,29 +829,35 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
       goal_latch_yaw_tolerance_;
     if (goal_changed) {
       goal_latched_ = false;
-      best_candidate_score_seen_ = std::numeric_limits<double>::infinity();
-      candidate_score_bad_cycles_ = 0;
-      pivot_settled_ = false;
-      pivot_maneuver_active_ = false;
-      active_pivot_index_ = std::numeric_limits<std::size_t>::max();
-      pivot_step_target_active_ = false;
-      pivot_step_direction_ = 0.0;
-      pivot_step_hold_start_ns_ = 0;
-      pivot_completion_latched_ = false;
-      completed_pivot_index_ = std::numeric_limits<std::size_t>::max();
-      completed_pivot_left_preview_ = false;
-      post_pivot_transition_active_ = false;
-      pivot_departure_steering_ = 0.0;
-      pivot_departure_ready_ns_ = 0;
-      new_goal_steering_settle_active_ =
-        new_goal_steering_settle_enabled_;
-      new_goal_steering_ready_ns_ = 0;
       last_goal_x_ = goal_x;
       last_goal_y_ = goal_y;
       last_goal_yaw_ = goal_yaw;
       has_last_goal_ = true;
     }
   }
+
+  // Pivot indices and candidate scores belong to one concrete path, not to
+  // its destination. A recovery replan commonly keeps the same goal while
+  // replacing the trajectory with a shorter path. Carrying the old completed
+  // pivot index into that path can clamp the tracking cursor to its last point
+  // and falsely report that the trajectory was consumed.
+  best_candidate_score_seen_ = std::numeric_limits<double>::infinity();
+  candidate_score_bad_cycles_ = 0;
+  pivot_settled_ = false;
+  pivot_maneuver_active_ = false;
+  active_pivot_index_ = std::numeric_limits<std::size_t>::max();
+  pivot_step_target_active_ = false;
+  pivot_step_direction_ = 0.0;
+  pivot_step_hold_start_ns_ = 0;
+  pivot_completion_latched_ = false;
+  completed_pivot_index_ = std::numeric_limits<std::size_t>::max();
+  completed_pivot_left_preview_ = false;
+  post_pivot_transition_active_ = false;
+  pivot_departure_steering_ = 0.0;
+  pivot_departure_ready_ns_ = 0;
+  new_goal_steering_settle_active_ =
+    goal_changed && new_goal_steering_settle_enabled_;
+  new_goal_steering_ready_ns_ = 0;
 
   const auto result = processPathToMpcTrajectory(
     global_plan_, vehicle_model_, trajectoryOptions(max_velocity_));
