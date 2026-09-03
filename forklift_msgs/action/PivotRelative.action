@@ -1,0 +1,10 @@
+float64 angle_rad
+float64 max_speed_mps
+---
+bool success
+string message
+float64 final_yaw_error_rad
+---
+float64 remaining_angle_rad
+float64 current_yaw_rad
+string phase

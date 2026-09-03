@@ -51,6 +51,36 @@ def direction(command: ForkliftControlCommand) -> int:
     return 0
 
 
+def is_steering_only_command(command: ForkliftControlCommand) -> bool:
+    """Return whether a command can only actuate steering at zero traction.
+
+    Fine motion must center the steering after a pivot before it may start a
+    straight move.  The vehicle controller requires an enabled command for
+    this, but there must be no travel direction, drive RPM, or hydraulic
+    output.  Keeping this predicate deliberately narrow prevents it from
+    becoming a general bypass for invalid motion commands.
+    """
+
+    zero_outputs = (
+        command.velocity_mps,
+        command.drive_rpm,
+        command.pump_rpm,
+        command.lift_valve_ma,
+        command.lower_valve_ma,
+        command.side_shift_left_valve_ma,
+        command.side_shift_right_valve_ma,
+        command.tilt_forward_valve_ma,
+        command.tilt_backward_valve_ma,
+    )
+    return (
+        command.enable
+        and not command.brake
+        and direction(command) == 0
+        and not command.horn
+        and all(math.isfinite(value) and abs(value) <= 1e-6 for value in zero_outputs)
+    )
+
+
 def stop_command(stamp=None) -> ForkliftControlCommand:
     command = ForkliftControlCommand()
     if stamp is not None:
@@ -814,6 +844,8 @@ class SafetyCommandGate(Node):
             if not command.enable or command.brake:
                 return command, 'raw stop'
             if direction(command) == 0:
+                if is_steering_only_command(command):
+                    return command, 'steering center'
                 return stop_command(stamp), 'invalid direction'
             collision_reason = self._collision_stop_reason(command)
             if collision_reason:

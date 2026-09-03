@@ -1,6 +1,7 @@
 fine_motion_adapter:
   ros__parameters:
     action_name: /forklift/fine_motion/move_relative
+    pivot_action_name: /forklift/fine_motion/pivot_relative
     odom_topic: /odom
     vehicle_state_topic: /forklift/vehicle_state
     command_topic: /forklift/control_cmd_raw
@@ -18,3 +19,13 @@ fine_motion_adapter:
     steering_center_timeout_sec: 3.0
     accel_time_sec: 1.0
     decel_time_sec: 1.0
+    pivot_max_speed_mps: 0.12
+    pivot_final_speed_mps: 0.06
+    pivot_steering_angle_rad: 1.5707963267948966
+    pivot_yaw_tolerance_rad: 0.05
+    pivot_progress_epsilon_rad: 0.01
+    pivot_step_angle_rad: 0.3490658503988659
+    pivot_step_hold_sec: 0.0
+    pivot_final_slowdown_angle_rad: 0.3490658503988659
+    pivot_wrong_direction_tolerance_rad: 0.08
+    pivot_timeout_sec: 45.0

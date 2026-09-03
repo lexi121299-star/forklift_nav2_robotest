@@ -14,6 +14,7 @@ from forklift_safety.safety_command_gate import (
     direction,
     footprint_collision_at_pose,
     footprint_sweep_collision,
+    is_steering_only_command,
     parse_footprint,
     point_in_pallet_exemption,
     predicted_poses_for_command,
@@ -52,6 +53,26 @@ def test_direction_rejects_ambiguous_commands():
     command.forward = False
     command.reverse = True
     assert direction(command) == -1
+
+
+def test_steering_only_command_allows_enabled_zero_traction():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.brake = False
+    command.steering_angle_rad = 0.0
+
+    assert is_steering_only_command(command) is True
+
+    command.drive_rpm = 1.0
+    assert is_steering_only_command(command) is False
+
+    command.drive_rpm = 0.0
+    command.forward = True
+    assert is_steering_only_command(command) is False
+
+    command.forward = False
+    command.lift_valve_ma = 10.0
+    assert is_steering_only_command(command) is False
 
 
 def test_stop_command_brakes_and_disables_motion():

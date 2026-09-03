@@ -1,4 +1,4 @@
-"""Low-speed straight relative-motion action for final pallet approach."""
+"""Low-speed straight and pivot actions for pallet approach maneuvers."""
 
 import math
 import threading
@@ -6,7 +6,7 @@ import time
 from typing import Optional, Tuple
 
 import rclpy
-from forklift_msgs.action import MoveRelative
+from forklift_msgs.action import MoveRelative, PivotRelative
 from forklift_msgs.msg import ForkliftControlCommand, ForkliftVehicleState
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
@@ -49,12 +49,79 @@ def motion_command(
     return command
 
 
+def steering_center_command(
+    accel_time_sec: float,
+    decel_time_sec: float,
+) -> ForkliftControlCommand:
+    """Keep the drive enabled at zero RPM while commanding centered steering.
+
+    Some vehicle controllers do not actuate the steering motor after a fully
+    disabled stop command.  This command has no travel direction and zero
+    traction speed, but keeps the controller enabled long enough to center
+    the steering before a straight relative motion begins.
+    """
+
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.brake = False
+    command.forward = False
+    command.reverse = False
+    command.velocity_mps = 0.0
+    command.steering_angle_rad = 0.0
+    command.steering_angle_deg = 0.0
+    command.accel_time_sec = float(accel_time_sec)
+    command.decel_time_sec = float(decel_time_sec)
+    return command
+
+
+def pivot_command(
+    speed_mps: float,
+    steering_sign: float,
+    steering_angle_rad: float,
+    accel_time_sec: float,
+    decel_time_sec: float,
+) -> ForkliftControlCommand:
+    """Build a logical pivot command for the upstream safety gate."""
+
+    command = ForkliftControlCommand()
+    command.enable = speed_mps > 1e-6
+    command.brake = not command.enable
+    command.forward = command.enable
+    command.reverse = False
+    command.velocity_mps = float(max(0.0, speed_mps))
+    command.steering_angle_rad = math.copysign(
+        abs(float(steering_angle_rad)), steering_sign
+    )
+    command.steering_angle_deg = math.degrees(command.steering_angle_rad)
+    command.accel_time_sec = float(accel_time_sec)
+    command.decel_time_sec = float(decel_time_sec)
+    return command
+
+
+def nonnegative_finite(value: float, name: str) -> float:
+    """Return a finite non-negative configuration value."""
+
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise ValueError('{} must be a non-negative finite value'.format(name))
+    return result
+
+
+def pivot_step_hold_enabled(step_hold_sec: float) -> bool:
+    """Return whether pivot progress checkpoints should stop the vehicle."""
+
+    return nonnegative_finite(step_hold_sec, 'pivot_step_hold_sec') > 0.0
+
+
 class FineMotionAdapter(Node):
-    """Execute short straight motions using odometry feedback."""
+    """Execute short straight motions and fixed-center pivots using odometry."""
 
     def __init__(self) -> None:
         super().__init__('fine_motion_adapter')
         self.declare_parameter('action_name', '/forklift/fine_motion/move_relative')
+        self.declare_parameter(
+            'pivot_action_name', '/forklift/fine_motion/pivot_relative'
+        )
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('vehicle_state_topic', '/forklift/vehicle_state')
         self.declare_parameter('command_topic', '/forklift/control_cmd_raw')
@@ -72,6 +139,16 @@ class FineMotionAdapter(Node):
         self.declare_parameter('steering_center_timeout_sec', 3.0)
         self.declare_parameter('accel_time_sec', 1.0)
         self.declare_parameter('decel_time_sec', 1.0)
+        self.declare_parameter('pivot_max_speed_mps', 0.10)
+        self.declare_parameter('pivot_final_speed_mps', 0.06)
+        self.declare_parameter('pivot_steering_angle_rad', math.pi / 2.0)
+        self.declare_parameter('pivot_yaw_tolerance_rad', 0.05)
+        self.declare_parameter('pivot_progress_epsilon_rad', 0.01)
+        self.declare_parameter('pivot_step_angle_rad', math.radians(20.0))
+        self.declare_parameter('pivot_step_hold_sec', 0.2)
+        self.declare_parameter('pivot_final_slowdown_angle_rad', math.radians(20.0))
+        self.declare_parameter('pivot_wrong_direction_tolerance_rad', 0.08)
+        self.declare_parameter('pivot_timeout_sec', 30.0)
 
         self._control_rate_hz = self._positive('control_rate_hz')
         self._odom_timeout_sec = self._positive('odom_timeout_sec')
@@ -99,6 +176,28 @@ class FineMotionAdapter(Node):
         )
         self._accel_time_sec = self._positive('accel_time_sec')
         self._decel_time_sec = self._positive('decel_time_sec')
+        self._pivot_max_speed_mps = self._positive('pivot_max_speed_mps')
+        self._pivot_final_speed_mps = min(
+            self._positive('pivot_final_speed_mps'), self._pivot_max_speed_mps
+        )
+        self._pivot_steering_angle_rad = self._positive(
+            'pivot_steering_angle_rad'
+        )
+        self._pivot_yaw_tolerance_rad = self._positive(
+            'pivot_yaw_tolerance_rad'
+        )
+        self._pivot_progress_epsilon_rad = self._positive(
+            'pivot_progress_epsilon_rad'
+        )
+        self._pivot_step_angle_rad = self._positive('pivot_step_angle_rad')
+        self._pivot_step_hold_sec = self._nonnegative('pivot_step_hold_sec')
+        self._pivot_final_slowdown_angle_rad = self._positive(
+            'pivot_final_slowdown_angle_rad'
+        )
+        self._pivot_wrong_direction_tolerance_rad = self._positive(
+            'pivot_wrong_direction_tolerance_rad'
+        )
+        self._pivot_timeout_sec = self._positive('pivot_timeout_sec')
 
         self._lock = threading.Lock()
         self._active_goal = False
@@ -129,14 +228,25 @@ class FineMotionAdapter(Node):
             self,
             MoveRelative,
             action_name,
-            execute_callback=self._execute,
-            goal_callback=self._goal_callback,
+            execute_callback=self._execute_move,
+            goal_callback=self._move_goal_callback,
+            cancel_callback=self._cancel_callback,
+            callback_group=callback_group,
+        )
+        pivot_action_name = str(self.get_parameter('pivot_action_name').value)
+        self._pivot_action_server = ActionServer(
+            self,
+            PivotRelative,
+            pivot_action_name,
+            execute_callback=self._execute_pivot,
+            goal_callback=self._pivot_goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=callback_group,
         )
         self.get_logger().info(
-            'fine_motion_adapter ready: action={} command_topic={}'.format(
-                action_name, command_topic
+            'fine_motion_adapter ready: move_action={} pivot_action={} '
+            'command_topic={}'.format(
+                action_name, pivot_action_name, command_topic
             )
         )
 
@@ -146,7 +256,20 @@ class FineMotionAdapter(Node):
             raise ValueError('{} must be a positive finite value'.format(name))
         return value
 
-    def _goal_callback(self, request: MoveRelative.Goal) -> GoalResponse:
+    def _nonnegative(self, name: str) -> float:
+        return nonnegative_finite(self.get_parameter(name).value, name)
+
+    def _claim_goal(self, label: str) -> GoalResponse:
+        with self._lock:
+            if self._active_goal:
+                self.get_logger().warning(
+                    'Rejecting {}: another fine-motion goal is active'.format(label)
+                )
+                return GoalResponse.REJECT
+            self._active_goal = True
+        return GoalResponse.ACCEPT
+
+    def _move_goal_callback(self, request: MoveRelative.Goal) -> GoalResponse:
         distance = float(request.distance_m)
         speed = float(request.max_speed_mps)
         if not math.isfinite(distance) or abs(distance) <= self._distance_tolerance_m:
@@ -155,12 +278,22 @@ class FineMotionAdapter(Node):
         if not math.isfinite(speed) or speed <= 0.0:
             self.get_logger().warning('Rejecting MoveRelative: invalid speed')
             return GoalResponse.REJECT
-        with self._lock:
-            if self._active_goal:
-                self.get_logger().warning('Rejecting MoveRelative: goal already active')
-                return GoalResponse.REJECT
-            self._active_goal = True
-        return GoalResponse.ACCEPT
+        return self._claim_goal('MoveRelative')
+
+    def _pivot_goal_callback(self, request: PivotRelative.Goal) -> GoalResponse:
+        angle = float(request.angle_rad)
+        speed = float(request.max_speed_mps)
+        if (
+            not math.isfinite(angle)
+            or abs(angle) <= self._pivot_yaw_tolerance_rad
+            or abs(angle) > math.pi + self._pivot_yaw_tolerance_rad
+        ):
+            self.get_logger().warning('Rejecting PivotRelative: invalid angle')
+            return GoalResponse.REJECT
+        if not math.isfinite(speed) or speed <= 0.0:
+            self.get_logger().warning('Rejecting PivotRelative: invalid speed')
+            return GoalResponse.REJECT
+        return self._claim_goal('PivotRelative')
 
     def _cancel_callback(self, _goal_handle) -> CancelResponse:
         self._publish_stop()
@@ -186,9 +319,17 @@ class FineMotionAdapter(Node):
             vehicle_state = self._latest_vehicle_state
         return odom, vehicle_state
 
-    def _execute(self, goal_handle):
+    def _execute_move(self, goal_handle):
         try:
             return self._run(goal_handle)
+        finally:
+            self._publish_stop()
+            with self._lock:
+                self._active_goal = False
+
+    def _execute_pivot(self, goal_handle):
+        try:
+            return self._run_pivot(goal_handle)
         finally:
             self._publish_stop()
             with self._lock:
@@ -217,7 +358,7 @@ class FineMotionAdapter(Node):
                 result.success = False
                 result.message = 'relative motion canceled'
                 return result
-            self._publish_stop()
+            self._publish_steering_center()
             time.sleep(1.0 / self._control_rate_hz)
             now = time.monotonic()
             odom, vehicle_state = self._snapshot()
@@ -303,6 +444,150 @@ class FineMotionAdapter(Node):
 
         return self._abort(goal_handle, result, 'rclpy shutdown')
 
+    def _run_pivot(self, goal_handle):
+        result = PivotRelative.Result()
+        requested_angle = float(goal_handle.request.angle_rad)
+        turn_sign = 1.0 if requested_angle > 0.0 else -1.0
+        target_angle = abs(requested_angle)
+        speed = min(
+            abs(float(goal_handle.request.max_speed_mps)),
+            self._pivot_max_speed_mps,
+        )
+        start_time = time.monotonic()
+
+        odom, vehicle_state = self._snapshot()
+        readiness_error = self._readiness_error(
+            odom, vehicle_state, start_time, require_centered=False
+        )
+        if readiness_error:
+            return self._abort_pivot(goal_handle, result, readiness_error, target_angle)
+
+        last_yaw = odom[2]
+        progress = 0.0
+        last_progress = 0.0
+        last_progress_time = start_time
+        next_hold_angle = min(self._pivot_step_angle_rad, target_angle)
+        sleep_sec = 1.0 / self._control_rate_hz
+
+        while rclpy.ok():
+            now = time.monotonic()
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                result.success = False
+                result.message = 'pivot motion canceled'
+                result.final_yaw_error_rad = max(0.0, target_angle - progress)
+                return result
+            if now - start_time > self._pivot_timeout_sec:
+                return self._abort_pivot(
+                    goal_handle,
+                    result,
+                    'pivot motion timeout',
+                    max(0.0, target_angle - progress),
+                )
+
+            odom, vehicle_state = self._snapshot()
+            readiness_error = self._readiness_error(
+                odom, vehicle_state, now, require_centered=False
+            )
+            if readiness_error:
+                return self._abort_pivot(
+                    goal_handle,
+                    result,
+                    readiness_error,
+                    max(0.0, target_angle - progress),
+                )
+
+            current_yaw = odom[2]
+            signed_increment = turn_sign * shortest_angle(current_yaw - last_yaw)
+            last_yaw = current_yaw
+            if signed_increment < -self._pivot_wrong_direction_tolerance_rad:
+                return self._abort_pivot(
+                    goal_handle,
+                    result,
+                    'pivot motion moved in wrong direction',
+                    max(0.0, target_angle - progress),
+                )
+            progress = max(0.0, progress + signed_increment)
+            remaining = max(0.0, target_angle - progress)
+
+            if remaining <= self._pivot_yaw_tolerance_rad:
+                goal_handle.succeed()
+                result.success = True
+                result.message = 'pivot motion completed'
+                result.final_yaw_error_rad = remaining
+                return result
+
+            if progress >= last_progress + self._pivot_progress_epsilon_rad:
+                last_progress = progress
+                last_progress_time = now
+            elif now - last_progress_time > self._progress_timeout_sec:
+                return self._abort_pivot(
+                    goal_handle,
+                    result,
+                    'pivot motion made no progress',
+                    remaining,
+                )
+
+            phase = 'TURNING'
+            if (
+                pivot_step_hold_enabled(self._pivot_step_hold_sec)
+                and progress + self._pivot_yaw_tolerance_rad >= next_hold_angle
+                and next_hold_angle < target_angle
+            ):
+                self._publish_stop()
+                phase = 'STEP_HOLD'
+                self._publish_pivot_feedback(
+                    goal_handle, remaining, current_yaw, phase
+                )
+                time.sleep(self._pivot_step_hold_sec)
+                next_hold_angle = min(
+                    target_angle, next_hold_angle + self._pivot_step_angle_rad
+                )
+                last_progress_time = time.monotonic()
+                continue
+
+            command_speed = (
+                self._pivot_final_speed_mps
+                if remaining <= self._pivot_final_slowdown_angle_rad
+                else speed
+            )
+            command = pivot_command(
+                command_speed,
+                turn_sign,
+                self._pivot_steering_angle_rad,
+                self._accel_time_sec,
+                self._decel_time_sec,
+            )
+            command.header.stamp = self.get_clock().now().to_msg()
+            self._command_pub.publish(command)
+            self._publish_pivot_feedback(
+                goal_handle, remaining, current_yaw, phase
+            )
+            time.sleep(sleep_sec)
+
+        return self._abort_pivot(
+            goal_handle,
+            result,
+            'rclpy shutdown',
+            max(0.0, target_angle - progress),
+        )
+
+    @staticmethod
+    def _publish_pivot_feedback(goal_handle, remaining, current_yaw, phase):
+        feedback = PivotRelative.Feedback()
+        feedback.remaining_angle_rad = float(remaining)
+        feedback.current_yaw_rad = float(current_yaw)
+        feedback.phase = str(phase)
+        goal_handle.publish_feedback(feedback)
+
+    @staticmethod
+    def _abort_pivot(goal_handle, result, message, yaw_error):
+        goal_handle.abort()
+        result.success = False
+        result.message = message
+        result.final_yaw_error_rad = float(max(0.0, yaw_error))
+        return result
+
     def _readiness_error(
         self,
         odom,
@@ -339,6 +624,13 @@ class FineMotionAdapter(Node):
 
     def _publish_stop(self) -> None:
         command = motion_command(0.0, self._accel_time_sec, self._decel_time_sec)
+        command.header.stamp = self.get_clock().now().to_msg()
+        self._command_pub.publish(command)
+
+    def _publish_steering_center(self) -> None:
+        command = steering_center_command(
+            self._accel_time_sec, self._decel_time_sec
+        )
         command.header.stamp = self.get_clock().now().to_msg()
         self._command_pub.publish(command)
 

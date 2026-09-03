@@ -43,7 +43,22 @@ class RelativeMoveTarget:
     pallet_exemption_yaw: Optional[float] = None
 
 
-TaskTarget = Union[PoseTarget, RelativeMoveTarget]
+@dataclass(frozen=True)
+class PivotTarget:
+    """One fixed-center turn to an absolute yaw in a map-like frame."""
+
+    name: str
+    x: float
+    y: float
+    yaw: float
+    max_speed_mps: float
+    timeout_sec: float
+    frame_id: str = 'map'
+    max_start_position_error_m: float = 0.35
+    retryable: bool = True
+
+
+TaskTarget = Union[PoseTarget, RelativeMoveTarget, PivotTarget]
 
 
 @dataclass(frozen=True)

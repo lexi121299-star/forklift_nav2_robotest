@@ -144,7 +144,11 @@ def generate_launch_description():
             'footprint_collision_cost_threshold': '254',
             'collision_check_horizon_sec': '0.6',
             'collision_check_time_step_sec': '0.1',
-            'pallet_exemption_reverse_only': 'false',
+            # Only logical reverse motion may ignore the selected pallet cells.
+            'pallet_exemption_reverse_only': 'true',
+            # Cover the pallet and its near scan returns, not the aisle.
+            'pallet_exemption_length_m': '1.40',
+            'pallet_exemption_width_m': '1.30',
             'wheel_base': '1.4',
             'rear_axle_x_offset': '0.0',
         }

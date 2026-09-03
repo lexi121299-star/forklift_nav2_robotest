@@ -18,6 +18,7 @@ def generate_launch_description():
     fork_move_to_action = LaunchConfiguration('fork_move_to_action')
     detect_pallet_offset_action = LaunchConfiguration('detect_pallet_offset_action')
     move_relative_action = LaunchConfiguration('move_relative_action')
+    pivot_relative_action = LaunchConfiguration('pivot_relative_action')
     enforce_pallet_approach_station = LaunchConfiguration(
         'enforce_pallet_approach_station'
     )
@@ -82,9 +83,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'move_relative_action', default_value='/forklift/fine_motion/move_relative'
         ),
+        DeclareLaunchArgument(
+            'pivot_relative_action', default_value='/forklift/fine_motion/pivot_relative'
+        ),
         DeclareLaunchArgument('enforce_pallet_approach_station', default_value='true'),
         DeclareLaunchArgument('rviz_goal_mode', default_value='navigation'),
-        DeclareLaunchArgument('pallet_standoff_distance_m', default_value='1.80'),
+        DeclareLaunchArgument('pallet_standoff_distance_m', default_value='-1.0'),
         DeclareLaunchArgument(
             'pallet_final_approach_distance_m', default_value='1.00'
         ),
@@ -128,6 +132,7 @@ def generate_launch_description():
                 'fork_move_to_action': fork_move_to_action,
                 'detect_pallet_offset_action': detect_pallet_offset_action,
                 'move_relative_action': move_relative_action,
+                'pivot_relative_action': pivot_relative_action,
                 'enforce_pallet_approach_station': enforce_pallet_approach_station,
                 'rviz_goal_mode': rviz_goal_mode,
                 'pallet_standoff_distance_m': pallet_standoff_distance_m,
