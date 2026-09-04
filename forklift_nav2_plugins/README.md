@@ -45,6 +45,10 @@ planner_server:
       start_tolerance: 1.2
       goal_tolerance: 0.5
       max_iterations: 0
+      # Greedily replace A* grid zigzags with footprint-checked straight segments.
+      astar_path_smoothing_enabled: true
+      astar_shortcut_max_lookahead: 400
+      astar_shortcut_cost_threshold: 128
       use_final_approach_orientation: true
       use_lattice_planner: true
       lattice_fallback_to_astar: false
@@ -106,6 +110,12 @@ controller_server:
       curvature_slowdown_enabled: true
       curvature_slowdown_lateral_accel: 0.12
       min_curvature_speed: 0.08
+      heading_slowdown_threshold: 0.35
+      heading_alignment_max_speed: 0.10
+      max_path_deviation: 0.75
+      candidate_score_abort_ratio: 4.0
+      candidate_score_abort_margin: 100.0
+      candidate_score_abort_cycles: 5
       safety_gate_enabled: true
       safety_emergency_stop_active: false
       safety_stop_distance: 0.55

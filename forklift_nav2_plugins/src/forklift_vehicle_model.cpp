@@ -60,7 +60,9 @@ double ForkliftVehicleModel::angularVelocity(const ForkliftVehicleCommand & comm
   double angular_velocity = 0.0;
   if (isPivotTurnCommand(clamped)) {
     const double turn_radius = std::max(0.05, parameters_.pivot_turn_radius);
-    angular_velocity = clamped.velocity / turn_radius *
+    const double yaw_direction =
+      parameters_.invert_pivot_yaw_direction ? -1.0 : 1.0;
+    angular_velocity = yaw_direction * clamped.velocity / turn_radius *
       (clamped.steering_angle >= 0.0 ? 1.0 : -1.0);
   } else {
     angular_velocity =

@@ -12,6 +12,7 @@ def generate_launch_description():
     recovery_twist_topic = LaunchConfiguration('recovery_twist_topic')
     localization_topic = LaunchConfiguration('localization_topic')
     localization_message_type = LaunchConfiguration('localization_message_type')
+    base_frame_id = LaunchConfiguration('base_frame_id')
     costmap_topic = LaunchConfiguration('costmap_topic')
     costmap_message_type = LaunchConfiguration('costmap_message_type')
     command_timeout_sec = LaunchConfiguration('command_timeout_sec')
@@ -26,6 +27,30 @@ def generate_launch_description():
     unknown_is_collision = LaunchConfiguration('unknown_is_collision')
     collision_check_horizon_sec = LaunchConfiguration('collision_check_horizon_sec')
     collision_check_time_step_sec = LaunchConfiguration('collision_check_time_step_sec')
+    dynamic_stop_reaction_time_sec = LaunchConfiguration('dynamic_stop_reaction_time_sec')
+    dynamic_stop_brake_deceleration_mps2 = LaunchConfiguration(
+        'dynamic_stop_brake_deceleration_mps2')
+    dynamic_stop_clearance_m = LaunchConfiguration('dynamic_stop_clearance_m')
+    scan_protection_enabled = LaunchConfiguration('scan_protection_enabled')
+    scan_topic = LaunchConfiguration('scan_topic')
+    scan_timeout_sec = LaunchConfiguration('scan_timeout_sec')
+    scan_required_range_m = LaunchConfiguration('scan_required_range_m')
+    scan_collision_sample_spacing_m = LaunchConfiguration(
+        'scan_collision_sample_spacing_m')
+    scan_collision_padding_m = LaunchConfiguration('scan_collision_padding_m')
+    scan_require_motion_fov_coverage = LaunchConfiguration(
+        'scan_require_motion_fov_coverage')
+    pallet_exemption_enabled = LaunchConfiguration('pallet_exemption_enabled')
+    pallet_exemption_pose_topic = LaunchConfiguration('pallet_exemption_pose_topic')
+    pallet_exemption_active_topic = LaunchConfiguration(
+        'pallet_exemption_active_topic')
+    pallet_exemption_timeout_sec = LaunchConfiguration('pallet_exemption_timeout_sec')
+    pallet_exemption_length_m = LaunchConfiguration('pallet_exemption_length_m')
+    pallet_exemption_width_m = LaunchConfiguration('pallet_exemption_width_m')
+    pallet_exemption_reverse_only = LaunchConfiguration(
+        'pallet_exemption_reverse_only')
+    pallet_exemption_cost_threshold = LaunchConfiguration(
+        'pallet_exemption_cost_threshold')
     max_forward_velocity_mps = LaunchConfiguration('max_forward_velocity_mps')
     max_reverse_velocity_mps = LaunchConfiguration('max_reverse_velocity_mps')
     max_recovery_velocity_mps = LaunchConfiguration('max_recovery_velocity_mps')
@@ -49,6 +74,7 @@ def generate_launch_description():
         DeclareLaunchArgument('recovery_twist_topic', default_value='/cmd_vel'),
         DeclareLaunchArgument('localization_topic', default_value='/odom'),
         DeclareLaunchArgument('localization_message_type', default_value='odometry'),
+        DeclareLaunchArgument('base_frame_id', default_value='base_link'),
         DeclareLaunchArgument('costmap_topic', default_value='/local_costmap/costmap_raw'),
         DeclareLaunchArgument('costmap_message_type', default_value='costmap_raw'),
         DeclareLaunchArgument('command_timeout_sec', default_value='0.5'),
@@ -61,12 +87,34 @@ def generate_launch_description():
         DeclareLaunchArgument('collision_check_enabled', default_value='true'),
         DeclareLaunchArgument(
             'footprint',
-            default_value='[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'),
+            default_value='[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'),
         DeclareLaunchArgument('footprint_sample_spacing', default_value='0.05'),
         DeclareLaunchArgument('footprint_collision_cost_threshold', default_value='253'),
         DeclareLaunchArgument('unknown_is_collision', default_value='true'),
         DeclareLaunchArgument('collision_check_horizon_sec', default_value='1.0'),
         DeclareLaunchArgument('collision_check_time_step_sec', default_value='0.1'),
+        DeclareLaunchArgument('dynamic_stop_reaction_time_sec', default_value='0.9'),
+        DeclareLaunchArgument('dynamic_stop_brake_deceleration_mps2', default_value='1.5'),
+        DeclareLaunchArgument('dynamic_stop_clearance_m', default_value='0.5'),
+        DeclareLaunchArgument('scan_protection_enabled', default_value='true'),
+        DeclareLaunchArgument('scan_topic', default_value='/scan'),
+        DeclareLaunchArgument('scan_timeout_sec', default_value='0.4'),
+        DeclareLaunchArgument('scan_required_range_m', default_value='8.0'),
+        DeclareLaunchArgument('scan_collision_sample_spacing_m', default_value='0.05'),
+        DeclareLaunchArgument('scan_collision_padding_m', default_value='0.05'),
+        DeclareLaunchArgument('scan_require_motion_fov_coverage', default_value='true'),
+        DeclareLaunchArgument('pallet_exemption_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'pallet_exemption_pose_topic',
+            default_value='/forklift/pallet_approach/exemption_pose'),
+        DeclareLaunchArgument(
+            'pallet_exemption_active_topic',
+            default_value='/forklift/pallet_approach/exemption_active'),
+        DeclareLaunchArgument('pallet_exemption_timeout_sec', default_value='0.5'),
+        DeclareLaunchArgument('pallet_exemption_length_m', default_value='0.50'),
+        DeclareLaunchArgument('pallet_exemption_width_m', default_value='1.30'),
+        DeclareLaunchArgument('pallet_exemption_reverse_only', default_value='true'),
+        DeclareLaunchArgument('pallet_exemption_cost_threshold', default_value='254'),
         DeclareLaunchArgument('max_forward_velocity_mps', default_value='0.45'),
         DeclareLaunchArgument('max_reverse_velocity_mps', default_value='0.15'),
         DeclareLaunchArgument('max_recovery_velocity_mps', default_value='0.10'),
@@ -79,7 +127,7 @@ def generate_launch_description():
         DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
         DeclareLaunchArgument('wheel_base', default_value='1.4'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
-        DeclareLaunchArgument('rear_axle_x_offset', default_value='-0.34'),
+        DeclareLaunchArgument('rear_axle_x_offset', default_value='0.0'),
         DeclareLaunchArgument(
             'pivot_steering_angle_rad',
             default_value='1.5707963267948966'),
@@ -97,6 +145,7 @@ def generate_launch_description():
                 'recovery_twist_topic': recovery_twist_topic,
                 'localization_topic': localization_topic,
                 'localization_message_type': localization_message_type,
+                'base_frame_id': base_frame_id,
                 'costmap_topic': costmap_topic,
                 'costmap_message_type': costmap_message_type,
                 'command_timeout_sec': command_timeout_sec,
@@ -112,6 +161,24 @@ def generate_launch_description():
                 'unknown_is_collision': unknown_is_collision,
                 'collision_check_horizon_sec': collision_check_horizon_sec,
                 'collision_check_time_step_sec': collision_check_time_step_sec,
+                'dynamic_stop_reaction_time_sec': dynamic_stop_reaction_time_sec,
+                'dynamic_stop_brake_deceleration_mps2': dynamic_stop_brake_deceleration_mps2,
+                'dynamic_stop_clearance_m': dynamic_stop_clearance_m,
+                'scan_protection_enabled': scan_protection_enabled,
+                'scan_topic': scan_topic,
+                'scan_timeout_sec': scan_timeout_sec,
+                'scan_required_range_m': scan_required_range_m,
+                'scan_collision_sample_spacing_m': scan_collision_sample_spacing_m,
+                'scan_collision_padding_m': scan_collision_padding_m,
+                'scan_require_motion_fov_coverage': scan_require_motion_fov_coverage,
+                'pallet_exemption_enabled': pallet_exemption_enabled,
+                'pallet_exemption_pose_topic': pallet_exemption_pose_topic,
+                'pallet_exemption_active_topic': pallet_exemption_active_topic,
+                'pallet_exemption_timeout_sec': pallet_exemption_timeout_sec,
+                'pallet_exemption_length_m': pallet_exemption_length_m,
+                'pallet_exemption_width_m': pallet_exemption_width_m,
+                'pallet_exemption_reverse_only': pallet_exemption_reverse_only,
+                'pallet_exemption_cost_threshold': pallet_exemption_cost_threshold,
                 'max_forward_velocity_mps': max_forward_velocity_mps,
                 'max_reverse_velocity_mps': max_reverse_velocity_mps,
                 'max_recovery_velocity_mps': max_recovery_velocity_mps,

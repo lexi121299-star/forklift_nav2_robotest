@@ -99,5 +99,46 @@ TEST(ForkliftMpcPreviewWindow, StartIndexPastEndUsesLastPoint)
   EXPECT_DOUBLE_EQ(window.points.front().state.x, 2.0);
 }
 
+TEST(ForkliftMpcPreviewWindow, DetectsConsumedTerminalWindow)
+{
+  const auto trajectory = makeStraightTrajectory(4);
+
+  const auto active = makeMpcPreviewWindowFromIndex(trajectory, 2, {5});
+  const auto consumed = makeMpcPreviewWindowFromIndex(trajectory, 3, {5});
+
+  EXPECT_FALSE(isMpcPreviewConsumed(active, trajectory.size()));
+  EXPECT_TRUE(isMpcPreviewConsumed(consumed, trajectory.size()));
+  EXPECT_FALSE(isMpcPreviewConsumed(MpcPreviewWindow{}, trajectory.size()));
+}
+
+TEST(ForkliftMpcPreviewWindow, TruncatesSolverPreviewBeforePivot)
+{
+  auto trajectory = makeStraightTrajectory(6);
+  trajectory[3].pivot_motion = true;
+  trajectory[4].pivot_motion = true;
+  const auto window = makeMpcPreviewWindowFromIndex(trajectory, 1, {5});
+
+  const auto truncated = truncateMpcPreviewBeforeFirstPivot(window);
+
+  ASSERT_TRUE(truncated.valid);
+  ASSERT_EQ(truncated.points.size(), 2u);
+  EXPECT_EQ(truncated.start_index, 1u);
+  EXPECT_EQ(truncated.end_index, 2u);
+  EXPECT_DOUBLE_EQ(truncated.length, 1.0);
+  EXPECT_FALSE(truncated.points.back().pivot_motion);
+}
+
+TEST(ForkliftMpcPreviewWindow, KeepsPreviewWhenPivotIsFirstPoint)
+{
+  auto trajectory = makeStraightTrajectory(3);
+  trajectory[0].pivot_motion = true;
+  const auto window = makeMpcPreviewWindowFromIndex(trajectory, 0, {3});
+
+  const auto unchanged = truncateMpcPreviewBeforeFirstPivot(window);
+
+  EXPECT_EQ(unchanged.points.size(), window.points.size());
+  EXPECT_EQ(unchanged.end_index, window.end_index);
+}
+
 }  // namespace
 }  // namespace forklift_nav2_plugins

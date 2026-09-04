@@ -1,0 +1,68 @@
+forklift_task_manager:
+  ros__parameters:
+    # Interpret RViz /goal_pose as the pallet pose, not the vehicle stop pose.
+    rviz_goal_mode: pallet_approach
+
+    # If an RViz Nav2 Goal client accidentally also sends NavigateToPose,
+    # cancel it before calculating and starting the pallet maneuver.
+    cancel_external_nav2_goals_on_pallet_goal: true
+
+    # The RViz arrow points from the pallet toward the free aisle.
+    pallet_arrow_points_outward: true
+
+    # XFL201 forks are behind base_link, on the vehicle -X side.
+    pallet_forks_on_negative_x: true
+
+    # A negative legacy standoff derives the base stop from fork-tip geometry.
+    pallet_standoff_distance_m: -1.0
+    pallet_fork_tip_offset_m: 1.504
+    pallet_stop_clearance_m: 0.30
+
+    # A* aligns the vehicle outside the stop pose, then MoveRelative covers
+    # this final straight distance. It is sent as a negative distance for
+    # rear-fork vehicles.
+    pallet_final_approach_distance_m: 1.00
+    pallet_alignment_runup_distance_m: 0.60
+    pallet_final_approach_speed_mps: 0.10
+    pallet_final_approach_timeout_sec: 60.0
+    pallet_max_start_position_error_m: 0.35
+    pallet_max_start_heading_error_rad: 0.20
+    pallet_base_frame_id: base_link
+
+    # Search 2.5-4.0 m first and use 4.0-5.0 m only as a fallback. The
+    # pallet turn keepout below raises the effective minimum to a safe value.
+    pallet_turn_min_distance_m: 2.50
+    pallet_turn_preferred_max_distance_m: 4.00
+    pallet_turn_max_distance_m: 5.00
+    pallet_turn_distance_step_m: 0.25
+    pallet_turn_lateral_max_m: 1.50
+    pallet_turn_lateral_step_m: 0.25
+    pallet_turn_runup_distance_m: 0.60
+    pallet_turn_clearance_padding_m: 0.10
+    # This covers the clicked pallet point, pallet body, and localisation
+    # margin. The XFL201 outer turn envelope is currently Wa=1.743 m;
+    # retain a small margin until the low-speed turn envelope is calibrated.
+    pallet_turn_keepout_radius_m: 1.85
+    pallet_turn_collision_cost_threshold: 254
+    pallet_turn_blocked_wait_sec: 5.0
+    # Accept the two staging navigation segments once the vehicle is close and
+    # stationary, even if Nav2 leaves its action active near the path endpoint.
+    pallet_nav_arrival_tolerance_m: 0.35
+    pallet_nav_arrival_speed_mps: 0.03
+    pallet_nav_arrival_settle_sec: 0.30
+    pallet_pivot_speed_mps: 0.12
+    pallet_pivot_timeout_sec: 60.0
+    pallet_vehicle_footprint: "[[1.666, 0.600], [1.666, -0.600], [-1.504, -0.600], [-1.504, 0.600]]"
+    pallet_global_costmap_topic: /global_costmap/costmap_raw
+    pallet_local_costmap_topic: /local_costmap/costmap_raw
+
+    # The selected-pallet exemption is armed only for the final straight
+    # approach after the pallet-facing pivot, then restricted to this box.
+    pallet_exemption_activation_distance_m: 4.0
+    pallet_exemption_deactivation_distance_m: 4.5
+    pallet_exemption_length_m: 1.40
+    pallet_exemption_width_m: 1.30
+
+    # Check several locally clear staging candidates with ComputePathToPose.
+    # The first globally reachable candidate is used for the pallet task.
+    pallet_reachability_max_candidates: 32

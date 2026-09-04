@@ -46,4 +46,40 @@ MpcPreviewWindow makeMpcPreviewWindowFromIndex(
   return window;
 }
 
+bool isMpcPreviewConsumed(
+  const MpcPreviewWindow & window,
+  std::size_t trajectory_size)
+{
+  if (!window.valid || trajectory_size == 0u) {
+    return false;
+  }
+  return window.points.size() == 1u ||
+         window.length <= 1e-6 ||
+         window.start_index + 1u >= trajectory_size;
+}
+
+MpcPreviewWindow truncateMpcPreviewBeforeFirstPivot(
+  const MpcPreviewWindow & window)
+{
+  if (!window.valid || window.points.empty()) {
+    return window;
+  }
+  const auto pivot = std::find_if(
+    window.points.begin(), window.points.end(),
+    [](const MpcTrajectoryPoint & point) {return point.pivot_motion;});
+  if (pivot == window.points.end() || pivot == window.points.begin()) {
+    return window;
+  }
+
+  MpcPreviewWindow truncated = window;
+  const auto keep_count = static_cast<std::size_t>(
+    std::distance(window.points.begin(), pivot));
+  truncated.points.resize(keep_count);
+  truncated.end_index = truncated.start_index + keep_count - 1u;
+  truncated.length = std::max(
+    0.0,
+    truncated.points.back().distance - truncated.points.front().distance);
+  return truncated;
+}
+
 }  // namespace forklift_nav2_plugins

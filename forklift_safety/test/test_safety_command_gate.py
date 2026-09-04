@@ -4,16 +4,24 @@ import pytest
 from forklift_msgs.msg import ForkliftControlCommand
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid
+from sensor_msgs.msg import LaserScan
 
 from forklift_safety.safety_command_gate import (
+    PalletExemptionZone,
     apply_drive_envelope,
+    angle_in_scan_fov,
     clamp_control_command,
     costmap_error,
     costmap_stop_reason,
     direction,
+    dynamic_stopping_distance,
     footprint_collision_at_pose,
     footprint_sweep_collision,
+    is_steering_only_command,
     parse_footprint,
+    point_in_pallet_exemption,
+    scan_stop_reason,
+    scan_sweep_collision,
     predicted_poses_for_command,
     recovery_command_from_twist,
     stop_command,
@@ -50,6 +58,26 @@ def test_direction_rejects_ambiguous_commands():
     command.forward = False
     command.reverse = True
     assert direction(command) == -1
+
+
+def test_steering_only_command_allows_enabled_zero_traction():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.brake = False
+    command.steering_angle_rad = 0.0
+
+    assert is_steering_only_command(command) is True
+
+    command.drive_rpm = 1.0
+    assert is_steering_only_command(command) is False
+
+    command.drive_rpm = 0.0
+    command.forward = True
+    assert is_steering_only_command(command) is False
+
+    command.forward = False
+    command.lift_valve_ma = 10.0
+    assert is_steering_only_command(command) is False
 
 
 def test_stop_command_brakes_and_disables_motion():
@@ -200,13 +228,103 @@ def test_costmap_stop_reason_blocks_missing_timeout_and_invalid_data():
     assert costmap_stop_reason(False, 2.0, False, 'empty dimensions', 0.5) == ''
 
 
-def test_parse_footprint_matches_foxy_yaml_string():
-    footprint = parse_footprint(
-        '[[0.843, 0.58], [0.843, -0.58], [-2.043, -0.58], [-2.043, 0.58]]'
+def test_dynamic_stopping_distance_matches_three_meter_per_second_design_case():
+    assert dynamic_stopping_distance(3.0, 0.9, 1.5, 0.5) == pytest.approx(6.2)
+
+
+def test_scan_stop_reason_rejects_missing_stale_or_short_range_scan():
+    assert scan_stop_reason(True, 0.0, False, 0.0, 0.25, 8.0) == 'scan missing'
+    assert scan_stop_reason(True, 0.3, True, 8.0, 0.25, 8.0) == 'scan timeout'
+    assert 'below required 8.00 m' in scan_stop_reason(True, 0.1, True, 3.0, 0.25, 8.0)
+    assert scan_stop_reason(True, 0.1, True, 8.0, 0.25, 8.0) == ''
+
+
+def test_scan_fov_accepts_reverse_at_negative_pi_boundary():
+    scan = LaserScan()
+    scan.angle_min = -math.pi
+    scan.angle_max = 2.141592653589793
+
+    assert angle_in_scan_fov(0.0, scan, 0.0) is True
+    assert angle_in_scan_fov(math.pi, scan, 0.0) is True
+
+
+def test_scan_sweep_blocks_obstacle_inside_predicted_footprint():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.forward = True
+    command.velocity_mps = 1.0
+    footprint = parse_footprint('[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]')
+
+    collision, reason = scan_sweep_collision(
+        [(0.4, 0.0)],
+        footprint,
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.5,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
     )
 
-    assert footprint[0] == pytest.approx((0.843, 0.58))
-    assert footprint[2] == pytest.approx((-2.043, -0.58))
+    assert collision is True
+    assert reason == 'scan footprint sweep collision'
+
+
+def test_scan_sweep_only_exempts_the_selected_pallet_rectangle():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.reverse = True
+    command.velocity_mps = 0.1
+    footprint = parse_footprint('[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]')
+    pallet = PalletExemptionZone(
+        x=-0.3,
+        y=0.0,
+        yaw=0.0,
+        half_length=0.1,
+        half_width=0.05,
+    )
+
+    collision, _reason = scan_sweep_collision(
+        [(-0.3, 0.0)],
+        footprint,
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.3,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
+        pallet_exemption=pallet,
+    )
+    assert collision is False
+
+    collision, reason = scan_sweep_collision(
+        [(-0.3, 0.09)],
+        footprint,
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.3,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
+        pallet_exemption=pallet,
+    )
+    assert collision is True
+    assert reason == 'scan footprint sweep collision'
+
+
+def test_parse_footprint_matches_foxy_yaml_string():
+    footprint = parse_footprint(
+        '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'
+    )
+
+    assert footprint[0] == pytest.approx((1.709, 0.610))
+    assert footprint[2] == pytest.approx((-1.590, -0.610))
 
 
 def test_footprint_collision_at_pose_blocks_lethal_edge_cell():
@@ -225,6 +343,61 @@ def test_footprint_collision_at_pose_blocks_lethal_edge_cell():
 
     assert collision is True
     assert reason.startswith('footprint collision: cost')
+
+
+def test_pallet_exemption_ignores_only_lethal_cells_inside_target_box():
+    costmap = make_costmap()
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+    set_cost(costmap, 0.1, 0.0, 100)
+    zone = PalletExemptionZone(
+        x=0.1,
+        y=0.0,
+        yaw=0.0,
+        half_length=0.05,
+        half_width=0.15,
+    )
+
+    collision, reason = footprint_collision_at_pose(
+        costmap,
+        footprint,
+        (0.0, 0.0, 0.0),
+        sample_spacing=0.05,
+        cost_threshold=100,
+        unknown_is_collision=True,
+        pallet_exemption=zone,
+    )
+
+    assert collision is False
+    assert reason == 'footprint clear: max cost 100'
+
+    set_cost(costmap, -0.1, 0.0, 100)
+    collision, reason = footprint_collision_at_pose(
+        costmap,
+        footprint,
+        (0.0, 0.0, 0.0),
+        sample_spacing=0.05,
+        cost_threshold=100,
+        unknown_is_collision=True,
+        pallet_exemption=zone,
+    )
+
+    assert collision is True
+    assert reason == 'footprint collision: cost 100 >= 100'
+
+
+def test_pallet_exemption_rectangle_respects_orientation():
+    zone = PalletExemptionZone(
+        x=2.0,
+        y=3.0,
+        yaw=math.pi / 2.0,
+        half_length=0.3,
+        half_width=0.6,
+    )
+
+    assert point_in_pallet_exemption((2.0, 3.25), zone) is True
+    assert point_in_pallet_exemption((2.7, 3.0), zone) is False
 
 
 def test_footprint_collision_can_treat_unknown_as_blocked():

@@ -3,7 +3,7 @@
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import yaml
 
@@ -24,12 +24,50 @@ class PoseTarget:
 
 
 @dataclass(frozen=True)
+class RelativeMoveTarget:
+    """One straight, low-speed motion delegated to MoveRelative."""
+
+    name: str
+    distance_m: float
+    max_speed_mps: float
+    timeout_sec: float
+    retryable: bool = False
+    expected_start_x: Optional[float] = None
+    expected_start_y: Optional[float] = None
+    expected_start_yaw: Optional[float] = None
+    frame_id: str = 'map'
+    max_start_position_error_m: float = 0.35
+    max_start_heading_error_rad: float = 0.20
+    pallet_exemption_x: Optional[float] = None
+    pallet_exemption_y: Optional[float] = None
+    pallet_exemption_yaw: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class PivotTarget:
+    """One fixed-center turn to an absolute yaw in a map-like frame."""
+
+    name: str
+    x: float
+    y: float
+    yaw: float
+    max_speed_mps: float
+    timeout_sec: float
+    frame_id: str = 'map'
+    max_start_position_error_m: float = 0.35
+    retryable: bool = True
+
+
+TaskTarget = Union[PoseTarget, RelativeMoveTarget, PivotTarget]
+
+
+@dataclass(frozen=True)
 class RouteDefinition:
     """Validated route data ready for sequential execution."""
 
     name: str
     loop: bool
-    targets: Tuple[PoseTarget, ...]
+    targets: Tuple[TaskTarget, ...]
 
 
 def _finite_float(value: Any, field: str) -> float:

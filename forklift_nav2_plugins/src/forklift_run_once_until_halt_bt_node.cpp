@@ -1,8 +1,11 @@
+#include <memory>
 #include <string>
 
 #include "behaviortree_cpp_v3/bt_factory.h"
 #include "behaviortree_cpp_v3/control_node.h"
 #include "behaviortree_cpp_v3/decorator_node.h"
+#include "forklift_msgs/msg/forklift_control_command.hpp"
+#include "rclcpp/rclcpp.hpp"
 
 namespace forklift_nav2_plugins
 {
@@ -10,17 +13,10 @@ namespace forklift_nav2_plugins
 class RunOnceUntilHalt : public BT::DecoratorNode
 {
 public:
-  RunOnceUntilHalt(
-    const std::string & name,
-    const BT::NodeConfiguration & config)
-  : BT::DecoratorNode(name, config)
-  {
-  }
+  RunOnceUntilHalt(const std::string & name, const BT::NodeConfiguration & config)
+  : BT::DecoratorNode(name, config) {}
 
-  static BT::PortsList providedPorts()
-  {
-    return {};
-  }
+  static BT::PortsList providedPorts() {return {};}
 
   BT::NodeStatus tick() override
   {
@@ -53,26 +49,39 @@ private:
 class PlanOnceSequence : public BT::ControlNode
 {
 public:
-  PlanOnceSequence(
-    const std::string & name,
-    const BT::NodeConfiguration & config)
+  PlanOnceSequence(const std::string & name, const BT::NodeConfiguration & config)
   : BT::ControlNode(name, config)
   {
+    node_ = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
+    std::string stop_command_topic = "/forklift/control_cmd_raw";
+    getInput("stop_command_topic", stop_command_topic);
+    stop_command_pub_ =
+      node_->create_publisher<forklift_msgs::msg::ForkliftControlCommand>(
+      stop_command_topic, rclcpp::QoS(10));
   }
 
   static BT::PortsList providedPorts()
   {
-    return {};
+    return {BT::InputPort<std::string>("stop_command_topic")};
   }
 
   BT::NodeStatus tick() override
   {
     if (children_nodes_.size() != 2) {
+      publishStop();
       return BT::NodeStatus::FAILURE;
     }
 
     while (current_child_idx_ < children_nodes_.size()) {
-      const auto child_status = children_nodes_[current_child_idx_]->executeTick();
+      BT::NodeStatus child_status;
+      try {
+        child_status = children_nodes_[current_child_idx_]->executeTick();
+      } catch (...) {
+        haltChildren();
+        current_child_idx_ = 0;
+        publishStop();
+        throw;
+      }
 
       if (child_status == BT::NodeStatus::SUCCESS) {
         ++current_child_idx_;
@@ -85,8 +94,9 @@ public:
       }
 
       if (child_status == BT::NodeStatus::FAILURE) {
-        current_child_idx_ = 0;
         resetChildren();
+        current_child_idx_ = 0;
+        publishStop();
         return BT::NodeStatus::FAILURE;
       }
 
@@ -100,18 +110,37 @@ public:
 
   void halt() override
   {
+    haltChildren();
     current_child_idx_ = 0;
+    publishStop();
     BT::ControlNode::halt();
   }
 
 private:
+  void publishStop()
+  {
+    if (!stop_command_pub_) {
+      return;
+    }
+
+    forklift_msgs::msg::ForkliftControlCommand command;
+    command.header.stamp = node_->now();
+    command.enable = true;
+    command.brake = true;
+    stop_command_pub_->publish(command);
+  }
+
   std::size_t current_child_idx_{0};
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Publisher<forklift_msgs::msg::ForkliftControlCommand>::SharedPtr
+    stop_command_pub_;
 };
 
-}  // namespace forklift_nav2_plugins
+} // namespace forklift_nav2_plugins
 
-BT_REGISTER_NODES(factory)
-{
-  factory.registerNodeType<forklift_nav2_plugins::RunOnceUntilHalt>("RunOnceUntilHalt");
-  factory.registerNodeType<forklift_nav2_plugins::PlanOnceSequence>("ForkliftPlanOnceSequence");
+BT_REGISTER_NODES(factory) {
+  factory.registerNodeType<forklift_nav2_plugins::RunOnceUntilHalt>(
+    "RunOnceUntilHalt");
+  factory.registerNodeType<forklift_nav2_plugins::PlanOnceSequence>(
+    "ForkliftPlanOnceSequence");
 }

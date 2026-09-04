@@ -11,6 +11,7 @@
 
   <depend>forklift_msgs</depend>
   <depend>forklift_oru_planner</depend>
+  <depend>behaviortree_cpp_v3</depend>
   <depend>geometry_msgs</depend>
   <depend>nav2_core</depend>
   <depend>nav2_costmap_2d</depend>
@@ -19,6 +20,7 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
+  <depend>std_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_ros</depend>

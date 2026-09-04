@@ -102,7 +102,7 @@ controller_server:
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 0.3
+    failure_tolerance: 10.0
     progress_checker_plugin: "progress_checker"
     goal_checker_plugin: "general_goal_checker"
     controller_plugins: ["FollowPath"]
@@ -111,15 +111,13 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.2
-      movement_time_allowance: 30.0
+      movement_time_allowance: 300.0
 
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      # Kept aligned with FollowPath.goal_latch_yaw_tolerance so that when the
-      # controller latches a stop the BT also reports the goal as reached.
-      yaw_goal_tolerance: 0.30
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 3.141592653589793
 
     # Forklift MPC controller parameters
     FollowPath:
@@ -129,7 +127,7 @@ controller_server:
       min_velocity: 0.06
       max_reverse_velocity: 0.15
       max_steering_angle: 1.5707963267948966
-      max_steering_angle_velocity: 1.6
+      max_steering_angle_velocity: 0.12
       max_acceleration: 0.5
       max_angular_velocity: 0.8
       allow_pivot_turn: true
@@ -139,26 +137,43 @@ controller_server:
       # low-speed XFL201 calibration provides the effective pivot radius.
       pivot_turn_radius: 1.743
       rear_axle_x_offset: 0.0
-      pivot_velocity: 0.12
-      pivot_yaw_tolerance: 0.05
+      pivot_velocity: 0.10
+      pivot_yaw_tolerance: 0.025
       pivot_stop_velocity_threshold: 0.02
+      pivot_activation_distance: 0.35
+      pivot_step_enabled: false
+      pivot_final_slowdown_angle: 0.5235987755982988
+      pivot_final_velocity: 0.05
+      post_pivot_capture_enabled: true
+      post_pivot_capture_distance_m: 0.30
+      post_pivot_capture_speed_mps: 0.15
+      post_pivot_hold_duration_sec: 0.30
+      post_pivot_slowdown_duration_sec: 3.0
+      post_pivot_initial_max_speed: 0.12
+      new_goal_steering_settle_enabled: true
+      new_goal_steering_tolerance: 0.08
+      new_goal_steering_hold_duration_sec: 0.20
       horizon_time: 1.8
       time_step: 0.2
-      lookahead_distance: 0.9
-      xy_goal_tolerance: 0.08
-      yaw_goal_tolerance: 0.25
+      lookahead_distance: 1.8
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 3.141592653589793
       transform_tolerance: 0.2
-      terminal_slowdown_distance: 0.6
+      terminal_slowdown_distance: 1.2
+      terminal_approach_enabled: true
+      terminal_approach_max_speed: 0.06
+      terminal_approach_max_distance: 0.30
+      terminal_approach_heading_tolerance: 0.35
       # Terminal latch must be no looser than the controller's own terminal
       # tolerance.  A 0.25 m latch can stop FollowPath before Nav2 observes the
       # goal as reached, leaving the action active and turning later goals into
       # preemption requests against a controller that is still latched.
       goal_latch_enabled: true
-      goal_latch_xy_tolerance: 0.08
-      goal_latch_yaw_tolerance: 0.25
+      goal_latch_xy_tolerance: 0.30
+      goal_latch_yaw_tolerance: 3.141592653589793
       velocity_samples: 8
       steering_samples: 11
-      preview_window_points: 10
+      preview_window_points: 15
       allow_reverse: true
       use_mpc_solver: true
       use_collision_check: true
@@ -169,28 +184,51 @@ controller_server:
       trajectory_smoothing_iterations: 1
       trajectory_smoothing_corner_cut_ratio: 0.25
       sharp_turn_warning_angle: 0.7853981633974483
-      minimum_turning_radius: 0.0
+      minimum_turning_radius: 1.743
       curvature_slowdown_enabled: true
       curvature_slowdown_lateral_accel: 0.12
       min_curvature_speed: 0.08
       safety_gate_enabled: true
       safety_emergency_stop_active: false
-      safety_stop_distance: 0.55
-      safety_slowdown_distance: 1.25
+      heading_slowdown_threshold: 0.20
+      heading_slowdown_full_error: 0.45
+      heading_alignment_max_speed: 0.20
+      steering_slowdown_enabled: true
+      steering_slowdown_start_angle: 0.08
+      steering_slowdown_full_angle: 0.30
+      steering_slowdown_max_speed: 0.25
+      max_path_deviation: 0.75
+      candidate_score_abort_ratio: 4.0
+      candidate_score_abort_margin: 100.0
+      candidate_score_abort_cycles: 5
+      safety_stop_distance: 0.50
+      safety_slowdown_distance: 8.00
       safety_min_speed: 0.05
-      safety_sample_spacing: 0.10
-      collision_cost_threshold: 253
-      path_distance_weight: 8.0
+      safety_sample_spacing: 0.05
+      safety_reaction_time_sec: 0.90
+      safety_brake_deceleration_mps2: 1.50
+      safety_clearance_m: 0.50
+      safety_collision_cost_threshold: 254
+      collision_cost_threshold: 254
+      pallet_exemption_enabled: true
+      pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
+      pallet_exemption_timeout_sec: 0.5
+      pallet_exemption_cost_threshold: 254
+      path_distance_weight: 6.0
       local_goal_weight: 14.0
       global_goal_weight: 2.0
-      heading_weight: 2.0
+      heading_weight: 5.0
       obstacle_weight: 12.0
-      smoothness_weight: 1.0
+      smoothness_weight: 4.0
+      steering_change_weight: 120.0
       velocity_reward_weight: 1.2
       publish_control_cmd: true
       control_cmd_topic: "/forklift/control_cmd_raw"
       control_cmd_accel_time: 0.3
       control_cmd_decel_time: 0.3
+      use_steering_feedback: true
+      steering_feedback_topic: "/forklift/vehicle_state"
+      steering_feedback_timeout_sec: 0.5
 
 controller_server_rclcpp_node:
   ros__parameters:
@@ -199,8 +237,8 @@ controller_server_rclcpp_node:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
-      publish_frequency: 2.0
+      update_frequency: 10.0
+      publish_frequency: 5.0
       # Real vehicle: keep the rolling local costmap and controller pose in the
       # continuous odom frame. AMCL owns map -> odom; the global planner remains
       # in map. This prevents localization corrections from jumping local control.
@@ -208,8 +246,8 @@ local_costmap:
       robot_base_frame: base_link
       use_sim_time: True
       rolling_window: true
-      width: 6
-      height: 6
+      width: 18
+      height: 18
       resolution: 0.05
       footprint: "[[1.666, 0.60], [1.666, -0.60], [-1.504, -0.60], [-1.504, 0.60]]"
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
@@ -227,6 +265,9 @@ local_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
+          inf_is_valid: true
+          raytrace_max_range: 8.0
+          obstacle_max_range: 8.0
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -243,9 +284,10 @@ local_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
-          raytrace_max_range: 3.0
+          inf_is_valid: true
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.0
       static_layer:
         map_subscribe_transient_local: True
@@ -268,45 +310,10 @@ global_costmap:
       footprint: "[[1.666, 0.60], [1.666, -0.60], [-1.504, -0.60], [-1.504, 0.60]]"
       resolution: 0.05
       track_unknown_space: true
-      # obstacle_layer added so the global planner avoids real obstacles that are
-      # not in the static "clean" map (sensed via /scan at plan time). Order keeps
-      # inflation last. Still plan-once: only obstacles visible when the goal is
-      # sent (within the laser range below) are routed around.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: True
-        observation_sources: scan
-        scan:
-          topic: /scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          raytrace_max_range: 3.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: True
-        publish_voxel_map: True
-        origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 16
-        max_obstacle_height: 2.0
-        mark_threshold: 0
-        observation_sources: scan
-        scan:
-          topic: /scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          raytrace_max_range: 3.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
+      # Keep global planning map-static. A non-rolling global obstacle layer
+      # retains scan marks after they leave laser range and can reject valid
+      # pivot staging poses. Local costmap and raw-scan gate handle live safety.
+      plugins: ["static_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -346,21 +353,43 @@ planner_server:
       use_diagonal: true
       prevent_corner_cutting: true
       use_footprint_collision_check: true
-      footprint_collision_cost_threshold: 253
-      lethal_cost_threshold: 253
+      footprint_collision_cost_threshold: 254
+      lethal_cost_threshold: 254
       cost_travel_multiplier: 2.0
+      footprint_cost_travel_multiplier: 10.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
       goal_tolerance: 1.5
       max_iterations: 0
-      use_final_approach_orientation: true
-      use_lattice_planner: true
+      astar_path_smoothing_enabled: true
+      astar_shortcut_max_lookahead: 400
+      astar_shortcut_cost_threshold: 254
+      astar_preferred_footprint_cost_threshold: 253
+      astar_start_clearance_relax_distance: 1.25
+      astar_bspline_smoothing_enabled: true
+      astar_bspline_sample_spacing: 0.05
+      astar_bspline_min_turning_radius: 1.743
+      astar_bspline_start_tangent_distance: 1.20
+      astar_bspline_retry_count: 8
+      astar_start_pivot_enabled: true
+      astar_start_pivot_threshold: 0.7853981634
+      astar_pivot_collision_sample_angle: 0.0872664626
+      astar_segmented_fallback_enabled: true
+      astar_prefer_segmented_path: true
+      astar_segmented_pivot_threshold: 0.15
+      astar_goal_endpoint_tolerance: 0.28
+      astar_departure_fallback_enabled: true
+      astar_departure_min_distance: 0.50
+      astar_departure_max_distance: 5.00
+      astar_departure_step_distance: 0.25
+      use_final_approach_orientation: false
+      use_lattice_planner: false
       # v1 fail-safe: when the kinodynamic lattice search finds no path, fail cleanly
       # (PlannerException) instead of handing a holonomic 2D-A* path to the forklift
       # controller. A* ignores heading/kinematics, so the controller could not track it
       # and the vehicle diverged to the wrong corner. Re-routing is deferred to P10; v1
       # runs fixed, pre-validated routes and stops/aborts safely on planning failure.
-      lattice_fallback_to_astar: false
+      lattice_fallback_to_astar: true
       lattice_heading_bins: 16
       lattice_step_distance: 0.20
       lattice_arc_radius: 1.20

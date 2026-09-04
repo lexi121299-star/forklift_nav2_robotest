@@ -1,7 +1,11 @@
 import inspect
 
 from forklift_task_manager.task_manager_node import ForkliftTaskManager
-from forklift_task_manager.route_model import PoseTarget, RouteDefinition
+from forklift_task_manager.route_model import (
+    PoseTarget,
+    RelativeMoveTarget,
+    RouteDefinition,
+)
 from forklift_task_manager.state_machine import (
     FAILED,
     IDLE,
@@ -143,3 +147,20 @@ def test_navigation_failure_retries_then_fails():
     action_client.complete_latest(False, 'planner failed')
     assert machine.state == FAILED
     assert machine.reason == 'planner failed after 2 retries'
+
+
+def test_relative_motion_failure_is_not_retried():
+    action_client = MockActionClient()
+    route = RouteDefinition(
+        name='fine_motion',
+        loop=False,
+        targets=(RelativeMoveTarget('reverse', -1.0, 0.1, 20.0),),
+    )
+    machine = TaskStateMachine(action_client, max_retries=2)
+
+    machine.start(route)
+    action_client.complete_latest(False, 'no progress')
+
+    assert machine.state == FAILED
+    assert machine.reason == 'no progress'
+    assert len(action_client.sent) == 1

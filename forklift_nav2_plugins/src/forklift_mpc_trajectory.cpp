@@ -68,6 +68,35 @@ bool pivotSegment(
   return rear_axle_motion <= options.pivot_max_rear_axle_motion;
 }
 
+bool isProtectedPivotDeparturePose(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
+  std::size_t index,
+  const MpcTrajectoryOptions & options)
+{
+  if (!options.detect_pivot_turns ||
+    options.pivot_departure_capture_distance <= 1e-6 || index == 0u)
+  {
+    return false;
+  }
+
+  std::size_t departure_start = index;
+  while (departure_start > 0u &&
+    !pivotSegment(poses[departure_start - 1u], poses[departure_start], options))
+  {
+    --departure_start;
+  }
+  if (departure_start == 0u) {
+    return false;
+  }
+
+  double departure_distance = 0.0;
+  for (std::size_t i = departure_start + 1u; i <= index; ++i) {
+    departure_distance += distanceBetween(
+      poses[i - 1u].pose.position, poses[i].pose.position);
+  }
+  return departure_distance <= options.pivot_departure_capture_distance + 1e-9;
+}
+
 bool hasLocalYawChange(
   const std::vector<geometry_msgs::msg::PoseStamped> & poses,
   std::size_t index,
@@ -114,19 +143,25 @@ double signedCurvature(
 
 double steeringFromCurvature(
   double curvature,
-  const ForkliftVehicleModel & vehicle_model)
+  const ForkliftVehicleModel & vehicle_model,
+  double max_allowed_curvature,
+  bool pivot_motion)
 {
   const auto & parameters = vehicle_model.parameters();
-  if (parameters.allow_pivot_turn) {
-    const double pivot_curvature = 1.0 / std::max(0.05, parameters.pivot_turn_radius);
-    if (std::abs(curvature) >= pivot_curvature) {
-      return curvature >= 0.0 ?
-             parameters.pivot_steering_angle :
-             -parameters.pivot_steering_angle;
-    }
+  if (pivot_motion && parameters.allow_pivot_turn) {
+    return curvature >= 0.0 ?
+           parameters.pivot_steering_angle :
+           -parameters.pivot_steering_angle;
   }
+
+  // A spatial A* corner is not a pivot maneuver. Clamp it to the configured
+  // road-going curvature instead of silently requesting the +/-90 degree pivot
+  // steering used for a same-position heading change.
+  const double road_curvature = max_allowed_curvature > 0.0 ?
+    std::clamp(curvature, -max_allowed_curvature, max_allowed_curvature) :
+    curvature;
   return std::clamp(
-    std::atan(parameters.wheel_base * curvature),
+    std::atan(parameters.wheel_base * road_curvature),
     -parameters.max_steering_angle,
     parameters.max_steering_angle);
 }
@@ -230,7 +265,8 @@ std::vector<geometry_msgs::msg::PoseStamped> smoothPathPoses(
       const auto & current = smoothed[i];
       const auto & following = smoothed[i + 1];
 
-      if (distanceBetween(previous.pose.position, current.pose.position) < 1e-9 ||
+      if (isProtectedPivotDeparturePose(smoothed, i, options) ||
+        distanceBetween(previous.pose.position, current.pose.position) < 1e-9 ||
         distanceBetween(current.pose.position, following.pose.position) < 1e-9)
       {
         next.push_back(current);
@@ -248,37 +284,59 @@ std::vector<geometry_msgs::msg::PoseStamped> smoothPathPoses(
   return smoothed;
 }
 
-std::vector<geometry_msgs::msg::PoseStamped> resamplePathPoses(
-  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
-  const MpcTrajectoryOptions & options)
+void appendDistinctPose(
+  std::vector<geometry_msgs::msg::PoseStamped> & output,
+  const geometry_msgs::msg::PoseStamped & pose)
 {
-  if (!options.enable_resampling || options.resample_spacing <= 1e-6 || poses.size() < 2) {
-    return poses;
+  if (output.empty() ||
+    distanceBetween(output.back().pose.position, pose.pose.position) > 1e-9 ||
+    std::abs(
+      ForkliftVehicleModel::normalizeAngle(
+        poseYaw(pose.pose) - poseYaw(output.back().pose))) > 1e-6)
+  {
+    output.push_back(pose);
+  }
+}
+
+std::vector<geometry_msgs::msg::PoseStamped> resampleMotionBlock(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
+  std::size_t first,
+  std::size_t last,
+  double spacing)
+{
+  std::vector<geometry_msgs::msg::PoseStamped> resampled;
+  if (first > last || last >= poses.size()) {
+    return resampled;
+  }
+  if (first == last) {
+    resampled.push_back(poses[first]);
+    return resampled;
   }
 
   std::vector<double> cumulative;
-  cumulative.reserve(poses.size());
+  cumulative.reserve(last - first + 1u);
   cumulative.push_back(0.0);
-
-  for (std::size_t i = 1; i < poses.size(); ++i) {
+  for (std::size_t i = first + 1u; i <= last; ++i) {
     cumulative.push_back(
       cumulative.back() + distanceBetween(poses[i - 1].pose.position, poses[i].pose.position));
   }
 
   const double total_length = cumulative.back();
-  if (total_length <= options.resample_spacing) {
-    return poses;
+  if (total_length <= spacing) {
+    for (std::size_t i = first; i <= last; ++i) {
+      appendDistinctPose(resampled, poses[i]);
+    }
+    return resampled;
   }
 
-  std::vector<geometry_msgs::msg::PoseStamped> resampled;
   resampled.reserve(
-    static_cast<std::size_t>(std::ceil(total_length / options.resample_spacing)) + 1);
-  resampled.push_back(poses.front());
+    static_cast<std::size_t>(std::ceil(total_length / spacing)) + 1u);
+  resampled.push_back(poses[first]);
 
-  std::size_t segment_index = 1;
-  for (double target_distance = options.resample_spacing;
+  std::size_t segment_index = 1u;
+  for (double target_distance = spacing;
     target_distance < total_length;
-    target_distance += options.resample_spacing)
+    target_distance += spacing)
   {
     while (segment_index + 1 < cumulative.size() && cumulative[segment_index] < target_distance) {
       ++segment_index;
@@ -291,11 +349,48 @@ std::vector<geometry_msgs::msg::PoseStamped> resamplePathPoses(
     }
 
     const double ratio = (target_distance - segment_start_distance) / segment_length;
-    resampled.push_back(interpolatePose(poses[segment_index - 1], poses[segment_index], ratio));
+    resampled.push_back(
+      interpolatePose(
+        poses[first + segment_index - 1u],
+        poses[first + segment_index], ratio));
   }
 
-  if (distanceBetween(resampled.back().pose.position, poses.back().pose.position) > 1e-9) {
-    resampled.push_back(poses.back());
+  appendDistinctPose(resampled, poses[last]);
+  return resampled;
+}
+
+std::vector<geometry_msgs::msg::PoseStamped> resamplePathPoses(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
+  const MpcTrajectoryOptions & options)
+{
+  if (!options.enable_resampling || options.resample_spacing <= 1e-6 || poses.size() < 2) {
+    return poses;
+  }
+
+  std::vector<geometry_msgs::msg::PoseStamped> resampled;
+  resampled.reserve(poses.size());
+  std::size_t block_start = 0u;
+  for (std::size_t i = 1u; i < poses.size(); ++i) {
+    if (!pivotSegment(poses[i - 1u], poses[i], options)) {
+      continue;
+    }
+
+    const auto motion_block = resampleMotionBlock(
+      poses, block_start, i - 1u, options.resample_spacing);
+    for (const auto & pose : motion_block) {
+      appendDistinctPose(resampled, pose);
+    }
+    // Preserve both ends of a same-position yaw transition. Removing either
+    // endpoint turns an explicit pivot back into an ordinary high-curvature
+    // road segment.
+    appendDistinctPose(resampled, poses[i]);
+    block_start = i;
+  }
+
+  const auto final_block = resampleMotionBlock(
+    poses, block_start, poses.size() - 1u, options.resample_spacing);
+  for (const auto & pose : final_block) {
+    appendDistinctPose(resampled, pose);
   }
 
   return resampled;
@@ -305,7 +400,8 @@ double trajectorySpeedLimit(
   double curvature,
   const ForkliftVehicleModel & vehicle_model,
   const MpcTrajectoryOptions & options,
-  double max_allowed_curvature)
+  double max_allowed_curvature,
+  bool pivot_motion)
 {
   const auto & parameters = vehicle_model.parameters();
   const double max_speed =
@@ -313,11 +409,8 @@ double trajectorySpeedLimit(
     parameters.max_velocity;
   const double min_speed = std::clamp(options.min_curvature_speed, 0.0, max_speed);
 
-  if (parameters.allow_pivot_turn) {
-    const double pivot_curvature = 1.0 / std::max(0.05, parameters.pivot_turn_radius);
-    if (std::abs(curvature) >= pivot_curvature) {
-      return max_speed;
-    }
+  if (pivot_motion && parameters.allow_pivot_turn) {
+    return max_speed;
   }
 
   if (!options.enable_curvature_slowdown ||
@@ -449,9 +542,12 @@ MpcTrajectory buildTrajectory(
       diagnostics.curvature_exceeds_limit = true;
     }
 
-    const double steering_angle = steeringFromCurvature(curvature, vehicle_model);
+    const double steering_angle = steeringFromCurvature(
+      curvature, vehicle_model, diagnostics.max_allowed_curvature, pivot_motion);
     const double speed_limit =
-      trajectorySpeedLimit(curvature, vehicle_model, options, diagnostics.max_allowed_curvature);
+      trajectorySpeedLimit(
+      curvature, vehicle_model, options, diagnostics.max_allowed_curvature,
+      pivot_motion);
     diagnostics.min_speed_limit = std::min(diagnostics.min_speed_limit, speed_limit);
 
     trajectory.push_back({
@@ -547,6 +643,32 @@ std::size_t nearestTrajectoryIndex(
     }
   }
 
+  return best_index;
+}
+
+std::size_t nearestTrajectoryIndexInRange(
+  const MpcTrajectory & trajectory,
+  const MpcState & state,
+  std::size_t start_index,
+  std::size_t end_index)
+{
+  if (trajectory.empty()) {
+    return 0;
+  }
+
+  const std::size_t start = std::min(start_index, trajectory.size() - 1);
+  const std::size_t end = std::clamp(end_index, start, trajectory.size() - 1);
+  double best_distance = std::numeric_limits<double>::infinity();
+  std::size_t best_index = start;
+  for (std::size_t i = start; i <= end; ++i) {
+    const double distance = std::hypot(
+      trajectory[i].state.x - state.x,
+      trajectory[i].state.y - state.y);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = i;
+    }
+  }
   return best_index;
 }
 

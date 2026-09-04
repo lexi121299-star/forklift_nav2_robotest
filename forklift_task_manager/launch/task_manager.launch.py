@@ -18,9 +18,37 @@ def generate_launch_description():
     fork_move_to_action = LaunchConfiguration('fork_move_to_action')
     detect_pallet_offset_action = LaunchConfiguration('detect_pallet_offset_action')
     move_relative_action = LaunchConfiguration('move_relative_action')
+    pivot_relative_action = LaunchConfiguration('pivot_relative_action')
     enforce_pallet_approach_station = LaunchConfiguration(
         'enforce_pallet_approach_station'
     )
+    rviz_goal_mode = LaunchConfiguration('rviz_goal_mode')
+    pallet_standoff_distance_m = LaunchConfiguration('pallet_standoff_distance_m')
+    pallet_final_approach_distance_m = LaunchConfiguration(
+        'pallet_final_approach_distance_m'
+    )
+    pallet_alignment_runup_distance_m = LaunchConfiguration(
+        'pallet_alignment_runup_distance_m'
+    )
+    pallet_final_approach_speed_mps = LaunchConfiguration(
+        'pallet_final_approach_speed_mps'
+    )
+    pallet_final_approach_timeout_sec = LaunchConfiguration(
+        'pallet_final_approach_timeout_sec'
+    )
+    pallet_max_start_position_error_m = LaunchConfiguration(
+        'pallet_max_start_position_error_m'
+    )
+    pallet_max_start_heading_error_rad = LaunchConfiguration(
+        'pallet_max_start_heading_error_rad'
+    )
+    pallet_forks_on_negative_x = LaunchConfiguration(
+        'pallet_forks_on_negative_x'
+    )
+    pallet_arrow_points_outward = LaunchConfiguration(
+        'pallet_arrow_points_outward'
+    )
+    pallet_base_frame_id = LaunchConfiguration('pallet_base_frame_id')
     use_dispatch_reporter = LaunchConfiguration('use_dispatch_reporter')
     robot_id = LaunchConfiguration('robot_id')
     dispatch_report_topic = LaunchConfiguration('dispatch_report_topic')
@@ -55,7 +83,33 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'move_relative_action', default_value='/forklift/fine_motion/move_relative'
         ),
+        DeclareLaunchArgument(
+            'pivot_relative_action', default_value='/forklift/fine_motion/pivot_relative'
+        ),
         DeclareLaunchArgument('enforce_pallet_approach_station', default_value='true'),
+        DeclareLaunchArgument('rviz_goal_mode', default_value='navigation'),
+        DeclareLaunchArgument('pallet_standoff_distance_m', default_value='-1.0'),
+        DeclareLaunchArgument(
+            'pallet_final_approach_distance_m', default_value='1.00'
+        ),
+        DeclareLaunchArgument(
+            'pallet_alignment_runup_distance_m', default_value='0.60'
+        ),
+        DeclareLaunchArgument(
+            'pallet_final_approach_speed_mps', default_value='0.10'
+        ),
+        DeclareLaunchArgument(
+            'pallet_final_approach_timeout_sec', default_value='20.0'
+        ),
+        DeclareLaunchArgument(
+            'pallet_max_start_position_error_m', default_value='0.35'
+        ),
+        DeclareLaunchArgument(
+            'pallet_max_start_heading_error_rad', default_value='0.20'
+        ),
+        DeclareLaunchArgument('pallet_forks_on_negative_x', default_value='true'),
+        DeclareLaunchArgument('pallet_arrow_points_outward', default_value='true'),
+        DeclareLaunchArgument('pallet_base_frame_id', default_value='base_link'),
         DeclareLaunchArgument('use_dispatch_reporter', default_value='true'),
         DeclareLaunchArgument('robot_id', default_value='forklift_001'),
         DeclareLaunchArgument(
@@ -78,7 +132,31 @@ def generate_launch_description():
                 'fork_move_to_action': fork_move_to_action,
                 'detect_pallet_offset_action': detect_pallet_offset_action,
                 'move_relative_action': move_relative_action,
+                'pivot_relative_action': pivot_relative_action,
                 'enforce_pallet_approach_station': enforce_pallet_approach_station,
+                'rviz_goal_mode': rviz_goal_mode,
+                'pallet_standoff_distance_m': pallet_standoff_distance_m,
+                'pallet_final_approach_distance_m': (
+                    pallet_final_approach_distance_m
+                ),
+                'pallet_alignment_runup_distance_m': (
+                    pallet_alignment_runup_distance_m
+                ),
+                'pallet_final_approach_speed_mps': (
+                    pallet_final_approach_speed_mps
+                ),
+                'pallet_final_approach_timeout_sec': (
+                    pallet_final_approach_timeout_sec
+                ),
+                'pallet_max_start_position_error_m': (
+                    pallet_max_start_position_error_m
+                ),
+                'pallet_max_start_heading_error_rad': (
+                    pallet_max_start_heading_error_rad
+                ),
+                'pallet_forks_on_negative_x': pallet_forks_on_negative_x,
+                'pallet_arrow_points_outward': pallet_arrow_points_outward,
+                'pallet_base_frame_id': pallet_base_frame_id,
                 'use_sim_time': use_sim_time,
             }],
         ),

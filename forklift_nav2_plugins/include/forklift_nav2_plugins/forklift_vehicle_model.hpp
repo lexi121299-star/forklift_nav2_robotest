@@ -8,7 +8,7 @@ namespace forklift_nav2_plugins
 
 struct ForkliftVehicleParameters
 {
-  double wheel_base{1.2};
+  double wheel_base{1.4};
   double max_steering_angle{0.55};
   double max_steering_angle_velocity{0.7};
   double max_velocity{0.45};
@@ -19,6 +19,7 @@ struct ForkliftVehicleParameters
   double pivot_steering_tolerance{0.03};
   double pivot_turn_radius{0.6};
   double rear_axle_x_offset{0.0};
+  bool invert_pivot_yaw_direction{false};
 };
 
 struct ForkliftVehicleState

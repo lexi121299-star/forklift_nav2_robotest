@@ -13,6 +13,9 @@ struct SafetyGateParameters
   double slowdown_distance{1.25};
   double min_speed{0.05};
   double sample_spacing{0.10};
+  double reaction_time_sec{0.0};
+  double brake_deceleration_mps2{0.0};
+  double clearance_m{0.0};
 };
 
 struct SafetyGateLimit

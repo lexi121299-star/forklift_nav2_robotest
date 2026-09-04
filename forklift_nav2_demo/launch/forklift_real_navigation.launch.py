@@ -6,6 +6,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
+from nav2_common.launch import RewrittenYaml
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 import yaml
@@ -39,6 +40,8 @@ def generate_launch_description():
     vehicle_dry_run = LaunchConfiguration('vehicle_dry_run')
     vehicle_model = LaunchConfiguration('vehicle_model')
     can_interface = LaunchConfiguration('can_interface')
+    runtime_velocity_limit_mps = LaunchConfiguration('runtime_velocity_limit_mps')
+    use_fine_motion_adapter = LaunchConfiguration('use_fine_motion_adapter')
     nav2_start_delay = LaunchConfiguration('nav2_start_delay')
 
     def selected_vehicle_model(context):
@@ -107,7 +110,25 @@ def generate_launch_description():
             'recovery_twist_topic': '/cmd_vel',
             'localization_topic': '/odom',
             'localization_message_type': 'odometry',
+            'base_frame_id': 'base_link',
             'costmap_timeout_sec': '1.5',
+            'footprint_collision_cost_threshold': '254',
+            'collision_check_horizon_sec': '0.1',
+            'collision_check_time_step_sec': '0.05',
+            'dynamic_stop_reaction_time_sec': '0.9',
+            'dynamic_stop_brake_deceleration_mps2': '1.5',
+            'dynamic_stop_clearance_m': '0.5',
+            'scan_protection_enabled': 'true',
+            'scan_topic': '/scan',
+            'scan_timeout_sec': '0.4',
+            'scan_required_range_m': '8.0',
+            'scan_collision_sample_spacing_m': '0.05',
+            'scan_collision_padding_m': '0.05',
+            'scan_require_motion_fov_coverage': 'true',
+            'max_forward_velocity_mps': runtime_velocity_limit_mps.perform(context),
+            'pallet_exemption_reverse_only': 'true',
+            'pallet_exemption_length_m': '1.40',
+            'pallet_exemption_width_m': '1.30',
         }
         if selected == 'xfl201':
             arguments.update({
@@ -133,12 +154,19 @@ def generate_launch_description():
         )]
 
     def launch_nav2(context, *args, **kwargs):
+        nav2_params = RewrittenYaml(
+            source_file=resolve_nav2_params_file(context),
+            param_rewrites={
+                'max_velocity': runtime_velocity_limit_mps.perform(context),
+            },
+            convert_types=True,
+        )
         return [IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
             launch_arguments={
                 'map': map_file,
-                'params_file': resolve_nav2_params_file(context),
+                'params_file': nav2_params,
                 'use_sim_time': 'false',
                 'autostart': 'true',
                 'use_composition': 'False',
@@ -153,6 +181,14 @@ def generate_launch_description():
         parameters=[{'use_sim_time': False}],
         condition=IfCondition(use_rviz),
         output='screen',
+    )
+
+    fine_motion_adapter = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(vehicle_share, 'launch', 'fine_motion_adapter.launch.py')
+        ),
+        condition=IfCondition(use_fine_motion_adapter),
+        launch_arguments={'use_sim_time': 'false'}.items(),
     )
 
     return LaunchDescription([
@@ -176,9 +212,23 @@ def generate_launch_description():
             default_value='curtis',
             description='Vehicle interface model: curtis or xfl201.'),
         DeclareLaunchArgument('can_interface', default_value='can0'),
+        DeclareLaunchArgument(
+            'runtime_velocity_limit_mps',
+            default_value='0.45',
+            description=(
+                'Shared forward speed ceiling for FollowPath and Safety Gate. '
+                'Raise only after measured braking tests.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'use_fine_motion_adapter',
+            default_value='false',
+            description='Start MoveRelative and PivotRelative action servers.',
+        ),
         DeclareLaunchArgument('nav2_start_delay', default_value='3.0'),
         OpaqueFunction(function=launch_robot_state_publisher),
         OpaqueFunction(function=launch_vehicle_interface),
+        fine_motion_adapter,
         OpaqueFunction(function=launch_safety),
         TimerAction(period=nav2_start_delay, actions=[OpaqueFunction(function=launch_nav2), rviz]),
     ])
