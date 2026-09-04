@@ -25,6 +25,7 @@ from forklift_vehicle_interface.zhongli_can_codec import (
     encode_0x231,
     encode_0x232,
     encode_0x233,
+    encode_0x233_from_control,
     format_frame,
 )
 
@@ -65,6 +66,8 @@ class Xfl201VehicleInterface(Node):
         self.declare_parameter('max_brake_force', 0)
         self.declare_parameter('normal_brake_force', 0)
         self.declare_parameter('send_fork_stop_frame', False)
+        self.declare_parameter('fork_control_enabled', False)
+        self.declare_parameter('fork_command_full_scale_ma', 800.0)
         self.declare_parameter('steering_angle_fixed_deg', 0.0)
         self.declare_parameter('use_command_steering_angle', True)
         self.declare_parameter('max_integration_dt_sec', 0.20)
@@ -99,6 +102,10 @@ class Xfl201VehicleInterface(Node):
         self._max_brake_force = self._byte_param('max_brake_force', 255)
         self._normal_brake_force = self._byte_param('normal_brake_force', 0)
         self._send_fork_stop_frame = self._bool_param('send_fork_stop_frame', False)
+        self._fork_control_enabled = self._bool_param('fork_control_enabled', False)
+        self._fork_command_full_scale_ma = self._positive_param(
+            'fork_command_full_scale_ma', 800.0
+        )
         self._steering_angle_fixed_deg = float(self.get_parameter('steering_angle_fixed_deg').value)
         self._use_command_steering_angle = self._bool_param('use_command_steering_angle', True)
         self._max_rx_frames_per_cycle = max(
@@ -324,7 +331,14 @@ class Xfl201VehicleInterface(Node):
         }
         frame_231 = encode_0x231(travel)
         frame_232 = encode_0x232()
-        frame_233 = encode_0x233({}) if self._send_fork_stop_frame else None
+        frame_233 = None
+        if self._fork_control_enabled:
+            frame_233 = encode_0x233_from_control(
+                command,
+                self._fork_command_full_scale_ma,
+            )
+        elif self._send_fork_stop_frame:
+            frame_233 = encode_0x233({})
         if self._dry_run:
             self._log_tx_frames(frame_231, frame_232, frame_233, stop_reason)
             return

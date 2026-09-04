@@ -42,6 +42,10 @@ xfl201_vehicle_interface:
     max_brake_force: 0
     normal_brake_force: 0
     send_fork_stop_frame: false
+    # The 0x233 mapping exists but must remain disabled until encoder feedback,
+    # mechanical limits, and VCM auxiliary-speed behaviour are field verified.
+    fork_control_enabled: false
+    fork_command_full_scale_ma: 800.0
 
     # Straight travel uses 0 deg. At +/-90 deg the vehicle rotates around its
     # steering center; it cannot counter-rotate in place like a differential base.

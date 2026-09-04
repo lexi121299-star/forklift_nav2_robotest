@@ -165,6 +165,46 @@ def encode_0x233(command: Any) -> List[int]:
     return frame
 
 
+def encode_0x233_from_control(
+    command: Any,
+    valve_full_scale_ma: float,
+) -> List[int]:
+    """Encode 0x233 from the shared hydraulic command contract.
+
+    The XFL protocol uses percentage speed bytes rather than valve current.
+    BYTE0 is used for lift and auxiliary fork functions, while BYTE1 is for
+    lowering. The protocol does not define dedicated side-shift or tilt speed
+    bytes, so their requests use BYTE0. Real transmission remains opt-in in
+    ``xfl201_vehicle_interface`` until this VCM behaviour is field verified.
+    """
+
+    full_scale = max(float(valve_full_scale_ma), 1.0)
+
+    def active(name: str) -> bool:
+        return abs(float(_get(command, name, 0.0))) > 1e-6
+
+    def speed_percent(names: Iterable[str]) -> float:
+        request = max(abs(float(_get(command, name, 0.0))) for name in names)
+        return _clamp(request * 100.0 / full_scale, 0.0, 100.0)
+
+    return encode_0x233({
+        'fork_speed_percent': speed_percent((
+            'lift_valve_ma',
+            'side_shift_left_valve_ma',
+            'side_shift_right_valve_ma',
+            'tilt_forward_valve_ma',
+            'tilt_backward_valve_ma',
+        )),
+        'lower_speed_percent': speed_percent(('lower_valve_ma',)),
+        'lift': active('lift_valve_ma'),
+        'lower': active('lower_valve_ma'),
+        'side_shift_left': active('side_shift_left_valve_ma'),
+        'side_shift_right': active('side_shift_right_valve_ma'),
+        'tilt_forward': active('tilt_forward_valve_ma'),
+        'tilt_backward': active('tilt_backward_valve_ma'),
+    })
+
+
 def decode_0x206(data: Iterable[int]) -> Dict[str, Any]:
     """Decode XFL201 vehicle feedback frame 0x206."""
 

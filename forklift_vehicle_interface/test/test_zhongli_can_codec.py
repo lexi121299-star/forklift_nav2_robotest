@@ -14,6 +14,7 @@ from forklift_vehicle_interface.zhongli_can_codec import (
     encode_0x231,
     encode_0x232,
     encode_0x233,
+    encode_0x233_from_control,
     format_frame,
 )
 
@@ -112,6 +113,36 @@ def test_encode_0x233_accepts_raw_speed_bytes_and_aliases():
     }
 
     assert encode_0x233(fork) == [10, 255, 0b01010110, 0, 0, 0, 0, 0]
+
+
+def test_encode_0x233_from_shared_hydraulic_command_normalizes_currents():
+    control = SimpleNamespace(
+        lift_valve_ma=400.0,
+        lower_valve_ma=0.0,
+        side_shift_left_valve_ma=0.0,
+        side_shift_right_valve_ma=800.0,
+        tilt_forward_valve_ma=0.0,
+        tilt_backward_valve_ma=0.0,
+    )
+
+    assert encode_0x233_from_control(control, valve_full_scale_ma=800.0) == [
+        255, 0, 0b00001001, 0, 0, 0, 0, 0,
+    ]
+
+
+def test_encode_0x233_from_shared_hydraulic_command_uses_lower_speed_byte():
+    control = SimpleNamespace(
+        lift_valve_ma=0.0,
+        lower_valve_ma=200.0,
+        side_shift_left_valve_ma=0.0,
+        side_shift_right_valve_ma=0.0,
+        tilt_forward_valve_ma=0.0,
+        tilt_backward_valve_ma=0.0,
+    )
+
+    assert encode_0x233_from_control(control, valve_full_scale_ma=800.0) == [
+        0, 64, 0b00000010, 0, 0, 0, 0, 0,
+    ]
 
 
 def test_decode_0x206_vehicle_feedback():
