@@ -110,7 +110,10 @@ controller_server:
       required_movement_radius: 0.2
       # A maximum-angle pivot plus steering return can legitimately exceed the
       # default window without translating 0.2 m.
-      movement_time_allowance: 40.0
+      # Keep the active plan while a temporary aisle obstruction clears.  The
+      # safety gate continues to block motion immediately; this only delays
+      # Nav2's no-progress failure/recovery transition.
+      movement_time_allowance: 300.0
 
     general_goal_checker:
       stateful: True
@@ -135,9 +138,11 @@ controller_server:
       max_reverse_velocity: 0.15
       max_steering_angle: 1.5707963267948966
       # computeVelocityCommands runs at 10 Hz while the prediction step is
-      # 0.2 s. A 0.15 rad/s model limit bounds successive real commands to
-      # roughly 0.03 rad and reduces delayed left/right over-correction.
-      max_steering_angle_velocity: 0.15
+      # 0.2 s. The model rate limit bounds successive steering targets and
+      # reduces delayed left/right over-correction.
+      # Keep the predicted steering slew below the measured actuator response.
+      # This prevents rapid left/right reversals after a high-speed corner.
+      max_steering_angle_velocity: 0.12
       max_acceleration: 0.5
       max_angular_velocity: 0.8
       allow_pivot_turn: true
@@ -149,8 +154,10 @@ controller_server:
       # Vehicle-interface odometry now corrects yaw independently. Keep pivot
       # commands in the same yaw convention as the controller and global pose.
       invert_pivot_yaw_direction: false
-      pivot_velocity: 0.12
-      pivot_yaw_tolerance: 0.05
+      # Pivot is a real vehicle maneuver. Use a conservative cruise speed and
+      # a tighter final yaw threshold than the previous 2.86 degree tolerance.
+      pivot_velocity: 0.10
+      pivot_yaw_tolerance: 0.025
       pivot_stop_velocity_threshold: 0.02
       # Capture the planned pivot despite normal real-vehicle lateral tracking
       # error. In the 2026-08-28 14:29 run the closest approach was 0.315 m, so
@@ -164,13 +171,20 @@ controller_server:
       pivot_step_yaw_tolerance: 0.035
       pivot_wrong_direction_tolerance: 0.08
       # Reduce drive speed for the final segment to limit yaw overshoot.
-      pivot_final_slowdown_angle: 0.3490658503988659
-      pivot_final_velocity: 0.06
+      # Enter the final low-speed portion at 30 degrees so localization and
+      # drivetrain lag cannot carry the vehicle past the pivot target yaw.
+      pivot_final_slowdown_angle: 0.5235987755982988
+      pivot_final_velocity: 0.05
+      post_pivot_capture_enabled: true
+      post_pivot_capture_distance_m: 0.30
+      post_pivot_capture_speed_mps: 0.15
       # Pivot completion is latched before steering return, so yaw jitter cannot
       # command another +/-90 degree turn. Keep the extra stop short; steering
       # return already provides the main settling time.
       post_pivot_hold_duration_sec: 0.3
-      post_pivot_slowdown_duration_sec: 2.0
+      # This is a continuous ramp, not a stop. Give the steering feedback a
+      # little longer to settle before restoring the requested cruise speed.
+      post_pivot_slowdown_duration_sec: 3.0
       post_pivot_initial_max_speed: 0.12
       # A new goal can arrive with steering left over from a failed route.
       # Recenter while stopped before allowing the MPC to drive.
@@ -183,7 +197,9 @@ controller_server:
       xy_goal_tolerance: 0.30
       yaw_goal_tolerance: 3.141592653589793
       transform_tolerance: 0.2
-      terminal_slowdown_distance: 0.6
+      # Begin target braking before the same runup/staging pose; this does not
+      # move the pallet maneuver geometry or its final 0.30 m stop clearance.
+      terminal_slowdown_distance: 1.2
       # If the preview cursor reaches the final sample a few centimetres early,
       # keep creeping toward the goal instead of holding zero forever.
       terminal_approach_enabled: true
@@ -218,23 +234,33 @@ controller_server:
       # threshold could jump directly from 0.06 to 0.47 m/s while the steering
       # wheel was still near its limit, causing the post-turn oscillation seen
       # in the 2026-08-21 16:01 test.
-      heading_slowdown_threshold: 0.35
-      heading_slowdown_full_error: 0.60
-      heading_alignment_max_speed: 0.06
+      # At 0.70 m/s, start limiting before a visible path-heading error grows
+      # into a left/right correction cycle. Full alignment remains continuous.
+      heading_slowdown_threshold: 0.20
+      heading_slowdown_full_error: 0.45
+      heading_alignment_max_speed: 0.20
       steering_slowdown_enabled: true
-      steering_slowdown_start_angle: 0.25
-      steering_slowdown_full_angle: 0.75
-      steering_slowdown_max_speed: 0.10
+      # The previous 0.25 rad threshold did not protect the 0.10-0.25 rad
+      # residual steering range that caused post-turn weaving on the vehicle.
+      steering_slowdown_start_angle: 0.08
+      steering_slowdown_full_angle: 0.30
+      steering_slowdown_max_speed: 0.25
       max_path_deviation: 0.75
       candidate_score_abort_ratio: 4.0
       candidate_score_abort_margin: 100.0
       candidate_score_abort_cycles: 5
       safety_gate_enabled: true
       safety_emergency_stop_active: false
-      safety_stop_distance: 0.75
-      safety_slowdown_distance: 1.50
+      # The controller caps speed from obstacle clearance with
+      # d = v * reaction + v^2 / (2 * braking) + clearance.  The 8 m
+      # lookahead is also the required range for the raw-scan safety gate.
+      safety_stop_distance: 0.50
+      safety_slowdown_distance: 8.00
       safety_min_speed: 0.05
-      safety_sample_spacing: 0.10
+      safety_sample_spacing: 0.05
+      safety_reaction_time_sec: 0.90
+      safety_brake_deceleration_mps2: 1.50
+      safety_clearance_m: 0.50
       # The global planner penalizes inflation touched by the complete footprint
       # and rejects lethal cost 254. At execution time, treat cost 253 as a
       # clearance warning rather than a physical collision so a vehicle already
@@ -260,7 +286,7 @@ controller_server:
       # Penalize rapid absolute steering target changes. The controller also
       # uses measured steering feedback below, so this damps corrections based
       # on what the steering actuator has actually reached.
-      steering_change_weight: 60.0
+      steering_change_weight: 120.0
       velocity_reward_weight: 1.2
       publish_control_cmd: true
       control_cmd_topic: "/forklift/control_cmd_raw"
@@ -279,8 +305,8 @@ controller_server_rclcpp_node:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
-      publish_frequency: 2.0
+      update_frequency: 10.0
+      publish_frequency: 5.0
       # Real vehicle: keep the rolling local costmap and controller pose in the
       # continuous odom frame. The external localization stack owns map -> odom;
       # the global planner remains in map. This prevents localization corrections
@@ -289,8 +315,8 @@ local_costmap:
       robot_base_frame: base_link
       use_sim_time: false
       rolling_window: true
-      width: 8
-      height: 8
+      width: 18
+      height: 18
       resolution: 0.05
       transform_tolerance: 0.5
       # 2MKC20M30LV205 envelope in base_link: drive axle at x=0, forks toward
@@ -313,9 +339,9 @@ local_costmap:
           marking: True
           data_type: "LaserScan"
           inf_is_valid: True
-          raytrace_max_range: 3.0
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.0
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -334,9 +360,9 @@ local_costmap:
           marking: True
           data_type: "LaserScan"
           inf_is_valid: True
-          raytrace_max_range: 3.0
+          raytrace_max_range: 8.0
           raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -363,47 +389,12 @@ global_costmap:
       footprint_padding: 0.05
       resolution: 0.05
       track_unknown_space: true
-      # obstacle_layer added so the global planner avoids real obstacles that are
-      # not in the static "clean" map (sensed via /scan at plan time). Order keeps
-      # inflation last. Still plan-once: only obstacles visible when the goal is
-      # sent (within the laser range below) are routed around.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: True
-        observation_sources: scan
-        scan:
-          topic: /scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          inf_is_valid: True
-          raytrace_max_range: 3.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: True
-        publish_voxel_map: True
-        origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 16
-        max_obstacle_height: 2.0
-        mark_threshold: 0
-        observation_sources: scan
-        scan:
-          topic: /scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          inf_is_valid: True
-          raytrace_max_range: 3.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 2.5
-          obstacle_min_range: 0.0
+      # Do not mark /scan observations into the global costmap. A global grid
+      # does not decay cells simply because the vehicle has driven beyond laser
+      # range, so a one-time return can block later plans kilometres of time
+      # later. Keep global planning static; the rolling local costmap and the
+      # raw-scan safety gate retain real-time obstacle protection.
+      plugins: ["static_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

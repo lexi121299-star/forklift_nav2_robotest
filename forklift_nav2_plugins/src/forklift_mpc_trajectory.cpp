@@ -68,6 +68,35 @@ bool pivotSegment(
   return rear_axle_motion <= options.pivot_max_rear_axle_motion;
 }
 
+bool isProtectedPivotDeparturePose(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
+  std::size_t index,
+  const MpcTrajectoryOptions & options)
+{
+  if (!options.detect_pivot_turns ||
+    options.pivot_departure_capture_distance <= 1e-6 || index == 0u)
+  {
+    return false;
+  }
+
+  std::size_t departure_start = index;
+  while (departure_start > 0u &&
+    !pivotSegment(poses[departure_start - 1u], poses[departure_start], options))
+  {
+    --departure_start;
+  }
+  if (departure_start == 0u) {
+    return false;
+  }
+
+  double departure_distance = 0.0;
+  for (std::size_t i = departure_start + 1u; i <= index; ++i) {
+    departure_distance += distanceBetween(
+      poses[i - 1u].pose.position, poses[i].pose.position);
+  }
+  return departure_distance <= options.pivot_departure_capture_distance + 1e-9;
+}
+
 bool hasLocalYawChange(
   const std::vector<geometry_msgs::msg::PoseStamped> & poses,
   std::size_t index,
@@ -236,7 +265,8 @@ std::vector<geometry_msgs::msg::PoseStamped> smoothPathPoses(
       const auto & current = smoothed[i];
       const auto & following = smoothed[i + 1];
 
-      if (distanceBetween(previous.pose.position, current.pose.position) < 1e-9 ||
+      if (isProtectedPivotDeparturePose(smoothed, i, options) ||
+        distanceBetween(previous.pose.position, current.pose.position) < 1e-9 ||
         distanceBetween(current.pose.position, following.pose.position) < 1e-9)
       {
         next.push_back(current);

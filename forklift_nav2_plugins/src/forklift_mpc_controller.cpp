@@ -124,6 +124,15 @@ void ForkliftMpcController::configure(
     node, name_ + ".post_pivot_initial_max_speed",
     rclcpp::ParameterValue(post_pivot_initial_max_speed_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".post_pivot_capture_enabled",
+    rclcpp::ParameterValue(post_pivot_capture_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".post_pivot_capture_distance_m",
+    rclcpp::ParameterValue(post_pivot_capture_distance_m_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".post_pivot_capture_speed_mps",
+    rclcpp::ParameterValue(post_pivot_capture_speed_mps_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".new_goal_steering_settle_enabled",
     rclcpp::ParameterValue(new_goal_steering_settle_enabled_));
   nav2_util::declare_parameter_if_not_declared(
@@ -272,6 +281,15 @@ void ForkliftMpcController::configure(
     node, name_ + ".safety_sample_spacing",
     rclcpp::ParameterValue(safety_sample_spacing_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_reaction_time_sec",
+    rclcpp::ParameterValue(safety_reaction_time_sec_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_brake_deceleration_mps2",
+    rclcpp::ParameterValue(safety_brake_deceleration_mps2_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".safety_clearance_m",
+    rclcpp::ParameterValue(safety_clearance_m_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".collision_cost_threshold",
     rclcpp::ParameterValue(collision_cost_threshold_));
   nav2_util::declare_parameter_if_not_declared(
@@ -388,6 +406,15 @@ void ForkliftMpcController::configure(
     name_ + ".post_pivot_initial_max_speed",
     post_pivot_initial_max_speed_);
   node->get_parameter(
+    name_ + ".post_pivot_capture_enabled",
+    post_pivot_capture_enabled_);
+  node->get_parameter(
+    name_ + ".post_pivot_capture_distance_m",
+    post_pivot_capture_distance_m_);
+  node->get_parameter(
+    name_ + ".post_pivot_capture_speed_mps",
+    post_pivot_capture_speed_mps_);
+  node->get_parameter(
     name_ + ".new_goal_steering_settle_enabled",
     new_goal_steering_settle_enabled_);
   node->get_parameter(
@@ -499,6 +526,12 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".safety_min_speed", safety_min_speed_);
   node->get_parameter(name_ + ".safety_sample_spacing", safety_sample_spacing_);
   node->get_parameter(
+    name_ + ".safety_reaction_time_sec", safety_reaction_time_sec_);
+  node->get_parameter(
+    name_ + ".safety_brake_deceleration_mps2",
+    safety_brake_deceleration_mps2_);
+  node->get_parameter(name_ + ".safety_clearance_m", safety_clearance_m_);
+  node->get_parameter(
     name_ + ".collision_cost_threshold",
     collision_cost_threshold_);
   node->get_parameter(
@@ -592,6 +625,10 @@ void ForkliftMpcController::configure(
     std::max(0.0, post_pivot_slowdown_duration_sec_);
   post_pivot_initial_max_speed_ =
     std::clamp(post_pivot_initial_max_speed_, 0.0, max_velocity_);
+  post_pivot_capture_distance_m_ =
+    std::max(0.0, post_pivot_capture_distance_m_);
+  post_pivot_capture_speed_mps_ =
+    std::clamp(post_pivot_capture_speed_mps_, 0.01, max_velocity_);
   new_goal_steering_tolerance_ = std::clamp(
     new_goal_steering_tolerance_, 0.01, max_steering_angle_);
   new_goal_steering_hold_duration_sec_ =
@@ -650,6 +687,9 @@ void ForkliftMpcController::configure(
   safety_slowdown_distance_ = safety_parameters.slowdown_distance;
   safety_min_speed_ = safety_parameters.min_speed;
   safety_sample_spacing_ = safety_parameters.sample_spacing;
+  safety_reaction_time_sec_ = safety_parameters.reaction_time_sec;
+  safety_brake_deceleration_mps2_ = safety_parameters.brake_deceleration_mps2;
+  safety_clearance_m_ = safety_parameters.clearance_m;
   collision_cost_threshold_ = std::clamp(collision_cost_threshold_, 1, 255);
   safety_collision_cost_threshold_ =
     std::clamp(safety_collision_cost_threshold_, 1, 255);
@@ -697,6 +737,7 @@ void ForkliftMpcController::configure(
     "step_angle=%.3f step_hold=%.2f "
     "final_angle=%.3f "
     "final_v=%.3f "
+    "post_pivot_capture=%s capture_distance=%.3f capture_speed=%.3f "
     "post_pivot_hold=%.2f post_pivot_slowdown=%.2f post_pivot_v=%.3f "
     "terminal_approach=%s terminal_v=%.3f terminal_distance=%.3f "
     "safety_gate=%s safety_stop=%.3f safety_slowdown=%.3f "
@@ -723,6 +764,8 @@ void ForkliftMpcController::configure(
     pivot_step_enabled_ ? "true" : "false", pivot_step_angle_,
     pivot_step_hold_duration_sec_, pivot_final_slowdown_angle_,
     pivot_final_velocity_,
+    post_pivot_capture_enabled_ ? "true" : "false",
+    post_pivot_capture_distance_m_, post_pivot_capture_speed_mps_,
     post_pivot_hold_duration_sec_, post_pivot_slowdown_duration_sec_,
     post_pivot_initial_max_speed_,
     terminal_approach_enabled_ ? "true" : "false",
@@ -771,6 +814,7 @@ void ForkliftMpcController::cleanup()
   post_pivot_transition_active_ = false;
   pivot_departure_steering_ = 0.0;
   pivot_departure_ready_ns_ = 0;
+  resetPivotHandoffState();
   new_goal_steering_settle_active_ = false;
   new_goal_steering_ready_ns_ = 0;
   costmap_ = nullptr;
@@ -794,6 +838,7 @@ void ForkliftMpcController::activate()
   post_pivot_transition_active_ = false;
   pivot_departure_steering_ = 0.0;
   pivot_departure_ready_ns_ = 0;
+  resetPivotHandoffState();
   new_goal_steering_settle_active_ = false;
   new_goal_steering_ready_ns_ = 0;
   if (control_cmd_pub_) {
@@ -855,6 +900,7 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
   post_pivot_transition_active_ = false;
   pivot_departure_steering_ = 0.0;
   pivot_departure_ready_ns_ = 0;
+  resetPivotHandoffState();
   new_goal_steering_settle_active_ =
     goal_changed && new_goal_steering_settle_enabled_;
   new_goal_steering_ready_ns_ = 0;
@@ -1044,6 +1090,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     allow_reverse_ && max_reverse_velocity_ > 0.0 &&
     previewHasReverseMotion(control_preview_window);
   if (pivot_completion_latched_ && completed_pivot_left_preview_ &&
+    !post_pivot_capture_active_ &&
     pivot_preview_active &&
     (pivot_target_index != completed_pivot_index_ ||
     std::hypot(
@@ -1067,6 +1114,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     post_pivot_transition_active_ = false;
     pivot_departure_steering_ = 0.0;
     pivot_departure_ready_ns_ = 0;
+    resetPivotHandoffState();
   }
   if (pivot_activation_ready && !pivot_completion_latched_ &&
     !pivot_maneuver_active_)
@@ -1077,6 +1125,11 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     active_pivot_y_ = pivot_target_y;
     active_pivot_target_yaw_ = pivot_target_yaw;
     active_pivot_departure_steering_ = preview_departure_steering;
+    post_pivot_capture_available_ = post_pivot_capture_enabled_ &&
+      hasStraightPostPivotCapture(
+      transformed_trajectory, pivot_target_index, pivot_target_yaw);
+    post_pivot_capture_active_ = false;
+    pivot_yaw_within_tolerance_since_ns_ = 0;
     pivot_step_target_active_ = false;
     pivot_step_direction_ = 0.0;
     pivot_step_hold_start_ns_ = 0;
@@ -1085,9 +1138,11 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     RCLCPP_INFO(
       logger_,
       "P6.5a pivot maneuver latched: index=%zu target_yaw=%.3f "
-      "departure_steering=%.3f activation_error=%.3f",
+      "departure_steering=%.3f capture=%s activation_error=%.3f",
       active_pivot_index_, active_pivot_target_yaw_,
-      active_pivot_departure_steering_, pivot_activation_error);
+      active_pivot_departure_steering_,
+      post_pivot_capture_available_ ? "enabled" : "fallback_to_mpc",
+      pivot_activation_error);
   }
   if (pivot_preview_active && !pivot_activation_ready &&
     !pivot_maneuver_active_)
@@ -1190,6 +1245,19 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     }
 
     const int64_t now_ns = clock_->now().nanoseconds();
+    if (post_pivot_capture_available_) {
+      post_pivot_transition_active_ = false;
+      post_pivot_capture_active_ = true;
+      post_pivot_capture_start_x_ = current_state.x;
+      post_pivot_capture_start_y_ = current_state.y;
+      post_pivot_capture_target_yaw_ = completed_pivot_target_yaw_;
+      pivot_departure_ready_ns_ = 0;
+      RCLCPP_INFO(
+        logger_,
+        "P6.5c post-pivot straight capture armed: distance=%.3f m speed=%.3f m/s",
+        post_pivot_capture_distance_m_, post_pivot_capture_speed_mps_);
+      return zeroCommand(pose);
+    }
     if (pivot_departure_ready_ns_ == 0) {
       pivot_departure_ready_ns_ = now_ns;
       RCLCPP_INFO(
@@ -1348,6 +1416,78 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     speed_limit_ > 0.0 ? std::min(max_velocity_, speed_limit_) :
     max_velocity_;
 
+  if (post_pivot_capture_active_) {
+    const double yaw_error = normalizeAngle(
+      post_pivot_capture_target_yaw_ - current_state.theta);
+    const double dx = current_state.x - post_pivot_capture_start_x_;
+    const double dy = current_state.y - post_pivot_capture_start_y_;
+    const double captured_distance = std::max(
+      0.0,
+      dx * std::cos(post_pivot_capture_target_yaw_) +
+      dy * std::sin(post_pivot_capture_target_yaw_));
+    if (captured_distance >= post_pivot_capture_distance_m_) {
+      post_pivot_capture_active_ = false;
+      post_pivot_capture_available_ = false;
+      pivot_departure_ready_ns_ = 0;
+      RCLCPP_INFO(
+        logger_,
+        "P6.5c post-pivot straight capture complete: distance=%.3f m; "
+        "resuming MPC",
+        captured_distance);
+    } else if (std::abs(yaw_error) > 2.0 * pivot_yaw_tolerance_) {
+      post_pivot_capture_active_ = false;
+      post_pivot_capture_available_ = false;
+      pivot_departure_ready_ns_ = clock_->now().nanoseconds();
+      RCLCPP_WARN(
+        logger_,
+        "P6.5c post-pivot straight capture canceled: yaw drift %.3f rad; "
+        "stopping before low-speed MPC fallback",
+        yaw_error);
+      publishControlCommand(0.0, 0.0, pose.header.frame_id);
+      return zeroCommand(pose);
+    } else {
+      double capture_speed = std::min(
+        post_pivot_capture_speed_mps_, requested_max_velocity);
+      const auto capture_safety_limit = safetyGateLimit(
+        current_state, 1.0, capture_speed);
+      if (capture_safety_limit.stop_active) {
+        RCLCPP_WARN_THROTTLE(
+          logger_, *clock_, 1000,
+          "P6.5c post-pivot straight capture blocked by safety gate at %.3f m",
+          capture_safety_limit.nearest_obstacle_distance);
+        publishControlCommand(0.0, 0.0, pose.header.frame_id);
+        return zeroCommand(pose);
+      }
+      if (capture_safety_limit.slowdown_active) {
+        capture_speed = std::min(capture_speed, capture_safety_limit.max_speed);
+      }
+
+      double normalized_obstacle_cost = 0.0;
+      if (!isCollisionFree(current_state, normalized_obstacle_cost)) {
+        RCLCPP_WARN_THROTTLE(
+          logger_, *clock_, 1000,
+          "P6.5c post-pivot straight capture blocked by current footprint");
+        publishControlCommand(0.0, 0.0, pose.header.frame_id);
+        return zeroCommand(pose);
+      }
+
+      geometry_msgs::msg::TwistStamped capture_cmd;
+      capture_cmd.header.stamp = clock_->now();
+      capture_cmd.header.frame_id = pose.header.frame_id;
+      capture_cmd.twist = vehicle_model_.twistFromCommand({capture_speed, 0.0});
+      capture_cmd.twist.linear.y = 0.0;
+      last_steering_angle_ = 0.0;
+      publishControlCommand(capture_speed, 0.0, pose.header.frame_id);
+      RCLCPP_INFO_THROTTLE(
+        logger_, *clock_, 500,
+        "P6.5c post-pivot straight capture: progress=%.3f/%.3f m "
+        "yaw_error=%.3f v=%.3f",
+        captured_distance, post_pivot_capture_distance_m_, yaw_error,
+        capture_speed);
+      return capture_cmd;
+    }
+  }
+
   if (pivot_control_active) {
     // Stop-pivot-go: brake until the approach (path-tracking) motion has
     // settled, then latch and commit to the pivot. Do NOT keep braking once
@@ -1376,10 +1516,10 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
 
     const double heading_error =
       normalizeAngle(active_pivot_target_yaw_ - current_state.theta);
-    if (std::abs(heading_error) <= pivot_yaw_tolerance_)
-    {
-      // Latch before commanding steering return. Steering motion and
-      // localization jitter must not restart an already completed pivot.
+    if (std::abs(heading_error) <= pivot_yaw_tolerance_) {
+      // Complete on the first in-tolerance pose. The real vehicle continues
+      // rotating briefly after a zero-RPM command, so waiting while holding the
+      // wheel at +/-90 degrees causes an avoidable repeated correction cycle.
       pivot_completion_latched_ = true;
       completed_pivot_index_ = active_pivot_index_;
       completed_pivot_x_ = active_pivot_x_;
@@ -1387,7 +1527,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       completed_pivot_target_yaw_ = active_pivot_target_yaw_;
       completed_pivot_left_preview_ = false;
       post_pivot_transition_active_ = true;
-      pivot_departure_steering_ = active_pivot_departure_steering_;
+      pivot_departure_steering_ =
+        post_pivot_capture_available_ ? 0.0 : active_pivot_departure_steering_;
       pivot_departure_ready_ns_ = 0;
       pivot_maneuver_active_ = false;
       active_pivot_index_ = std::numeric_limits<std::size_t>::max();
@@ -1397,8 +1538,9 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       RCLCPP_INFO(
         logger_,
         "P6.5a pivot yaw complete and latched: index=%zu error=%.3f rad "
-        "departure_steering=%.3f",
-        completed_pivot_index_, heading_error, pivot_departure_steering_);
+        "departure_steering=%.3f capture=%s",
+        completed_pivot_index_, heading_error, pivot_departure_steering_,
+        post_pivot_capture_available_ ? "enabled" : "fallback_to_mpc");
       last_steering_angle_ = pivot_departure_steering_;
       publishControlCommand(
         0.0, pivot_departure_steering_, pose.header.frame_id);
@@ -2139,6 +2281,8 @@ ForkliftMpcController::trajectoryOptions(double max_velocity) const
     respect_reverse_path_orientation_;
   options.detect_pivot_turns = allow_pivot_turn_;
   options.pivot_rear_axle_x_offset = rear_axle_x_offset_;
+  options.pivot_departure_capture_distance =
+    post_pivot_capture_enabled_ ? post_pivot_capture_distance_m_ : 0.0;
   return options;
 }
 
@@ -2250,7 +2394,8 @@ SafetyGateParameters ForkliftMpcController::safetyGateParameters() const
 {
   return sanitizeSafetyGateParameters(
     {safety_gate_enabled_, safety_stop_distance_, safety_slowdown_distance_,
-      safety_min_speed_, safety_sample_spacing_});
+      safety_min_speed_, safety_sample_spacing_, safety_reaction_time_sec_,
+      safety_brake_deceleration_mps2_, safety_clearance_m_});
 }
 
 bool ForkliftMpcController::safetyEmergencyStopActive() const
@@ -2331,6 +2476,59 @@ double ForkliftMpcController::headingErrorToPose(
   const MpcState & state, const geometry_msgs::msg::PoseStamped & pose) const
 {
   return normalizeAngle(poseYaw(pose) - state.theta);
+}
+
+bool ForkliftMpcController::hasStraightPostPivotCapture(
+  const MpcTrajectory & trajectory,
+  std::size_t pivot_index,
+  double target_yaw) const
+{
+  if (post_pivot_capture_distance_m_ <= 1e-6 ||
+    pivot_index >= trajectory.size())
+  {
+    return false;
+  }
+
+  MpcState previous = trajectory[pivot_index].state;
+  double straight_distance = 0.0;
+  for (std::size_t i = pivot_index + 1u; i < trajectory.size(); ++i) {
+    const auto & point = trajectory[i];
+    if (point.pivot_motion) {
+      return false;
+    }
+
+    const double dx = point.state.x - previous.x;
+    const double dy = point.state.y - previous.y;
+    const double segment_length = std::hypot(dx, dy);
+    if (segment_length <= 1e-6) {
+      previous = point.state;
+      continue;
+    }
+
+    const double segment_yaw = std::atan2(dy, dx);
+    if (std::abs(normalizeAngle(segment_yaw - target_yaw)) >
+      pivot_yaw_tolerance_)
+    {
+      return false;
+    }
+    straight_distance += segment_length;
+    if (straight_distance + 1e-6 >= post_pivot_capture_distance_m_) {
+      return true;
+    }
+    previous = point.state;
+  }
+
+  return false;
+}
+
+void ForkliftMpcController::resetPivotHandoffState()
+{
+  pivot_yaw_within_tolerance_since_ns_ = 0;
+  post_pivot_capture_available_ = false;
+  post_pivot_capture_active_ = false;
+  post_pivot_capture_start_x_ = 0.0;
+  post_pivot_capture_start_y_ = 0.0;
+  post_pivot_capture_target_yaw_ = 0.0;
 }
 
 } // namespace forklift_nav2_plugins

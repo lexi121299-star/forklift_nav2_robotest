@@ -8,8 +8,10 @@ fine_motion_adapter:
     control_rate_hz: 20.0
     odom_timeout_sec: 0.5
     vehicle_state_timeout_sec: 0.5
-    progress_timeout_sec: 3.0
-    default_goal_timeout_sec: 20.0
+    # Allow a temporary obstacle to clear while the safety gate continues to
+    # suppress motion immediately.
+    progress_timeout_sec: 60.0
+    default_goal_timeout_sec: 60.0
     max_speed_mps: 0.15
     distance_tolerance_m: 0.02
     progress_epsilon_m: 0.005
@@ -28,4 +30,4 @@ fine_motion_adapter:
     pivot_step_hold_sec: 0.0
     pivot_final_slowdown_angle_rad: 0.3490658503988659
     pivot_wrong_direction_tolerance_rad: 0.08
-    pivot_timeout_sec: 45.0
+    pivot_timeout_sec: 60.0

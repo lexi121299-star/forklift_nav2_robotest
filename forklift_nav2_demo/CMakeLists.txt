@@ -3,10 +3,19 @@ project(forklift_nav2_demo)
 
 find_package(ament_cmake REQUIRED)
 
-install(
-  DIRECTORY launch urdf config worlds docs behavior_trees rviz
-  DESTINATION share/${PROJECT_NAME}
-)
+set(FORKLIFT_NAV2_DEMO_INSTALL_DIRECTORIES)
+foreach(directory launch urdf config worlds docs behavior_trees rviz)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${directory}")
+    list(APPEND FORKLIFT_NAV2_DEMO_INSTALL_DIRECTORIES ${directory})
+  endif()
+endforeach()
+
+if(FORKLIFT_NAV2_DEMO_INSTALL_DIRECTORIES)
+  install(
+    DIRECTORY ${FORKLIFT_NAV2_DEMO_INSTALL_DIRECTORIES}
+    DESTINATION share/${PROJECT_NAME}
+  )
+endif()
 
 install(
   PROGRAMS scripts/forklift_teleop.py

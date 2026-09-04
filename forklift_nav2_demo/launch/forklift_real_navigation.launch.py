@@ -6,6 +6,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
+from nav2_common.launch import RewrittenYaml
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 import yaml
@@ -62,6 +63,13 @@ def generate_launch_description():
     localization_offset_x_m = LaunchConfiguration('localization_offset_x_m')
     localization_offset_y_m = LaunchConfiguration('localization_offset_y_m')
     localization_offset_yaw_rad = LaunchConfiguration('localization_offset_yaw_rad')
+    runtime_velocity_limit_mps = LaunchConfiguration('runtime_velocity_limit_mps')
+
+    nav2_params = RewrittenYaml(
+        source_file=params_file,
+        param_rewrites={'max_velocity': runtime_velocity_limit_mps},
+        convert_types=True,
+    )
 
     robot_description = ParameterValue(
         Command([
@@ -137,13 +145,25 @@ def generate_launch_description():
             'recovery_twist_topic': '/cmd_vel',
             'localization_topic': '/odom',
             'localization_message_type': 'odometry',
+            'base_frame_id': base_frame_id.perform(context),
             'costmap_timeout_sec': '1.5',
             # Cost 253 is the inflation layer's inscribed warning band. The
             # planner still uses a stricter route threshold; the final gate
             # blocks lethal cost 254 and unknown/out-of-map footprint samples.
             'footprint_collision_cost_threshold': '254',
-            'collision_check_horizon_sec': '0.6',
-            'collision_check_time_step_sec': '0.1',
+            'collision_check_horizon_sec': '0.1',
+            'collision_check_time_step_sec': '0.05',
+            'dynamic_stop_reaction_time_sec': '0.9',
+            'dynamic_stop_brake_deceleration_mps2': '1.5',
+            'dynamic_stop_clearance_m': '0.5',
+            'scan_protection_enabled': 'true',
+            'scan_topic': '/scan',
+            'scan_timeout_sec': '0.4',
+            'scan_required_range_m': '8.0',
+            'scan_collision_sample_spacing_m': '0.05',
+            'scan_collision_padding_m': '0.05',
+            'scan_require_motion_fov_coverage': 'true',
+            'max_forward_velocity_mps': runtime_velocity_limit_mps.perform(context),
             # Only logical reverse motion may ignore the selected pallet cells.
             'pallet_exemption_reverse_only': 'true',
             # Cover the pallet and its near scan returns, not the aisle.
@@ -188,7 +208,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(nav2_share, 'launch', 'navigation_launch.py')),
         launch_arguments={
-            'params_file': params_file,
+            'params_file': nav2_params,
             'use_sim_time': 'false',
             'autostart': 'true',
             'map_subscribe_transient_local': 'true',
@@ -230,6 +250,12 @@ def generate_launch_description():
             default_value='true',
             description='Safety default. Set false only when CAN hardware is ready.'),
         DeclareLaunchArgument('can_interface', default_value='can0'),
+        DeclareLaunchArgument(
+            'runtime_velocity_limit_mps',
+            default_value='0.47',
+            description=(
+                'Shared forward speed ceiling for FollowPath and Safety Gate. '
+                'Raise in measured .6/.8/1.0 m/s steps only.')),
         DeclareLaunchArgument(
             'invert_drive_direction',
             default_value='false',

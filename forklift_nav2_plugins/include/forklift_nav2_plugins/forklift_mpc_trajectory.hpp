@@ -31,6 +31,9 @@ struct MpcTrajectoryOptions
   double pivot_rear_axle_x_offset{0.0};
   double pivot_min_heading_change{0.2};
   double pivot_max_rear_axle_motion{0.08};
+  // Preserve this much of the first motion block after a pivot before applying
+  // corner-cut smoothing, allowing a deterministic straight departure.
+  double pivot_departure_capture_distance{0.0};
 };
 
 struct MpcTrajectoryDiagnostics

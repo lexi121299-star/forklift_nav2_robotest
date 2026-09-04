@@ -133,6 +133,11 @@ private:
   double headingErrorToPose(
     const MpcState & state,
     const geometry_msgs::msg::PoseStamped & pose) const;
+  bool hasStraightPostPivotCapture(
+    const MpcTrajectory & trajectory,
+    std::size_t pivot_index,
+    double target_yaw) const;
+  void resetPivotHandoffState();
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   rclcpp::Logger logger_{rclcpp::get_logger("forklift_nav2_plugins")};
@@ -180,6 +185,9 @@ private:
   double post_pivot_hold_duration_sec_{0.3};
   double post_pivot_slowdown_duration_sec_{2.0};
   double post_pivot_initial_max_speed_{0.12};
+  bool post_pivot_capture_enabled_{true};
+  double post_pivot_capture_distance_m_{0.3};
+  double post_pivot_capture_speed_mps_{0.15};
   // Stop-pivot-go latch: brake only on the approach motion BEFORE a pivot
   // starts, then commit. Once committed we must not re-brake on the pivot's own
   // rotation, or the gate stutters/stalls the spin (and on the real vehicle the
@@ -201,6 +209,7 @@ private:
   double pivot_step_target_yaw_{0.0};
   double pivot_step_direction_{0.0};
   int64_t pivot_step_hold_start_ns_{0};
+  int64_t pivot_yaw_within_tolerance_since_ns_{0};
   bool pivot_completion_latched_{false};
   std::size_t completed_pivot_index_{std::numeric_limits<std::size_t>::max()};
   double completed_pivot_x_{0.0};
@@ -208,6 +217,11 @@ private:
   double completed_pivot_target_yaw_{0.0};
   bool completed_pivot_left_preview_{false};
   bool post_pivot_transition_active_{false};
+  bool post_pivot_capture_available_{false};
+  bool post_pivot_capture_active_{false};
+  double post_pivot_capture_start_x_{0.0};
+  double post_pivot_capture_start_y_{0.0};
+  double post_pivot_capture_target_yaw_{0.0};
   double pivot_departure_steering_{0.0};
   int64_t pivot_departure_ready_ns_{0};
   bool new_goal_steering_settle_enabled_{true};
@@ -285,6 +299,9 @@ private:
   double safety_slowdown_distance_{1.25};
   double safety_min_speed_{0.05};
   double safety_sample_spacing_{0.10};
+  double safety_reaction_time_sec_{0.0};
+  double safety_brake_deceleration_mps2_{0.0};
+  double safety_clearance_m_{0.0};
 
   double speed_limit_{0.0};
   double last_steering_angle_{0.0};
