@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import math
+import copy
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -11,6 +14,8 @@ from forklift_msgs.srv import SetEmergencyStop
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
@@ -23,6 +28,59 @@ except ImportError:
 
 Point2D = Tuple[float, float]
 Pose2D = Tuple[float, float, float]
+
+
+class ObstacleReleaseState:
+    """Require a fresh, sustained clear sweep before resuming a blocked move."""
+
+    def __init__(self, clear_sec=0.5, steering_change_rad=0.15):
+        self.clear_sec = clear_sec
+        self.steering_change_rad = steering_change_rad
+        self.active = False
+        self.speed_floor = 0.0
+        self.signature = None
+        self.interrupt()
+
+    def interrupt(self):
+        self.clear_since = None
+        self.first_scan = None
+        self.first_costmap = None
+        self.ready = False
+
+    def commit_release(self):
+        if self.ready:
+            self.active = False
+            self.speed_floor = 0.0
+            self.interrupt()
+
+    def prepare(self, travel_direction, steering):
+        signature = (travel_direction, steering)
+        if self.signature is None or travel_direction != self.signature[0] or abs(
+                steering - self.signature[1]) > self.steering_change_rad:
+            # A genuinely different maneuver must be checked in its own sweep,
+            # not forced to clear the old forward corridor before reversing.
+            self.signature = signature
+            self.speed_floor = 0.0
+            self.interrupt()
+
+    def blocked(self, speed):
+        self.active = True
+        self.speed_floor = max(self.speed_floor, speed)
+        self.interrupt()
+
+    def clear(self, now, scan_token, costmap_token):
+        if not self.active:
+            return True
+        if self.clear_since is None or now < self.clear_since:
+            self.clear_since = now
+            self.first_scan = scan_token
+            self.first_costmap = costmap_token
+        fresh_scan = scan_token is None or scan_token != self.first_scan
+        fresh_costmap = costmap_token is None or costmap_token != self.first_costmap
+        if now - self.clear_since < self.clear_sec or not fresh_scan or not fresh_costmap:
+            return False
+        self.ready = True
+        return True
 
 
 @dataclass(frozen=True)
@@ -44,6 +102,19 @@ def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def spatial_sweep_time_step(
+    speed_mps: float,
+    sample_spacing_m: float,
+    horizon_sec: float,
+) -> float:
+    """Choose a prediction step by traveled distance, not a fixed timer rate."""
+    speed = abs(float(speed_mps))
+    horizon = positive(float(horizon_sec), 0.1)
+    if speed <= 1e-6:
+        return horizon
+    return max(0.01, min(horizon, positive(sample_spacing_m, 0.05) / speed))
+
+
 def dynamic_stopping_distance(
     speed_mps: float,
     reaction_time_sec: float,
@@ -57,6 +128,39 @@ def dynamic_stopping_distance(
     deceleration = positive(float(brake_deceleration_mps2), 1.0)
     clearance = max(0.0, float(clearance_m))
     return speed * reaction + speed * speed / (2.0 * deceleration) + clearance
+
+
+def source_age_sec(stamp, now_sec: float) -> float:
+    """Missing/future source timestamps must not refresh an old command."""
+    source = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    age = now_sec - source
+    if source <= 0.0 or not math.isfinite(age) or age < -0.1:
+        return math.inf
+    return max(0.0, age)
+
+
+def pivot_braking_poses(
+    footprint, commanded_rate, measured_rate, reaction_sec,
+    deceleration_radps2, margin_rad, axle_offset, spacing_m,
+):
+    """Sweep both residual and requested rotation, sampled at the outer corner."""
+    if not all(math.isfinite(v) for v in (commanded_rate, measured_rate)):
+        raise ValueError('pivot angular velocity unavailable')
+    radius = max(math.hypot(x - axle_offset, y) for x, y in footprint)
+    angle_step = min(0.03, positive(spacing_m, 0.05) / max(radius, 0.01))
+    poses = [(0.0, 0.0, 0.0)]
+    for sign in (-1.0, 1.0):
+        rate = max(0.0, sign * commanded_rate, sign * measured_rate)
+        if rate <= 1e-6:
+            continue
+        angle = min(2.0 * math.pi, dynamic_stopping_distance(
+            rate, reaction_sec, deceleration_radps2, margin_rad))
+        count = max(1, int(math.ceil(angle / angle_step)))
+        for i in range(1, count + 1):
+            yaw = sign * angle * i / count
+            poses.append((axle_offset * (1.0 - math.cos(yaw)),
+                          -axle_offset * math.sin(yaw), yaw))
+    return poses
 
 
 def scan_stop_reason(
@@ -172,15 +276,50 @@ def costmap_metadata(costmap: Any) -> Tuple[int, int, float, Any]:
 
 
 def costmap_error(costmap: Any) -> str:
-    width, height, resolution, _origin = costmap_metadata(costmap)
+    if isinstance(costmap, PreparedCostmap):
+        return costmap.error
+    width, height, resolution, origin = costmap_metadata(costmap)
     if width <= 0 or height <= 0:
         return 'empty dimensions'
-    if resolution <= 0.0:
+    if not math.isfinite(resolution) or resolution <= 0.0:
         return 'invalid resolution'
+    if not all(math.isfinite(v) for v in (
+            origin.position.x, origin.position.y, origin.orientation.x,
+            origin.orientation.y, origin.orientation.z, origin.orientation.w)):
+        return 'invalid origin'
     expected_cells = width * height
     if len(costmap.data) < expected_cells:
         return f'truncated data {len(costmap.data)}/{expected_cells}'
     return ''
+
+
+class PreparedCostmap:
+    """Read-only lookup context for one pinned costmap message, never a copy."""
+
+    def __init__(self, message):
+        self.error = costmap_error(message)
+        self.width, self.height, self.resolution, origin = costmap_metadata(message)
+        self.origin_x, self.origin_y = origin.position.x, origin.position.y
+        self.yaw = yaw_from_quaternion(origin.orientation) if not self.error else 0.0
+        self.cos_yaw, self.sin_yaw = math.cos(self.yaw), math.sin(self.yaw)
+        self.data = message.data
+        self.message = message
+
+    def cell(self, x, y):
+        dx, dy = x - self.origin_x, y - self.origin_y
+        mx = math.floor((dx * self.cos_yaw + dy * self.sin_yaw) / self.resolution)
+        my = math.floor((-dx * self.sin_yaw + dy * self.cos_yaw) / self.resolution)
+        if mx < 0 or my < 0 or mx >= self.width or my >= self.height:
+            return None
+        return mx, my
+
+
+def obstacle_stop_reason(reason):
+    # Coverage/TF/compute failures stop motion but are not obstacle evidence.
+    return reason.startswith((
+        'footprint collision: cost ', 'footprint collision: unknown',
+        'footprint reverse escape', 'scan footprint sweep collision',
+        'scan reverse escape'))
 
 
 def costmap_stop_reason(
@@ -231,6 +370,8 @@ def point_in_pallet_exemption(
 
 
 def world_to_map(costmap: Any, x: float, y: float) -> Optional[Tuple[int, int]]:
+    if isinstance(costmap, PreparedCostmap):
+        return costmap.cell(x, y)
     width, height, resolution, origin = costmap_metadata(costmap)
     yaw = yaw_from_quaternion(origin.orientation)
     dx = x - origin.position.x
@@ -249,7 +390,8 @@ def cost_at_world(costmap: Any, x: float, y: float) -> Optional[int]:
     if cell is None:
         return None
     mx, my = cell
-    width, _height, _resolution, _origin = costmap_metadata(costmap)
+    width = (costmap.width if isinstance(costmap, PreparedCostmap)
+             else costmap_metadata(costmap)[0])
     return int(costmap.data[my * width + mx])
 
 
@@ -348,16 +490,24 @@ def scan_sweep_collision(
     pivot_steering_angle_rad: float,
     collision_padding_m: float,
     pallet_exemption: Optional[PalletExemptionZone] = None,
+    allow_reverse_escape: bool = False,
+    reverse_escape_max_speed_mps: float = 0.15,
+    reverse_escape_max_steering_angle_rad: float = 0.05,
+    reverse_escape_obstacle_min_x_m: float = 0.0,
+    prediction_poses=None,
 ) -> Tuple[bool, str]:
     travel_direction = direction(command)
     speed = abs(float(command.velocity_mps))
     if travel_direction == 0 or speed <= 1e-6:
         return False, 'scan sweep clear'
 
-    step_distance = positive(sample_spacing_m, 0.05)
-    time_step = max(0.01, min(0.1, step_distance / speed))
     horizon_sec = stopping_distance_m / speed
-    for pose in predicted_poses_for_command(
+    time_step = spatial_sweep_time_step(
+        speed,
+        sample_spacing_m,
+        horizon_sec,
+    )
+    poses = prediction_poses if prediction_poses is not None else predicted_poses_for_command(
         (0.0, 0.0, 0.0),
         command,
         wheel_base,
@@ -366,13 +516,55 @@ def scan_sweep_collision(
         horizon_sec,
         time_step,
         pivot_steering_angle_rad,
-    ):
+    )
+
+    # Points beyond every swept footprint cannot collide. Keep the exact
+    # polygon/padding test for all remaining points.
+    radius = max(math.hypot(x, y) for x, y in footprint) + collision_padding_m
+    bound = radius + max(math.hypot(x, y) for x, y, _ in poses)
+    scan_points = [p for p in scan_points if p[0] ** 2 + p[1] ** 2 <= bound ** 2]
+
+    def colliding_indices(pose: Pose2D):
         world_footprint = [transform_point(point, pose) for point in footprint]
-        for point in scan_points:
+        collisions = set()
+        for index, point in enumerate(scan_points):
             if point_in_pallet_exemption(point, pallet_exemption):
                 continue
             if point_in_polygon_with_padding(point, world_footprint, collision_padding_m):
-                return True, 'scan footprint sweep collision'
+                collisions.add(index)
+        return collisions
+
+    initial_collisions = colliding_indices(poses[0])
+    escape_candidate = (
+        allow_reverse_escape
+        and travel_direction < 0
+        and speed <= reverse_escape_max_speed_mps + 1e-9
+        and abs(float(command.steering_angle_rad))
+        <= reverse_escape_max_steering_angle_rad + 1e-9
+        and bool(initial_collisions)
+        and all(
+            scan_points[index][0] >= reverse_escape_obstacle_min_x_m
+            for index in initial_collisions
+        )
+    )
+    if escape_candidate:
+        previous_count = len(initial_collisions)
+        for pose in poses[1:]:
+            collisions = colliding_indices(pose)
+            if not collisions.issubset(initial_collisions):
+                return True, 'scan reverse escape would hit a new obstacle'
+            if len(collisions) > previous_count:
+                return True, 'scan reverse escape overlap is increasing'
+            previous_count = len(collisions)
+        if previous_count == 0:
+            return False, 'scan reverse escape clear'
+        return True, 'scan reverse escape does not clear current overlap'
+
+    if initial_collisions:
+        return True, 'scan footprint sweep collision'
+    for pose in poses[1:]:
+        if colliding_indices(pose):
+            return True, 'scan footprint sweep collision'
     return False, 'scan sweep clear'
 
 
@@ -389,14 +581,20 @@ def footprint_collision_at_pose(
     if error:
         return True, f'costmap invalid: {error}'
 
-    world_points = [transform_point(point, pose) for point in footprint]
+    if not isinstance(costmap, PreparedCostmap):
+        costmap = PreparedCostmap(costmap)
+    cos_yaw, sin_yaw = math.cos(pose[2]), math.sin(pose[2])
+    world_points = [(pose[0] + x * cos_yaw - y * sin_yaw,
+                     pose[1] + x * sin_yaw + y * cos_yaw) for x, y in footprint]
     max_cost = 0
     for index, start in enumerate(world_points):
         end = world_points[(index + 1) % len(world_points)]
         for x, y in sampled_segment_points(start, end, sample_spacing):
             cost = cost_at_world(costmap, x, y)
             if cost is None:
-                return True, 'footprint collision: out of costmap'
+                return True, (
+                    'costmap coverage insufficient: point=({:.3f},{:.3f}) '
+                    'sweep_pose=({:.3f},{:.3f},{:.3f})'.format(x, y, *pose))
             if cost < 0:
                 if unknown_is_collision:
                     return True, 'footprint collision: unknown costmap cell'
@@ -467,8 +665,12 @@ def footprint_sweep_collision(
     cost_threshold: int,
     unknown_is_collision: bool,
     pallet_exemption: Optional[PalletExemptionZone] = None,
+    allow_initial_collision_escape: bool = False,
+    prediction_poses=None,
 ) -> Tuple[bool, str]:
-    for pose in predicted_poses_for_command(
+    if not isinstance(costmap, PreparedCostmap):
+        costmap = PreparedCostmap(costmap)
+    poses = prediction_poses if prediction_poses is not None else predicted_poses_for_command(
         initial_pose,
         command,
         wheel_base,
@@ -477,7 +679,23 @@ def footprint_sweep_collision(
         horizon_sec,
         time_step_sec,
         pivot_steering_angle_rad,
-    ):
+    )
+    initial_collision, initial_reason = footprint_collision_at_pose(
+        costmap,
+        footprint,
+        poses[0],
+        sample_spacing,
+        cost_threshold,
+        unknown_is_collision,
+        pallet_exemption,
+    )
+    if initial_collision and not allow_initial_collision_escape:
+        return True, initial_reason
+    if initial_collision and not initial_reason.startswith('footprint collision: cost '):
+        return True, initial_reason
+
+    cleared_initial_overlap = not initial_collision
+    for pose in poses[1:]:
         collision, reason = footprint_collision_at_pose(
             costmap,
             footprint,
@@ -488,7 +706,15 @@ def footprint_sweep_collision(
             pallet_exemption,
         )
         if collision:
+            if (allow_initial_collision_escape and not cleared_initial_overlap
+                    and reason.startswith('footprint collision: cost ')):
+                continue
             return True, reason
+        cleared_initial_overlap = True
+    if initial_collision and not cleared_initial_overlap:
+        return True, 'footprint reverse escape does not clear current overlap'
+    if initial_collision:
+        return False, 'footprint reverse escape clear'
     return False, 'footprint sweep clear'
 
 
@@ -525,7 +751,7 @@ def clamp_control_command(
     decel_time_sec: float,
 ) -> ForkliftControlCommand:
     gated = ForkliftControlCommand()
-    gated.header = command.header
+    gated.header = copy.deepcopy(command.header)
     gated.enable = command.enable
     gated.brake = command.brake
     gated.forward = command.forward
@@ -555,6 +781,22 @@ def clamp_control_command(
     gated.drive_rpm = command.drive_rpm
     apply_drive_envelope(gated, max_drive_rpm, accel_time_sec, decel_time_sec)
     return gated
+
+
+def cap_control_command_speed(
+    command: ForkliftControlCommand,
+    speed_limit_mps: float,
+) -> bool:
+    """Scale velocity and motor RPM together when scan freshness is degraded."""
+
+    speed_limit = max(0.0, float(speed_limit_mps))
+    requested_speed = abs(float(command.velocity_mps))
+    if requested_speed <= speed_limit + 1e-9:
+        return False
+    scale = speed_limit / requested_speed if requested_speed > 1e-9 else 0.0
+    command.velocity_mps = speed_limit
+    command.drive_rpm = abs(float(command.drive_rpm)) * scale
+    return True
 
 
 def recovery_command_from_twist(
@@ -665,13 +907,27 @@ class SafetyCommandGate(Node):
         self.declare_parameter('dynamic_stop_reaction_time_sec', 0.9)
         self.declare_parameter('dynamic_stop_brake_deceleration_mps2', 1.5)
         self.declare_parameter('dynamic_stop_clearance_m', 0.5)
+        self.declare_parameter('pivot_brake_deceleration_radps2', 0.15)
+        self.declare_parameter('pivot_stop_margin_rad', 0.05)
+        self.declare_parameter('collision_compute_budget_sec', 0.15)
         self.declare_parameter('scan_protection_enabled', True)
         self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('scan_timeout_sec', 0.4)
+        self.declare_parameter('scan_timeout_sec', 0.7)
+        self.declare_parameter('scan_high_speed_freshness_timeout_sec', 0.25)
+        self.declare_parameter('scan_degraded_max_speed_mps', 1.0)
+        self.declare_parameter('scan_fresh_recovery_duration_sec', 1.0)
+        self.declare_parameter('obstacle_release_clear_sec', 0.5)
+        self.declare_parameter('obstacle_release_steering_change_rad', 0.15)
         self.declare_parameter('scan_required_range_m', 8.0)
         self.declare_parameter('scan_collision_sample_spacing_m', 0.05)
         self.declare_parameter('scan_collision_padding_m', 0.05)
         self.declare_parameter('scan_require_motion_fov_coverage', True)
+        self.declare_parameter('allow_reverse_collision_escape', True)
+        self.declare_parameter('reverse_collision_escape_max_speed_mps', 0.15)
+        self.declare_parameter(
+            'reverse_collision_escape_max_steering_angle_rad', 0.05
+        )
+        self.declare_parameter('reverse_collision_escape_obstacle_min_x_m', 0.0)
         self.declare_parameter('pallet_exemption_enabled', True)
         self.declare_parameter(
             'pallet_exemption_pose_topic',
@@ -762,10 +1018,26 @@ class SafetyCommandGate(Node):
             0.0,
             float(self.get_parameter('dynamic_stop_clearance_m').value),
         )
+        self._pivot_brake_deceleration = self._positive_param(
+            'pivot_brake_deceleration_radps2', 0.15)
+        self._pivot_stop_margin = max(
+            0.0, float(self.get_parameter('pivot_stop_margin_rad').value))
+        self._collision_compute_budget = self._positive_param(
+            'collision_compute_budget_sec', 0.15)
         self._scan_protection_enabled = bool(
             self.get_parameter('scan_protection_enabled').value)
         self._scan_topic = str(self.get_parameter('scan_topic').value)
-        self._scan_timeout_sec = self._positive_param('scan_timeout_sec', 0.4)
+        self._scan_timeout_sec = self._positive_param('scan_timeout_sec', 0.7)
+        self._scan_high_speed_freshness_timeout_sec = min(
+            self._scan_timeout_sec,
+            self._positive_param('scan_high_speed_freshness_timeout_sec', 0.25),
+        )
+        self._scan_degraded_max_speed_mps = self._positive_param(
+            'scan_degraded_max_speed_mps', 1.0)
+        self._scan_fresh_recovery_duration_sec = max(
+            0.0,
+            float(self.get_parameter('scan_fresh_recovery_duration_sec').value),
+        )
         self._scan_required_range_m = self._positive_param('scan_required_range_m', 8.0)
         self._scan_collision_sample_spacing_m = self._positive_param(
             'scan_collision_sample_spacing_m', 0.05)
@@ -775,6 +1047,25 @@ class SafetyCommandGate(Node):
         )
         self._scan_require_motion_fov_coverage = bool(
             self.get_parameter('scan_require_motion_fov_coverage').value)
+        self._allow_reverse_collision_escape = bool(
+            self.get_parameter('allow_reverse_collision_escape').value
+        )
+        self._reverse_collision_escape_max_speed_mps = self._positive_param(
+            'reverse_collision_escape_max_speed_mps', 0.15
+        )
+        self._reverse_collision_escape_max_steering_angle_rad = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'reverse_collision_escape_max_steering_angle_rad'
+                ).value
+            ),
+        )
+        self._reverse_collision_escape_obstacle_min_x_m = float(
+            self.get_parameter(
+                'reverse_collision_escape_obstacle_min_x_m'
+            ).value
+        )
         self._pallet_exemption_enabled = bool(
             self.get_parameter('pallet_exemption_enabled').value
         )
@@ -838,29 +1129,53 @@ class SafetyCommandGate(Node):
         self._last_fault_state_time = self.get_clock().now()
         self._last_localization_time = self.get_clock().now()
         self._last_pose: Optional[Pose2D] = None
+        self._last_localization = None
+        self._last_yaw_rate = None
+        self._yaw_rate_stamp = None
         self._last_costmap: Optional[Any] = None
         self._last_costmap_time = self.get_clock().now()
         self._last_costmap_error = ''
+        self._last_costmap_interval_sec = 0.0
         self._last_scan: Optional[LaserScan] = None
         self._last_scan_time = self.get_clock().now()
+        self._scan_speed_degraded = False
+        self._scan_fresh_recovery_start = None
+        self._cached_scan: Optional[LaserScan] = None
+        self._cached_scan_points: List[Point2D] = []
+        self._cached_scan_to_base_yaw = 0.0
+        self._reverse_escape_validated_by_scan = False
         self._last_reason = ''
         self._pallet_exemption_active = False
         self._last_pallet_exemption_time = self.get_clock().now()
         self._pallet_exemption_pose: Optional[PoseStamped] = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._command_lock = threading.RLock()
+        self._stop_generation = 0
+        self._checked_command_stamp = None
+        self._checked_scan = None
+        self._checked_costmap = None
+        self._obstacle_release = ObstacleReleaseState(
+            self._positive_param('obstacle_release_clear_sec', 0.5),
+            self._positive_param('obstacle_release_steering_change_rad', 0.15))
+        self._raw_callback_group = MutuallyExclusiveCallbackGroup()
+        self._scan_callback_group = MutuallyExclusiveCallbackGroup()
+        self._scan_lock = threading.RLock()
+        self._costmap_callback_group = MutuallyExclusiveCallbackGroup()
+        self._costmap_lock = threading.RLock()
 
         self._command_pub = self.create_publisher(
             ForkliftControlCommand,
             self._gated_command_topic,
-            10,
+            1,
         )
         self._status_pub = self.create_publisher(String, self._status_topic, 10)
         self.create_subscription(
             ForkliftControlCommand,
             self._raw_command_topic,
             self._on_raw_command,
-            10,
+            1,
+            callback_group=self._raw_callback_group,
         )
         if self._recovery_twist_topic:
             self.create_subscription(
@@ -908,17 +1223,21 @@ class SafetyCommandGate(Node):
                         Nav2Costmap,
                         self._costmap_topic,
                         self._on_costmap,
-                        10,
+                        1,
+                        callback_group=self._costmap_callback_group,
                     )
             else:
                 self.create_subscription(
                     OccupancyGrid,
                     self._costmap_topic,
                     self._on_costmap,
-                    10,
+                    1,
+                    callback_group=self._costmap_callback_group,
                 )
         if self._scan_protection_enabled and self._scan_topic:
-            self.create_subscription(LaserScan, self._scan_topic, self._on_scan, 10)
+            self.create_subscription(
+                LaserScan, self._scan_topic, self._on_scan, 1,
+                callback_group=self._scan_callback_group)
         if self._pallet_exemption_enabled:
             self.create_subscription(
                 PoseStamped,
@@ -942,7 +1261,14 @@ class SafetyCommandGate(Node):
             f'safety_command_gate ready: {self._raw_command_topic} -> '
             f'{self._gated_command_topic}, recovery={self._recovery_twist_topic or "disabled"}, '
             f'costmap={self._costmap_topic or "disabled"}, '
-            f'scan={self._scan_topic if self._scan_protection_enabled else "disabled"}'
+            f'scan={self._scan_topic if self._scan_protection_enabled else "disabled"}, '
+            f'scan_timeout={self._scan_timeout_sec:.3f}s '
+            f'high_speed_freshness={self._scan_high_speed_freshness_timeout_sec:.3f}s '
+            f'degraded_max_speed={self._scan_degraded_max_speed_mps:.3f}m/s '
+            f'collision_budget={self._collision_compute_budget:.3f}s '
+            'scan_callback=independent latest-only '
+            f'costmap_callback=independent latest-only costmap_timeout={self._costmap_timeout_sec:.3f}s '
+            f'obstacle_release_clear={self._obstacle_release.clear_sec:.3f}s'
         )
 
     def _positive_param(self, name: str, fallback: float) -> float:
@@ -955,8 +1281,31 @@ class SafetyCommandGate(Node):
         return value
 
     def _on_raw_command(self, msg: ForkliftControlCommand) -> None:
-        self._last_raw_command = msg
-        self._last_raw_command_time = self.get_clock().now()
+        with self._command_lock:
+            self._last_raw_command = msg
+            self._last_raw_command_time = self.get_clock().now()
+            expired = source_age_sec(
+                msg.header.stamp, self._last_raw_command_time.nanoseconds / 1e9
+            ) > self._command_timeout_sec
+            if not msg.enable or msg.brake or expired:
+                # This callback runs independently of expensive collision work.
+                # A completed older check may never overwrite this stop.
+                self._stop_generation += 1
+                command = stop_command(self._last_raw_command_time.to_msg())
+                if not expired and not self._stop_reason_from_health():
+                    # Fork actions intentionally command hydraulics with the
+                    # traction brake applied. Preserve that existing contract.
+                    if msg.enable and msg.brake:
+                        command = copy.deepcopy(msg)
+                        command.header.stamp = self._last_raw_command_time.to_msg()
+                        command.forward = command.reverse = False
+                        command.velocity_mps = command.drive_rpm = 0.0
+                    command.steering_angle_rad = clamp(
+                        msg.steering_angle_rad,
+                        -self._max_steering_angle_rad, self._max_steering_angle_rad)
+                    command.steering_angle_deg = math.degrees(command.steering_angle_rad)
+                    command.enable = msg.enable
+                self._command_pub.publish(command)
 
     def _on_recovery_twist(self, msg: Twist) -> None:
         self._last_recovery_twist = msg
@@ -971,6 +1320,7 @@ class SafetyCommandGate(Node):
         self._last_fault_state_time = self.get_clock().now()
 
     def _on_localization(self, msg) -> None:
+        self._last_localization = msg
         self._last_localization_time = self.get_clock().now()
         pose = msg.pose.pose
         self._last_pose = (
@@ -978,16 +1328,100 @@ class SafetyCommandGate(Node):
             float(pose.position.y),
             yaw_from_quaternion(pose.orientation),
         )
+        self._last_yaw_rate = (
+            float(msg.twist.twist.angular.z) if hasattr(msg, 'twist') else None)
+        self._yaw_rate_stamp = copy.deepcopy(msg.header.stamp)
 
     def _on_costmap(self, msg: OccupancyGrid) -> None:
-        self._last_costmap_time = self.get_clock().now()
-        self._last_costmap_error = costmap_error(msg)
-        if not self._last_costmap_error:
+        now = self.get_clock().now()
+        error = costmap_error(msg)
+        with self._costmap_lock:
+            self._last_costmap_interval_sec = (
+                (now - self._last_costmap_time).nanoseconds / 1e9
+                if self._last_costmap is not None else 0.0)
+            self._last_costmap_time = now
+            self._last_costmap_error = error
             self._last_costmap = msg
 
+    def _costmap_snapshot(self):
+        with self._costmap_lock:
+            return (self._last_costmap, self._last_costmap_time,
+                    self._last_costmap_error, self._last_costmap_interval_sec)
+
+    def _costmap_snapshot_stop_reason(self, snapshot, now, phase):
+        costmap, received, error, interval = snapshot
+        age = (now - received).nanoseconds / 1e9
+        reason = costmap_stop_reason(
+            self._costmap_monitor_enabled, age, costmap is not None,
+            error, self._costmap_timeout_sec)
+        if reason == 'costmap timeout':
+            # Some Foxy Costmap publishers leave header/metadata stamps zero.
+            # Report source age, but do not use a missing stamp as freshness.
+            source = source_age_sec(costmap.header.stamp, now.nanoseconds / 1e9)
+            self.get_logger().warning(
+                'Costmap timeout detail: phase={} receive_age={:.3f}s '
+                'last_interval={:.3f}s source_age={:.3f}s timeout={:.3f}s'.format(
+                    phase, age, interval, source, self._costmap_timeout_sec),
+                throttle_duration_sec=2.0)
+        return reason
+
     def _on_scan(self, msg: LaserScan) -> None:
-        self._last_scan = msg
-        self._last_scan_time = self.get_clock().now()
+        now = self.get_clock().now()
+        with self._scan_lock:
+            if source_age_sec(msg.header.stamp, now.nanoseconds / 1e9) > self._scan_high_speed_freshness_timeout_sec:
+                self._scan_speed_degraded = True
+                self._scan_fresh_recovery_start = None
+            elif self._last_scan is not None:
+                interval_sec = (now - self._last_scan_time).nanoseconds / 1e9
+                if interval_sec > self._scan_high_speed_freshness_timeout_sec:
+                    self._scan_speed_degraded = True
+                    self._scan_fresh_recovery_start = None
+                elif self._scan_speed_degraded:
+                    if self._scan_fresh_recovery_start is None:
+                        self._scan_fresh_recovery_start = now
+                    elif (
+                        now - self._scan_fresh_recovery_start
+                    ).nanoseconds / 1e9 >= self._scan_fresh_recovery_duration_sec:
+                        self._scan_speed_degraded = False
+                        self._scan_fresh_recovery_start = None
+            self._last_scan = msg
+            self._last_scan_time = now
+        # Projection caches belong exclusively to the collision timer. The
+        # message-identity key invalidates them without racing this callback.
+
+    def _scan_snapshot(self):
+        with self._scan_lock:
+            return self._last_scan, self._last_scan_time
+
+    def _scan_snapshot_stop_reason(self, snapshot, now, phase):
+        scan, received = snapshot
+        receive_age = (now - received).nanoseconds / 1e9
+        source_age = source_age_sec(scan.header.stamp, now.nanoseconds / 1e9) if scan is not None else math.inf
+        reason = scan_stop_reason(
+            self._scan_protection_enabled, max(receive_age, source_age),
+            scan is not None, float(scan.range_max) if scan is not None else 0.0,
+            self._scan_timeout_sec, self._scan_required_range_m)
+        if reason == 'scan timeout':
+            stamp = scan.header.stamp
+            self.get_logger().warning(
+                'Scan timeout detail: phase={} receive_age={:.3f}s source_age={:.3f}s '
+                'timeout={:.3f}s source_stamp={}.{:09d}; '
+                'receive_age is callback age, not DDS transport age'.format(
+                    phase, receive_age, source_age, self._scan_timeout_sec,
+                    stamp.sec, stamp.nanosec), throttle_duration_sec=2.0)
+        return reason
+
+    def _scan_speed_is_degraded(self):
+        with self._scan_lock:
+            now = self.get_clock().now()
+            age = (now - self._last_scan_time).nanoseconds / 1e9
+            if self._last_scan is not None:
+                age = max(age, source_age_sec(
+                    self._last_scan.header.stamp, now.nanoseconds / 1e9))
+            if self._scan_protection_enabled and age > self._scan_high_speed_freshness_timeout_sec:
+                self._scan_speed_degraded = True
+                self._scan_fresh_recovery_start = None
+            return self._scan_protection_enabled and self._scan_speed_degraded
 
     def _on_pallet_exemption_pose(self, msg: PoseStamped) -> None:
         self._pallet_exemption_pose = msg
@@ -1012,21 +1446,82 @@ class SafetyCommandGate(Node):
         return response
 
     def _on_timer(self) -> None:
+        started = time.monotonic()
+        self._checked_scan = None
+        self._checked_costmap = None
+        with self._command_lock:
+            generation = self._stop_generation
         command, reason = self._latest_safe_command()
-        self._command_pub.publish(command)
+        elapsed = time.monotonic() - started
+        with self._command_lock:
+            if generation != self._stop_generation:
+                if getattr(self, '_obstacle_release', None) is not None:
+                    self._obstacle_release.interrupt()
+                return
+            now = self.get_clock().now()
+            source_age = source_age_sec(
+                self._checked_command_stamp, now.nanoseconds / 1e9
+            ) if self._checked_command_stamp is not None else 0.0
+            if command.enable and not command.brake:
+                if source_age > self._command_timeout_sec:
+                    command, reason = stop_command(now.to_msg()), 'command source timeout'
+                elif elapsed > self._collision_compute_budget:
+                    command, reason = stop_command(now.to_msg()), 'collision check deadline exceeded'
+                if command.enable and not command.brake and self._checked_costmap is not None:
+                    map_reason = self._costmap_snapshot_stop_reason(
+                        self._checked_costmap, now, 'after_collision_check')
+                    if not map_reason:
+                        map_reason = self._costmap_snapshot_stop_reason(
+                            self._costmap_snapshot(), now, 'latest_before_publish')
+                    if map_reason:
+                        command, reason = stop_command(now.to_msg()), map_reason
+                if command.enable and not command.brake and self._checked_scan is not None:
+                    # New arrivals must not freshen an older scan that was
+                    # actually used for the swept-footprint collision check.
+                    scan_reason = self._scan_snapshot_stop_reason(
+                        self._checked_scan, now, 'after_collision_check')
+                    if not scan_reason:
+                        scan_reason = self._scan_snapshot_stop_reason(
+                            self._scan_snapshot(), now, 'latest_before_publish')
+                    if scan_reason:
+                        command, reason = stop_command(now.to_msg()), scan_reason
+                    elif self._scan_speed_is_degraded() and cap_control_command_speed(
+                            command, self._scan_degraded_max_speed_mps):
+                        reason = ('raw command: scan freshness speed cap '
+                                  f'{self._scan_degraded_max_speed_mps:.2f} m/s')
+            if (getattr(self, '_obstacle_release', None) is not None
+                    and reason != 'obstacle release waiting for stable clearance'
+                    and (not command.enable or command.brake)):
+                self._obstacle_release.interrupt()
+            elif (getattr(self, '_obstacle_release', None) is not None
+                    and command.enable and not command.brake):
+                self._obstacle_release.commit_release()
+            self._command_pub.publish(command)
+        if elapsed > 0.05:
+            self.get_logger().warning(
+                'Safety check slow: {:.3f} s; command source age {:.3f} s'.format(
+                    elapsed, source_age), throttle_duration_sec=2.0)
         self._publish_status(reason)
         self._log_reason(reason)
 
     def _latest_safe_command(self) -> Tuple[ForkliftControlCommand, str]:
+        self._checked_command_stamp = None
         stamp = self.get_clock().now().to_msg()
         stop_reason = self._stop_reason_from_health()
         if stop_reason:
             return stop_command(stamp), stop_reason
 
-        raw_age = (self.get_clock().now() - self._last_raw_command_time).nanoseconds / 1e9
-        if self._last_raw_command is not None and raw_age <= self._command_timeout_sec:
+        with self._command_lock:
+            raw = self._last_raw_command
+            received = self._last_raw_command_time
+        raw_age = (self.get_clock().now() - received).nanoseconds / 1e9
+        if raw is not None:
+            self._checked_command_stamp = copy.deepcopy(raw.header.stamp)
+            if source_age_sec(raw.header.stamp, self.get_clock().now().nanoseconds / 1e9) > self._command_timeout_sec:
+                return stop_command(stamp), 'command source timeout'
+        if raw is not None and raw_age <= self._command_timeout_sec:
             command = clamp_control_command(
-                self._last_raw_command,
+                raw,
                 self._max_forward_velocity_mps,
                 self._max_reverse_velocity_mps,
                 self._max_steering_angle_rad,
@@ -1043,9 +1538,30 @@ class SafetyCommandGate(Node):
                 if is_steering_only_command(command):
                     return command, 'steering center'
                 return stop_command(stamp), 'invalid direction'
+            scan_speed_capped = self._scan_speed_is_degraded() and cap_control_command_speed(
+                command, self._scan_degraded_max_speed_mps)
             collision_reason = self._collision_stop_reason(command)
             if collision_reason:
-                return stop_command(stamp), collision_reason
+                stopped = stop_command(stamp)
+                # Ordinary obstacle pauses preserve a fresh measured angle;
+                # health failures still use the independent hard stop above.
+                state = self._last_vehicle_state
+                if (state is not None and math.isfinite(state.steering_angle_rad)
+                        and (self.get_clock().now() - self._last_vehicle_state_time).nanoseconds / 1e9
+                        <= self._vehicle_state_timeout_sec
+                        and ('collision' in collision_reason or 'footprint' in collision_reason
+                             or collision_reason.startswith('costmap coverage insufficient')
+                             or collision_reason == 'obstacle release waiting for stable clearance')):
+                    stopped.steering_angle_rad = clamp(
+                        state.steering_angle_rad,
+                        -self._max_steering_angle_rad, self._max_steering_angle_rad)
+                    stopped.steering_angle_deg = math.degrees(stopped.steering_angle_rad)
+                return stopped, collision_reason
+            if scan_speed_capped:
+                return command, (
+                    'raw command: scan freshness speed cap '
+                    f'{self._scan_degraded_max_speed_mps:.2f} m/s'
+                )
             return command, 'raw command'
 
         if self._allow_recovery_twist and self._last_recovery_twist is not None:
@@ -1117,14 +1633,8 @@ class SafetyCommandGate(Node):
                 return 'localization timeout'
 
         if self._costmap_monitor_enabled:
-            age = (now - self._last_costmap_time).nanoseconds / 1e9
-            reason = costmap_stop_reason(
-                self._costmap_monitor_enabled,
-                age,
-                self._last_costmap is not None,
-                self._last_costmap_error,
-                self._costmap_timeout_sec,
-            )
+            reason = self._costmap_snapshot_stop_reason(
+                self._costmap_snapshot(), now, 'before_collision_check')
             if reason:
                 return reason
 
@@ -1133,19 +1643,122 @@ class SafetyCommandGate(Node):
     def _collision_stop_reason(self, command: ForkliftControlCommand) -> str:
         if not self._collision_check_enabled:
             return ''
+        release = self._obstacle_release
+        release.prepare(direction(command), float(command.steering_angle_rad))
+        probe = copy.deepcopy(command)
+        # Use the same protected speed in the costmap and scan geometry. The
+        # output command is unchanged; this only prevents shrinking a blocked
+        # sweep as the vehicle brakes or the MPC restarts its acceleration ramp.
+        probe.velocity_mps = self._protected_speed(command)
+        reason = self._collision_check_reason(probe)
+        if reason:
+            if obstacle_stop_reason(reason):
+                release.blocked(self._protected_speed(command))
+            else:
+                release.interrupt()
+            return reason
+        scan_token = None
+        if self._scan_protection_enabled and self._checked_scan is not None:
+            stamp = self._checked_scan[0].header.stamp
+            scan_token = (stamp.sec, stamp.nanosec)
+        costmap_token = (self._checked_costmap[1].nanoseconds
+                         if self._checked_costmap is not None
+                         and self._checked_costmap[0] is not None else None)
+        if not release.clear(self.get_clock().now().nanoseconds / 1e9,
+                             scan_token, costmap_token):
+            return 'obstacle release waiting for stable clearance'
+        return ''
+
+    def _collision_check_reason(self, command: ForkliftControlCommand) -> str:
+        started = time.monotonic()
+        self._collision_timings = {}
+        reason = ''
+        try:
+            reason = self._collision_check_impl(command)
+            return reason
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.05:
+                self.get_logger().warning(
+                    'Collision timing: total={:.4f}s scan={:.4f}s pose_tf={:.4f}s '
+                    'costmap={:.4f}s result={}'.format(
+                        elapsed, self._collision_timings.get('scan', 0.0),
+                        self._collision_timings.get('pose_tf', 0.0),
+                        self._collision_timings.get('costmap', 0.0), reason),
+                    throttle_duration_sec=2.0)
+
+    def _pose_in_costmap(self, frame):
+        msg = self._last_localization
+        if msg is None:
+            raise ValueError('costmap pose missing')
+        source = msg.header.frame_id
+        child = getattr(msg, 'child_frame_id', self._base_frame_id)
+        if not frame or not source or not child:
+            raise ValueError('costmap pose frame missing')
+        age = source_age_sec(msg.header.stamp, self.get_clock().now().nanoseconds / 1e9)
+        if age > self._localization_timeout_sec:
+            raise ValueError('costmap pose source stale')
+        p = msg.pose.pose
+        pose = (float(p.position.x), float(p.position.y), yaw_from_quaternion(p.orientation))
+        if not all(math.isfinite(v) for v in pose):
+            raise ValueError('costmap pose invalid')
+
+        def lookup(target, origin):
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    target, origin, Time.from_msg(msg.header.stamp)).transform
+            except Exception as exc:
+                raise ValueError('costmap pose transform unavailable: {} <- {}'.format(
+                    target, origin)) from exc
+            result = (tf.translation.x, tf.translation.y, yaw_from_quaternion(tf.rotation))
+            if not all(math.isfinite(v) for v in result):
+                raise ValueError('costmap pose transform invalid')
+            return result
+
+        # Odometry may describe base_footprint rather than the footprint's base_link.
+        # Use the pose's source timestamp, never the older rolling-grid timestamp.
+        if child != self._base_frame_id:
+            offset = lookup(child, self._base_frame_id)
+            pose = (*transform_point(offset[:2], pose), pose[2] + offset[2])
+        if source != frame:
+            offset = lookup(frame, source)
+            pose = (*transform_point(pose[:2], offset), pose[2] + offset[2])
+        return pose
+
+    def _collision_check_impl(self, command: ForkliftControlCommand) -> str:
+        if not self._collision_check_enabled:
+            return ''
         if not command.enable or command.brake or direction(command) == 0:
             return ''
+        try:
+            pivot_poses = self._pivot_prediction(command)
+        except ValueError as exc:
+            return str(exc)
+        started = time.monotonic()
         scan_reason = self._scan_collision_stop_reason(command)
+        self._collision_timings['scan'] = time.monotonic() - started
         if scan_reason:
             return scan_reason
-        if self._last_costmap is None:
+        snapshot = self._costmap_snapshot()
+        self._checked_costmap = snapshot
+        costmap = snapshot[0]
+        reason = self._costmap_snapshot_stop_reason(
+            snapshot, self.get_clock().now(), 'collision_check')
+        if reason:
+            return reason
+        if costmap is None:
             return ''
-        if self._last_pose is None:
-            return 'collision pose missing'
+        started = time.monotonic()
+        try:
+            pose = self._pose_in_costmap(costmap.header.frame_id)
+        except ValueError as exc:
+            return str(exc)
+        finally:
+            self._collision_timings['pose_tf'] = time.monotonic() - started
 
         pallet_exemption = self._active_pallet_exemption(
             command,
-            str(getattr(self._last_costmap.header, 'frame_id', '')),
+            str(getattr(costmap.header, 'frame_id', '')),
         )
         cost_threshold = self._footprint_collision_cost_threshold
         if pallet_exemption is not None:
@@ -1154,23 +1767,74 @@ class SafetyCommandGate(Node):
                 self._pallet_exemption_cost_threshold,
             )
 
+        collision_horizon_sec = self._dynamic_collision_horizon_sec(command)
+        collision_time_step_sec = spatial_sweep_time_step(
+            self._protected_speed(command),
+            self._scan_collision_sample_spacing_m,
+            collision_horizon_sec,
+        )
+        started = time.monotonic()
         collision, reason = footprint_sweep_collision(
-            self._last_costmap,
+            costmap,
             self._footprint,
-            self._last_pose,
+            pose,
             command,
             self._wheel_base,
             self._pivot_turn_radius,
             self._rear_axle_x_offset,
-            self._dynamic_collision_horizon_sec(command),
-            self._collision_check_time_step_sec,
+            collision_horizon_sec,
+            collision_time_step_sec,
             self._pivot_steering_angle_rad,
             self._footprint_sample_spacing,
             cost_threshold,
             self._unknown_is_collision,
             pallet_exemption,
+            self._reverse_escape_validated_by_scan,
+            prediction_poses=(
+                [(*transform_point((x, y), pose), yaw + pose[2])
+                 for x, y, yaw in pivot_poses] if pivot_poses is not None else None),
         )
+        self._collision_timings['costmap'] = time.monotonic() - started
+        if reason.startswith('costmap coverage insufficient'):
+            width, height, resolution, origin = costmap_metadata(costmap)
+            now = self.get_clock().now()
+            self.get_logger().warning(
+                '{}; frame={} size={}x{} resolution={:.3f} '
+                'origin=({:.3f},{:.3f},{:.3f}) pose=({:.3f},{:.3f},{:.3f}) '
+                'receive_age={:.3f}s source_age={:.3f}s '
+                'pose_frame={} pose_age={:.3f}s speed={:.3f} horizon={:.3f}s'.format(
+                    reason, costmap.header.frame_id, width, height, resolution,
+                    origin.position.x, origin.position.y, yaw_from_quaternion(origin.orientation),
+                    *pose, (now - snapshot[1]).nanoseconds / 1e9,
+                    source_age_sec(costmap.header.stamp, now.nanoseconds / 1e9),
+                    self._last_localization.header.frame_id,
+                    source_age_sec(self._last_localization.header.stamp, now.nanoseconds / 1e9),
+                    self._protected_speed(command), collision_horizon_sec),
+                throttle_duration_sec=2.0)
         return reason if collision else ''
+
+    def _pivot_prediction(self, command):
+        if abs(command.steering_angle_rad) < self._pivot_steering_angle_rad - 1e-3:
+            return None
+        if (self._last_yaw_rate is None or self._yaw_rate_stamp is None
+                or not math.isfinite(self._last_yaw_rate)
+                or source_age_sec(self._yaw_rate_stamp, self.get_clock().now().nanoseconds / 1e9)
+                > self._localization_timeout_sec):
+            raise ValueError('pivot angular feedback stale or unavailable')
+        rate = math.copysign(
+            self._protected_speed(command) / self._pivot_turn_radius,
+            command.steering_angle_rad)
+        poses = pivot_braking_poses(
+            self._footprint, rate, self._last_yaw_rate,
+            self._dynamic_stop_reaction_time_sec, self._pivot_brake_deceleration,
+            self._pivot_stop_margin, self._rear_axle_x_offset,
+            self._scan_collision_sample_spacing_m)
+        self.get_logger().info(
+            'Pivot safety sweep: command_w={:.3f} measured_w={:.3f} '
+            'angle={:.3f} rad samples={}'.format(
+                rate, self._last_yaw_rate, max(abs(p[2]) for p in poses), len(poses)),
+            throttle_duration_sec=2.0)
+        return poses
 
     def _dynamic_collision_horizon_sec(
         self,
@@ -1192,35 +1856,46 @@ class SafetyCommandGate(Node):
         vehicle_speed = 0.0
         if self._last_vehicle_state is not None:
             vehicle_speed = abs(float(self._last_vehicle_state.velocity_mps))
-        return max(vehicle_speed, abs(float(command.velocity_mps)))
+        return max(vehicle_speed, abs(float(command.velocity_mps)),
+                   self._obstacle_release.speed_floor if self._obstacle_release.active else 0.0)
 
     def _scan_collision_stop_reason(self, command: ForkliftControlCommand) -> str:
+        self._reverse_escape_validated_by_scan = False
+        snapshot = self._scan_snapshot()
+        scan, _received = snapshot
+        self._checked_scan = snapshot if self._scan_protection_enabled else None
         now = self.get_clock().now()
-        scan = self._last_scan
-        age_sec = (now - self._last_scan_time).nanoseconds / 1e9
-        reason = scan_stop_reason(
-            self._scan_protection_enabled,
-            age_sec,
-            scan is not None,
-            float(scan.range_max) if scan is not None else 0.0,
-            self._scan_timeout_sec,
-            self._scan_required_range_m,
-        )
+        reason = self._scan_snapshot_stop_reason(snapshot, now, 'before_collision_check')
         if reason:
             return reason
         if scan is None:
             return ''
 
-        try:
-            transform = self._tf_buffer.lookup_transform(
-                self._base_frame_id,
-                scan.header.frame_id,
-                Time.from_msg(scan.header.stamp),
-            )
-        except Exception:
-            return 'scan transform unavailable'
+        if self._cached_scan is scan:
+            scan_to_base_yaw = self._cached_scan_to_base_yaw
+            scan_points = self._cached_scan_points
+        else:
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    self._base_frame_id,
+                    scan.header.frame_id,
+                    Time.from_msg(scan.header.stamp),
+                )
+            except Exception:
+                return 'scan transform unavailable'
 
-        scan_to_base_yaw = yaw_from_quaternion(transform.transform.rotation)
+            scan_to_base_yaw = yaw_from_quaternion(transform.transform.rotation)
+            scan_points = laser_scan_points_in_base(
+                scan,
+                (
+                    float(transform.transform.translation.x),
+                    float(transform.transform.translation.y),
+                    scan_to_base_yaw,
+                ),
+            )
+            self._cached_scan = scan
+            self._cached_scan_points = scan_points
+            self._cached_scan_to_base_yaw = scan_to_base_yaw
         travel_angle = 0.0 if direction(command) > 0 else math.pi
         if self._scan_require_motion_fov_coverage and not angle_in_scan_fov(
             travel_angle,
@@ -1230,14 +1905,6 @@ class SafetyCommandGate(Node):
             return 'scan blind motion direction'
 
         pallet_exemption = self._active_pallet_exemption(command, self._base_frame_id)
-        scan_points = laser_scan_points_in_base(
-            scan,
-            (
-                float(transform.transform.translation.x),
-                float(transform.transform.translation.y),
-                scan_to_base_yaw,
-            ),
-        )
         collision, reason = scan_sweep_collision(
             scan_points,
             self._footprint,
@@ -1255,6 +1922,14 @@ class SafetyCommandGate(Node):
             self._pivot_steering_angle_rad,
             self._scan_collision_padding_m,
             pallet_exemption,
+            self._allow_reverse_collision_escape,
+            self._reverse_collision_escape_max_speed_mps,
+            self._reverse_collision_escape_max_steering_angle_rad,
+            self._reverse_collision_escape_obstacle_min_x_m,
+            prediction_poses=self._pivot_prediction(command),
+        )
+        self._reverse_escape_validated_by_scan = (
+            not collision and reason == 'scan reverse escape clear'
         )
         return reason if collision else ''
 
@@ -1343,11 +2018,15 @@ class SafetyCommandGate(Node):
 def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = SafetyCommandGate()
+    # Keep stops and both sensor streams runnable during collision computation.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

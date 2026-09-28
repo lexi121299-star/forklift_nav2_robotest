@@ -138,19 +138,17 @@ def test_selected_inline_candidate_pivots_then_moves_directly_to_clearance():
     assert geometry.stop.x == pytest.approx(11.89)
     assert geometry.final_motion.distance_m == pytest.approx(-0.61)
     assert geometry.pivot.yaw == pytest.approx(0.0)
-    assert geometry.infeed_pivot.yaw == pytest.approx(math.pi)
-    assert geometry.infeed_motion.distance_m == pytest.approx(0.6)
+    assert geometry.infeed_pivot is None
+    assert geometry.infeed_motion is None
     assert geometry.uses_fallback_alignment is False
     assert [target.name for target in build_pallet_approach_route(geometry).targets] == [
-        'pallet_staging_runup',
-        'pallet_pivot_to_infeed',
-        'pallet_runup_to_staging',
+        'pallet_staging',
         'pallet_pivot_to_target',
         'pallet_final_approach',
     ]
 
 
-def test_selected_lateral_candidate_uses_segmented_astar_alignment():
+def test_selected_lateral_candidate_is_rejected():
     maneuver = PalletManeuverConfig()
     candidate = build_candidate(
         pallet_x=0.0,
@@ -161,23 +159,13 @@ def test_selected_lateral_candidate_uses_segmented_astar_alignment():
         lateral_m=0.5,
         runup_distance_m=0.6,
     )
-    geometry = build_selected_pallet_approach(
-        pallet_x=0.0,
-        pallet_y=0.0,
-        pallet_yaw=0.0,
-        frame_id='map',
-        config=PalletApproachConfig(),
-        maneuver_config=maneuver,
-        candidate=candidate,
-    )
-
-    assert geometry.uses_fallback_alignment is True
-    assert [target.name for target in build_pallet_approach_route(geometry).targets] == [
-        'pallet_staging_runup',
-        'pallet_pivot_to_infeed',
-        'pallet_runup_to_staging',
-        'pallet_pivot_to_target',
-        'pallet_alignment',
-        'pallet_pre_approach',
-        'pallet_final_approach',
-    ]
+    with pytest.raises(PalletApproachError, match='pallet normal'):
+        build_selected_pallet_approach(
+            pallet_x=0.0,
+            pallet_y=0.0,
+            pallet_yaw=0.0,
+            frame_id='map',
+            config=PalletApproachConfig(),
+            maneuver_config=maneuver,
+            candidate=candidate,
+        )

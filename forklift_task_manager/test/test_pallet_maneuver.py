@@ -73,6 +73,41 @@ def test_candidate_limit_returns_after_first_clear_candidate():
     assert candidates[0].distance_m == pytest.approx(3.5)
 
 
+def test_selected_pallet_map_cell_is_ignored_only_during_final_sweep():
+    costmap = fake_costmap()
+    set_cost(costmap, 0.0, 0.0, 254)
+
+    candidates = select_clear_candidates(
+        costmap=costmap,
+        pallet_x=0.0,
+        pallet_y=0.0,
+        outward_yaw=0.0,
+        frame_id='map',
+        config=PalletManeuverConfig(),
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].distance_m == pytest.approx(3.5)
+
+
+def test_obstacle_outside_selected_pallet_box_still_rejects_final_sweep():
+    costmap = fake_costmap()
+    set_cost(costmap, 1.2, 0.7, 254)
+
+    candidates = select_clear_candidates(
+        costmap=costmap,
+        pallet_x=0.0,
+        pallet_y=0.0,
+        outward_yaw=0.0,
+        frame_id='map',
+        config=PalletManeuverConfig(),
+        max_candidates=1,
+    )
+
+    assert candidates == []
+
+
 def test_turn_envelope_rejects_lethal_cell_and_unknown_space():
     costmap = fake_costmap()
     assert circular_turn_is_clear(costmap, (2.5, 0.0), 1.9, 254)

@@ -34,12 +34,27 @@ def generate_launch_description():
     scan_protection_enabled = LaunchConfiguration('scan_protection_enabled')
     scan_topic = LaunchConfiguration('scan_topic')
     scan_timeout_sec = LaunchConfiguration('scan_timeout_sec')
+    obstacle_release_clear_sec = LaunchConfiguration('obstacle_release_clear_sec')
+    obstacle_release_steering_change_rad = LaunchConfiguration('obstacle_release_steering_change_rad')
+    scan_high_speed_freshness_timeout_sec = LaunchConfiguration(
+        'scan_high_speed_freshness_timeout_sec')
+    scan_degraded_max_speed_mps = LaunchConfiguration('scan_degraded_max_speed_mps')
+    scan_fresh_recovery_duration_sec = LaunchConfiguration(
+        'scan_fresh_recovery_duration_sec')
     scan_required_range_m = LaunchConfiguration('scan_required_range_m')
     scan_collision_sample_spacing_m = LaunchConfiguration(
         'scan_collision_sample_spacing_m')
     scan_collision_padding_m = LaunchConfiguration('scan_collision_padding_m')
     scan_require_motion_fov_coverage = LaunchConfiguration(
         'scan_require_motion_fov_coverage')
+    allow_reverse_collision_escape = LaunchConfiguration(
+        'allow_reverse_collision_escape')
+    reverse_collision_escape_max_speed_mps = LaunchConfiguration(
+        'reverse_collision_escape_max_speed_mps')
+    reverse_collision_escape_max_steering_angle_rad = LaunchConfiguration(
+        'reverse_collision_escape_max_steering_angle_rad')
+    reverse_collision_escape_obstacle_min_x_m = LaunchConfiguration(
+        'reverse_collision_escape_obstacle_min_x_m')
     pallet_exemption_enabled = LaunchConfiguration('pallet_exemption_enabled')
     pallet_exemption_pose_topic = LaunchConfiguration('pallet_exemption_pose_topic')
     pallet_exemption_active_topic = LaunchConfiguration(
@@ -85,6 +100,7 @@ def generate_launch_description():
         DeclareLaunchArgument('costmap_timeout_sec', default_value='1.5'),
         DeclareLaunchArgument('costmap_monitor_enabled', default_value='true'),
         DeclareLaunchArgument('collision_check_enabled', default_value='true'),
+        DeclareLaunchArgument('costmap_collision_check_enabled', default_value='true'),
         DeclareLaunchArgument(
             'footprint',
             default_value='[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'),
@@ -98,11 +114,25 @@ def generate_launch_description():
         DeclareLaunchArgument('dynamic_stop_clearance_m', default_value='0.5'),
         DeclareLaunchArgument('scan_protection_enabled', default_value='true'),
         DeclareLaunchArgument('scan_topic', default_value='/scan'),
-        DeclareLaunchArgument('scan_timeout_sec', default_value='0.4'),
+        DeclareLaunchArgument('scan_timeout_sec', default_value='0.7'),
+        DeclareLaunchArgument('obstacle_release_clear_sec', default_value='0.5'),
+        DeclareLaunchArgument('obstacle_release_steering_change_rad', default_value='0.15'),
+        DeclareLaunchArgument(
+            'scan_high_speed_freshness_timeout_sec', default_value='0.25'),
+        DeclareLaunchArgument('scan_degraded_max_speed_mps', default_value='1.0'),
+        DeclareLaunchArgument(
+            'scan_fresh_recovery_duration_sec', default_value='1.0'),
         DeclareLaunchArgument('scan_required_range_m', default_value='8.0'),
         DeclareLaunchArgument('scan_collision_sample_spacing_m', default_value='0.05'),
         DeclareLaunchArgument('scan_collision_padding_m', default_value='0.05'),
         DeclareLaunchArgument('scan_require_motion_fov_coverage', default_value='true'),
+        DeclareLaunchArgument('allow_reverse_collision_escape', default_value='true'),
+        DeclareLaunchArgument(
+            'reverse_collision_escape_max_speed_mps', default_value='0.15'),
+        DeclareLaunchArgument(
+            'reverse_collision_escape_max_steering_angle_rad', default_value='0.05'),
+        DeclareLaunchArgument(
+            'reverse_collision_escape_obstacle_min_x_m', default_value='0.0'),
         DeclareLaunchArgument('pallet_exemption_enabled', default_value='true'),
         DeclareLaunchArgument(
             'pallet_exemption_pose_topic',
@@ -127,6 +157,9 @@ def generate_launch_description():
         DeclareLaunchArgument('drive_decel_time_sec', default_value='3.0'),
         DeclareLaunchArgument('wheel_base', default_value='1.4'),
         DeclareLaunchArgument('pivot_turn_radius', default_value='0.6'),
+        DeclareLaunchArgument('pivot_brake_deceleration_radps2', default_value='0.15'),
+        DeclareLaunchArgument('pivot_stop_margin_rad', default_value='0.05'),
+        DeclareLaunchArgument('collision_compute_budget_sec', default_value='0.15'),
         DeclareLaunchArgument('rear_axle_x_offset', default_value='0.0'),
         DeclareLaunchArgument(
             'pivot_steering_angle_rad',
@@ -153,6 +186,7 @@ def generate_launch_description():
                 'costmap_timeout_sec': costmap_timeout_sec,
                 'costmap_monitor_enabled': costmap_monitor_enabled,
                 'collision_check_enabled': collision_check_enabled,
+                'costmap_collision_check_enabled': LaunchConfiguration('costmap_collision_check_enabled'),
                 # Foxy otherwise YAML-parses the string into a nested sequence,
                 # which launch_ros rejects as a non-uniform parameter array.
                 'footprint': ParameterValue(footprint, value_type=str),
@@ -167,10 +201,23 @@ def generate_launch_description():
                 'scan_protection_enabled': scan_protection_enabled,
                 'scan_topic': scan_topic,
                 'scan_timeout_sec': scan_timeout_sec,
+                'obstacle_release_clear_sec': obstacle_release_clear_sec,
+                'obstacle_release_steering_change_rad': obstacle_release_steering_change_rad,
+                'scan_high_speed_freshness_timeout_sec': (
+                    scan_high_speed_freshness_timeout_sec),
+                'scan_degraded_max_speed_mps': scan_degraded_max_speed_mps,
+                'scan_fresh_recovery_duration_sec': scan_fresh_recovery_duration_sec,
                 'scan_required_range_m': scan_required_range_m,
                 'scan_collision_sample_spacing_m': scan_collision_sample_spacing_m,
                 'scan_collision_padding_m': scan_collision_padding_m,
                 'scan_require_motion_fov_coverage': scan_require_motion_fov_coverage,
+                'allow_reverse_collision_escape': allow_reverse_collision_escape,
+                'reverse_collision_escape_max_speed_mps': (
+                    reverse_collision_escape_max_speed_mps),
+                'reverse_collision_escape_max_steering_angle_rad': (
+                    reverse_collision_escape_max_steering_angle_rad),
+                'reverse_collision_escape_obstacle_min_x_m': (
+                    reverse_collision_escape_obstacle_min_x_m),
                 'pallet_exemption_enabled': pallet_exemption_enabled,
                 'pallet_exemption_pose_topic': pallet_exemption_pose_topic,
                 'pallet_exemption_active_topic': pallet_exemption_active_topic,
@@ -189,6 +236,9 @@ def generate_launch_description():
                 'drive_decel_time_sec': drive_decel_time_sec,
                 'wheel_base': wheel_base,
                 'pivot_turn_radius': pivot_turn_radius,
+                'pivot_brake_deceleration_radps2': LaunchConfiguration('pivot_brake_deceleration_radps2'),
+                'pivot_stop_margin_rad': LaunchConfiguration('pivot_stop_margin_rad'),
+                'collision_compute_budget_sec': LaunchConfiguration('collision_compute_budget_sec'),
                 'rear_axle_x_offset': rear_axle_x_offset,
                 'pivot_steering_angle_rad': pivot_steering_angle_rad,
                 'control_rate_hz': control_rate_hz,

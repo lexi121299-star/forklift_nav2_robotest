@@ -46,6 +46,36 @@ MpcPreviewWindow makeMpcPreviewWindowFromIndex(
   return window;
 }
 
+MpcPreviewWindow makeMpcPreviewWindowFromIndexByDistance(
+  const MpcTrajectory & trajectory,
+  std::size_t start_index,
+  double target_length)
+{
+  if (trajectory.empty()) {
+    return {};
+  }
+
+  const std::size_t start = std::min(start_index, trajectory.size() - 1);
+  const double requested_length = std::max(0.0, target_length);
+  std::size_t end = start;
+  while (end + 1u < trajectory.size() &&
+    trajectory[end].distance - trajectory[start].distance < requested_length)
+  {
+    ++end;
+  }
+
+  MpcPreviewWindow window;
+  window.start_index = start;
+  window.end_index = end;
+  window.length = std::max(0.0, trajectory[end].distance - trajectory[start].distance);
+  window.valid = true;
+  window.points.reserve(end - start + 1u);
+  for (std::size_t i = start; i <= end; ++i) {
+    window.points.push_back(trajectory[i]);
+  }
+  return window;
+}
+
 bool isMpcPreviewConsumed(
   const MpcPreviewWindow & window,
   std::size_t trajectory_size)

@@ -216,83 +216,38 @@ def build_selected_pallet_approach(
         frame_id=frame_id,
         max_start_position_error_m=config.max_start_position_error_m,
     )
-    infeed_pivot = PivotTarget(
-        name='pallet_pivot_to_infeed',
-        x=candidate.runup.x,
-        y=candidate.runup.y,
-        yaw=candidate.staging.yaw,
-        max_speed_mps=_require_positive(config.pivot_speed_mps, 'pivot_speed_mps'),
-        timeout_sec=_require_positive(config.pivot_timeout_sec, 'pivot_timeout_sec'),
-        frame_id=frame_id,
-        max_start_position_error_m=config.max_start_position_error_m,
-    )
-    infeed_timeout = max(
+    if abs(candidate.lateral_m) > 1e-9:
+        raise PalletApproachError('selected staging candidate must be on pallet normal')
+    final_distance = candidate.distance_m - stop_distance
+    if config.forks_on_negative_x:
+        final_distance = -final_distance
+    timeout = max(
         config.final_approach_timeout_sec,
-        maneuver_config.turn_runup_distance_m / config.final_approach_speed_mps + 10.0,
+        abs(final_distance) / config.final_approach_speed_mps + 10.0,
     )
-    infeed_motion = RelativeMoveTarget(
-        name='pallet_runup_to_staging',
-        # The runup and staging poses face toward the pallet. Drive forward
-        # through this short verified corridor, then perform the only required
-        # pallet-facing pivot at the selected staging point.
-        distance_m=maneuver_config.turn_runup_distance_m,
+    final_motion = RelativeMoveTarget(
+        name='pallet_final_approach',
+        distance_m=final_distance,
         max_speed_mps=config.final_approach_speed_mps,
-        timeout_sec=infeed_timeout,
-        expected_start_x=candidate.runup.x,
-        expected_start_y=candidate.runup.y,
-        expected_start_yaw=candidate.staging.yaw,
+        timeout_sec=timeout,
+        expected_start_x=candidate.staging.x,
+        expected_start_y=candidate.staging.y,
+        expected_start_yaw=outward_yaw,
         frame_id=frame_id,
         max_start_position_error_m=config.max_start_position_error_m,
         max_start_heading_error_rad=config.max_start_heading_error_rad,
+        pallet_exemption_x=pallet_x,
+        pallet_exemption_y=pallet_y,
+        pallet_exemption_yaw=outward_yaw,
     )
-
-    if candidate.direct_final_approach:
-        final_distance = candidate.distance_m - stop_distance
-        if config.forks_on_negative_x:
-            final_distance = -final_distance
-        timeout = max(
-            config.final_approach_timeout_sec,
-            abs(final_distance) / config.final_approach_speed_mps + 10.0,
-        )
-        final_motion = RelativeMoveTarget(
-            name='pallet_final_approach',
-            distance_m=final_distance,
-            max_speed_mps=config.final_approach_speed_mps,
-            timeout_sec=timeout,
-            expected_start_x=candidate.staging.x,
-            expected_start_y=candidate.staging.y,
-            expected_start_yaw=outward_yaw,
-            frame_id=frame_id,
-            max_start_position_error_m=config.max_start_position_error_m,
-            max_start_heading_error_rad=config.max_start_heading_error_rad,
-            pallet_exemption_x=pallet_x,
-            pallet_exemption_y=pallet_y,
-            pallet_exemption_yaw=outward_yaw,
-        )
-        return PalletApproachGeometry(
-            alignment=base.alignment,
-            pre_approach=candidate.staging,
-            stop=base.stop,
-            final_motion=final_motion,
-            staging_runup=candidate.runup,
-            staging=candidate.staging,
-            infeed_pivot=infeed_pivot,
-            infeed_motion=infeed_motion,
-            pivot=pivot,
-            uses_fallback_alignment=False,
-        )
-
     return PalletApproachGeometry(
         alignment=base.alignment,
-        pre_approach=base.pre_approach,
+        pre_approach=candidate.staging,
         stop=base.stop,
-        final_motion=base.final_motion,
-        staging_runup=candidate.runup,
+        final_motion=final_motion,
         staging=candidate.staging,
-        infeed_pivot=infeed_pivot,
-        infeed_motion=infeed_motion,
         pivot=pivot,
-        uses_fallback_alignment=True,
+        uses_fallback_alignment=False,
     )
 
 
@@ -301,33 +256,15 @@ def build_pallet_approach_route(
 ) -> RouteDefinition:
     """Convert computed geometry into an executable mixed-motion route."""
 
-    if (
-        geometry.staging_runup is None
-        or geometry.staging is None
-        or geometry.infeed_pivot is None
-        or geometry.infeed_motion is None
-        or geometry.pivot is None
-    ):
+    if geometry.staging is None or geometry.pivot is None:
         targets = (
-            geometry.alignment,
-            geometry.pre_approach,
-            geometry.final_motion,
-        )
-    elif geometry.uses_fallback_alignment:
-        targets = (
-            geometry.staging_runup,
-            geometry.infeed_pivot,
-            geometry.infeed_motion,
-            geometry.pivot,
             geometry.alignment,
             geometry.pre_approach,
             geometry.final_motion,
         )
     else:
         targets = (
-            geometry.staging_runup,
-            geometry.infeed_pivot,
-            geometry.infeed_motion,
+            geometry.staging,
             geometry.pivot,
             geometry.final_motion,
         )

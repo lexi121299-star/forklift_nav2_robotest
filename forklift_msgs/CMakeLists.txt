@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MoveRelative.action"
   "action/PivotRelative.action"
   "msg/ForkliftControlCommand.msg"
+  "msg/ForkliftControllerDebug.msg"
   "msg/ForkliftVehicleState.msg"
   "msg/ForkliftFaultState.msg"
   "msg/ForkliftIoState.msg"

@@ -4,8 +4,11 @@ from forklift_vehicle_interface.fine_motion_adapter import (
     motion_command,
     nonnegative_finite,
     pivot_command,
+    pivot_yaw_is_settled,
     pivot_step_hold_enabled,
     steering_center_command,
+    steering_center_is_settled,
+    steering_center_settle_started_at,
     shortest_angle,
 )
 
@@ -41,6 +44,34 @@ def test_steering_center_command_has_no_traction_but_stays_enabled():
     assert command.steering_angle_rad == 0.0
 
 
+def test_steering_center_requires_continuous_in_tolerance_feedback():
+    started_at = steering_center_settle_started_at(
+        steering_angle_rad=0.04,
+        max_steering_angle_rad=0.10,
+        now_sec=10.0,
+        previous_started_at_sec=None,
+    )
+    assert started_at == 10.0
+    assert not steering_center_is_settled(started_at, 10.39, 0.4)
+
+    started_at = steering_center_settle_started_at(
+        steering_angle_rad=0.11,
+        max_steering_angle_rad=0.10,
+        now_sec=10.40,
+        previous_started_at_sec=started_at,
+    )
+    assert started_at is None
+
+    started_at = steering_center_settle_started_at(
+        steering_angle_rad=0.03,
+        max_steering_angle_rad=0.10,
+        now_sec=10.45,
+        previous_started_at_sec=started_at,
+    )
+    assert started_at == 10.45
+    assert steering_center_is_settled(started_at, 10.85, 0.4)
+
+
 def test_shortest_angle_wraps():
     assert abs(shortest_angle(6.283185307179586)) < 1e-9
 
@@ -51,6 +82,12 @@ def test_zero_pivot_step_hold_is_valid():
     assert pivot_step_hold_enabled(0.2) is True
     with pytest.raises(ValueError, match='non-negative'):
         nonnegative_finite(-0.1, 'pivot_step_hold_sec')
+
+
+def test_pivot_requires_yaw_and_yaw_rate_to_settle():
+    assert pivot_yaw_is_settled(0.02, 0.02, 0.025, 0.03)
+    assert not pivot_yaw_is_settled(0.03, 0.0, 0.025, 0.03)
+    assert not pivot_yaw_is_settled(0.0, 0.04, 0.025, 0.03)
 
 
 def test_positive_pivot_command_uses_forward_and_left_steering():

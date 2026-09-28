@@ -160,6 +160,23 @@ TEST(ForkliftMpcTrajectory, ReversePathUsesMotionYawWhenPreserveDisabled)
   EXPECT_NEAR(std::abs(result.trajectory[1].state.theta), kPi, 1e-9);
 }
 
+TEST(ForkliftMpcTrajectory, ReverseCurveFlipsSteeringFeedForwardSign)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0, 0.0));
+  path.poses.push_back(makePose(-1.0, 0.0, 0.0));
+  path.poses.push_back(makePose(-2.0, -0.2, 0.0));
+  MpcTrajectoryOptions options;
+  options.preserve_path_orientation_for_reverse = true;
+
+  const auto trajectory = pathToMpcTrajectory(path, testVehicleModel(), options);
+
+  ASSERT_EQ(trajectory.size(), 3u);
+  ASSERT_TRUE(trajectory[1].reverse_motion);
+  EXPECT_GT(trajectory[1].curvature, 0.0);
+  EXPECT_LT(trajectory[1].steering_angle, 0.0);
+}
+
 TEST(ForkliftMpcTrajectory, LeftTurnHasPositiveCurvatureAndClampedSteering)
 {
   const auto vehicle_model = testVehicleModel();
@@ -192,6 +209,42 @@ TEST(ForkliftMpcTrajectory, DuplicatePointsAreFiltered)
   ASSERT_EQ(trajectory.size(), 2u);
   EXPECT_NEAR(trajectory[0].distance, 0.0, 1e-9);
   EXPECT_NEAR(trajectory[1].distance, 1.0, 1e-9);
+}
+
+TEST(ForkliftMpcTrajectory, PivotDepartureUsesRoadGoingSteeringReference)
+{
+  MpcTrajectory trajectory(3u);
+  trajectory[0].state.x = 0.0;
+  trajectory[0].state.y = 0.0;
+  trajectory[0].distance = 0.0;
+  trajectory[0].pivot_motion = true;
+  trajectory[0].curvature = 1.0;
+  trajectory[0].steering_angle = 0.5 * kPi;
+  trajectory[0].speed_limit = 0.0;
+
+  trajectory[1].state.x = 0.10;
+  trajectory[1].state.y = 0.0;
+  trajectory[1].distance = 0.10;
+  trajectory[1].curvature = 0.0;
+  trajectory[1].steering_angle = 0.0;
+  trajectory[1].speed_limit = 1.0;
+
+  trajectory[2].state.x = 1.10;
+  trajectory[2].state.y = 0.0;
+  trajectory[2].distance = 1.10;
+  trajectory[2].curvature = 0.0;
+  trajectory[2].steering_angle = 0.0;
+  trajectory[2].speed_limit = 1.0;
+
+  MpcState state;
+  state.x = 0.05;
+  state.y = 0.01;
+  const auto projection = projectMpcSegment(trajectory, state, 0u, 2u);
+
+  ASSERT_TRUE(projection.valid);
+  EXPECT_NEAR(projection.curvature, 0.0, 1e-9);
+  EXPECT_NEAR(projection.steering_reference, 0.0, 1e-9);
+  EXPECT_NEAR(projection.speed_limit, 1.0, 1e-9);
 }
 
 TEST(ForkliftMpcTrajectory, ResamplingDensifiesSparsePath)
@@ -291,6 +344,110 @@ TEST(ForkliftMpcTrajectory, HighCurvatureDoesNotImplyPivotMotion)
   EXPECT_NEAR(result.trajectory[1].speed_limit, 0.08, 1e-9);
 }
 
+TEST(ForkliftMpcTrajectory, SteeringRateLimitsAndAnticipatesCurveExitSpeed)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(0.5, 0.0));
+  path.poses.push_back(makePose(1.0, 0.1));
+  path.poses.push_back(makePose(1.4, 0.5));
+  path.poses.push_back(makePose(1.8, 1.0));
+  path.poses.push_back(makePose(2.3, 1.1));
+  path.poses.push_back(makePose(2.8, 1.1));
+
+  MpcTrajectoryOptions options;
+  options.max_velocity = 1.0;
+  options.enable_resampling = true;
+  options.resample_spacing = 0.05;
+  options.enable_steering_rate_slowdown = true;
+  options.steering_rate_speed_margin = 0.5;
+  options.steering_rate_lookahead_distance = 0.5;
+  options.steering_profile_window = 0.30;
+  options.minimum_controllable_speed = 0.09;
+
+  const auto result = processPathToMpcTrajectory(
+    path, testVehicleModel(), options);
+  ASSERT_GT(result.trajectory.size(), 20u);
+  EXPECT_LT(result.diagnostics.min_steering_rate_speed_limit, 1.0);
+
+  for (const auto & point : result.trajectory) {
+    EXPECT_TRUE(std::isfinite(point.curvature_derivative));
+    if (point.speed_limit > 1e-9) {
+      EXPECT_GE(point.speed_limit, 0.09 - 1e-9);
+    }
+  }
+  EXPECT_GE(result.diagnostics.min_nonzero_speed_limit, 0.09 - 1e-9);
+  EXPECT_LT(result.diagnostics.min_steering_rate_speed_limit, 1.0);
+}
+
+TEST(ForkliftMpcTrajectory, ReedsSheppDirectionCuspDoesNotCreateCurvatureSpike)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0, 0.0));
+  path.poses.push_back(makePose(1.0, 0.0, 0.0));
+  path.poses.push_back(makePose(0.95, 0.0, 0.0));
+  path.poses.push_back(makePose(0.45, 0.0, 0.0));
+
+  MpcTrajectoryOptions options;
+  options.preserve_path_orientation_for_reverse = true;
+  options.max_velocity = 1.0;
+  options.minimum_controllable_speed = 0.09;
+
+  const auto result = processPathToMpcTrajectory(
+    path, testVehicleModel(), options);
+
+  EXPECT_EQ(result.diagnostics.direction_change_count, 1u);
+  EXPECT_LT(result.diagnostics.max_curvature, 1e-9);
+  ASSERT_GE(result.trajectory.size(), 3u);
+  EXPECT_TRUE(result.trajectory[1].stop_before_point);
+  EXPECT_NEAR(result.trajectory[0].speed_limit, 0.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].speed_limit, 0.0, 1e-9);
+}
+
+TEST(ForkliftMpcTrajectory, SpeedProfileBrakesBeforeTerminalStop)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(1.0, 0.0));
+  path.poses.push_back(makePose(2.0, 0.0));
+  path.poses.push_back(makePose(3.0, 0.0));
+
+  MpcTrajectoryOptions options;
+  options.max_velocity = 2.0;
+  options.max_longitudinal_acceleration = 0.5;
+  options.planned_deceleration = 0.5;
+  options.minimum_controllable_speed = 0.09;
+
+  const auto result = processPathToMpcTrajectory(
+    path, testVehicleModel(), options);
+
+  ASSERT_EQ(result.trajectory.size(), 4u);
+  EXPECT_NEAR(result.trajectory.back().speed_limit, 0.0, 1e-9);
+  for (std::size_t i = 1u; i < result.trajectory.size(); ++i) {
+    const double ds = result.trajectory[i].distance -
+      result.trajectory[i - 1u].distance;
+    const double speed_squared_drop =
+      result.trajectory[i - 1u].speed_limit * result.trajectory[i - 1u].speed_limit -
+      result.trajectory[i].speed_limit * result.trajectory[i].speed_limit;
+    EXPECT_LE(speed_squared_drop, 2.0 * options.planned_deceleration * ds + 1e-9);
+  }
+}
+
+TEST(ForkliftMpcTrajectory, SteeringAxlePreviewDetectsHeadingDrivenOffset)
+{
+  nav_msgs::msg::Path path;
+  path.poses.push_back(makePose(0.0, 0.0));
+  path.poses.push_back(makePose(2.0, 0.0));
+  const auto trajectory = pathToMpcTrajectory(path, testVehicleModel());
+  const auto state = makeMpcState(0.5, 0.10, 0.10, 0.0, testVehicleModel());
+  const auto projection = projectMpcSegment(
+    trajectory, state, 0u, trajectory.size() - 1u);
+
+  ASSERT_TRUE(projection.valid);
+  EXPECT_NEAR(projection.cross_track, 0.10, 1e-9);
+  EXPECT_GT(steeringAxleCrossTrackError(projection, state, 1.40), 0.20);
+}
+
 TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
 {
   const double rear_axle_x_offset = -0.34;
@@ -326,7 +483,8 @@ TEST(ForkliftMpcTrajectory, RearAxlePivotPathPreservesVehicleYaw)
   EXPECT_NEAR(result.trajectory[0].steering_angle, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[1].steering_angle, 0.5 * kPi, 1e-9);
   EXPECT_NEAR(result.trajectory[0].speed_limit, 1.0, 1e-9);
-  EXPECT_NEAR(result.trajectory[1].speed_limit, 1.0, 1e-9);
+  EXPECT_NEAR(result.trajectory[1].speed_limit, 0.0, 1e-9);
+  EXPECT_TRUE(result.trajectory[1].stop_before_point);
 }
 
 TEST(ForkliftMpcTrajectory, ResamplingPreservesExplicitSamePositionPivot)

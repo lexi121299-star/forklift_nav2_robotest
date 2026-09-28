@@ -23,6 +23,17 @@ def generate_launch_description():
         'enforce_pallet_approach_station'
     )
     rviz_goal_mode = LaunchConfiguration('rviz_goal_mode')
+    legacy_goal_pose_enabled = LaunchConfiguration('legacy_goal_pose_enabled')
+    navigation_goal_topic = LaunchConfiguration('navigation_goal_topic')
+    pallet_goal_topic = LaunchConfiguration('pallet_goal_topic')
+    compute_path_timeout_sec = LaunchConfiguration('compute_path_timeout_sec')
+    pallet_selection_total_timeout_sec = LaunchConfiguration(
+        'pallet_selection_total_timeout_sec'
+    )
+    hierarchical_navigation_enabled = LaunchConfiguration(
+        'hierarchical_navigation_enabled'
+    )
+    topology_planner_id = LaunchConfiguration('topology_planner_id')
     pallet_standoff_distance_m = LaunchConfiguration('pallet_standoff_distance_m')
     pallet_final_approach_distance_m = LaunchConfiguration(
         'pallet_final_approach_distance_m'
@@ -88,6 +99,21 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('enforce_pallet_approach_station', default_value='true'),
         DeclareLaunchArgument('rviz_goal_mode', default_value='navigation'),
+        DeclareLaunchArgument('legacy_goal_pose_enabled', default_value='false'),
+        DeclareLaunchArgument(
+            'navigation_goal_topic', default_value='/forklift/navigation_goal'
+        ),
+        DeclareLaunchArgument(
+            'pallet_goal_topic', default_value='/forklift/pallet_goal'
+        ),
+        DeclareLaunchArgument('compute_path_timeout_sec', default_value='12.0'),
+        DeclareLaunchArgument(
+            'pallet_selection_total_timeout_sec', default_value='20.0'
+        ),
+        DeclareLaunchArgument(
+            'hierarchical_navigation_enabled', default_value='true'
+        ),
+        DeclareLaunchArgument('topology_planner_id', default_value='TopologyOnly'),
         DeclareLaunchArgument('pallet_standoff_distance_m', default_value='-1.0'),
         DeclareLaunchArgument(
             'pallet_final_approach_distance_m', default_value='1.00'
@@ -135,6 +161,15 @@ def generate_launch_description():
                 'pivot_relative_action': pivot_relative_action,
                 'enforce_pallet_approach_station': enforce_pallet_approach_station,
                 'rviz_goal_mode': rviz_goal_mode,
+                'legacy_goal_pose_enabled': legacy_goal_pose_enabled,
+                'navigation_goal_topic': navigation_goal_topic,
+                'pallet_goal_topic': pallet_goal_topic,
+                'compute_path_timeout_sec': compute_path_timeout_sec,
+                'pallet_selection_total_timeout_sec': (
+                    pallet_selection_total_timeout_sec
+                ),
+                'hierarchical_navigation_enabled': hierarchical_navigation_enabled,
+                'topology_planner_id': topology_planner_id,
                 'pallet_standoff_distance_m': pallet_standoff_distance_m,
                 'pallet_final_approach_distance_m': (
                     pallet_final_approach_distance_m

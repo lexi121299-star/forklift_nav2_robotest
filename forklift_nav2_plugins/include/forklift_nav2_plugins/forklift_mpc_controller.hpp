@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "forklift_msgs/msg/forklift_control_command.hpp"
+#include "forklift_msgs/msg/forklift_controller_debug.hpp"
 #include "forklift_msgs/msg/forklift_vehicle_state.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_preview_window.hpp"
 #include "forklift_nav2_plugins/forklift_mpc_solver.hpp"
@@ -29,6 +30,7 @@
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "tf2_ros/buffer.h"
 
 namespace forklift_nav2_plugins
@@ -60,6 +62,7 @@ public:
   void setSpeedLimit(const double & speed_limit, const bool & percentage);
 
 private:
+  friend class ForkliftMpcControllerTestAccess;
   struct Candidate
   {
     double velocity;
@@ -90,6 +93,7 @@ private:
     double velocity, double steering,
     const MpcState & start_state,
     const geometry_msgs::msg::Twist & current_velocity,
+    const MpcTrajectory & transformed_trajectory,
     const nav_msgs::msg::Path & transformed_plan,
     std::size_t nearest_index,
     std::size_t lookahead_index) const;
@@ -100,19 +104,44 @@ private:
   void publishControlCommand(
     double velocity, double steering,
     const std::string & frame_id) const;
+  void publishControllerDebug(
+    const geometry_msgs::msg::PoseStamped & pose,
+    const MpcSegmentProjection & projection,
+    const Candidate & candidate,
+    const geometry_msgs::msg::Twist & measured_velocity,
+    double tracking_preview,
+    double profile_preview,
+    double active_velocity_limit,
+    const std::string & limit_reason,
+    bool reverse_motion,
+    bool pivot_motion) const;
   MpcTrajectoryOptions trajectoryOptions(double max_velocity) const;
   double previewSpeedLimit(
     const MpcPreviewWindow & preview_window,
     double fallback) const;
+  double dynamicPreviewDistance(
+    double current_speed,
+    double requested_max_speed) const;
+  double profilePreviewDistance() const;
   double steeringAngleSpeedLimit(
     double steering_angle,
     double fallback) const;
+  double steeringReferenceTrackingSpeedLimit(
+    double steering_angle,
+    double steering_reference,
+    double fallback) const;
+  double trackingErrorSpeedLimit(
+    double cross_track_error,
+    double fallback) const;
+  bool curveExitSteeringReturnRequired(
+    double steering_angle,
+    double steering_reference) const;
   SafetyGateLimit safetyGateLimit(
     const MpcState & state, double motion_sign,
-    double requested_max_speed) const;
+    double requested_max_speed, double steering_angle) const;
   double nearestSafetyObstacleDistance(
     const MpcState & state,
-    double motion_sign) const;
+    double motion_sign, double steering_angle) const;
   SafetyGateParameters safetyGateParameters() const;
   bool safetyEmergencyStopActive() const;
   bool previewHasReverseMotion(const MpcPreviewWindow & preview_window) const;
@@ -137,7 +166,11 @@ private:
     const MpcTrajectory & trajectory,
     std::size_t pivot_index,
     double target_yaw) const;
+  bool postPivotCapturePoseAcceptable(
+    double yaw_error, double cross_track_error,
+    bool projection_valid) const;
   void resetPivotHandoffState();
+  void resetCurveExitHandoffState();
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   rclcpp::Logger logger_{rclcpp::get_logger("forklift_nav2_plugins")};
@@ -155,15 +188,20 @@ private:
   std::string costmap_frame_;
   nav_msgs::msg::Path global_plan_;
   MpcTrajectory global_trajectory_;
+  MpcTrajectoryDiagnostics trajectory_diagnostics_;
   MpcPreviewWindow last_preview_window_;
+  uint32_t route_token_{0};
+  std::atomic<int32_t> navigation_anchor_index_{-1};
 
   double wheel_base_{1.4};
   double max_velocity_{0.45};
+  double straight_cruise_speed_mps_{1.10};
   double min_velocity_{0.0};
   double max_reverse_velocity_{0.0};
   double max_steering_angle_{0.55};
   double max_steering_angle_velocity_{0.7};
   double max_acceleration_{0.5};
+  double command_feedback_allowance_sec_{0.5};
   double max_angular_velocity_{0.8};
   bool allow_pivot_turn_{false};
   double pivot_steering_angle_{1.5707963267948966};
@@ -173,6 +211,17 @@ private:
   bool invert_pivot_yaw_direction_{false};
   double pivot_velocity_{0.12};
   double pivot_yaw_tolerance_{0.05};
+  double pivot_yaw_rate_tolerance_{0.03};
+  double pivot_yaw_settle_duration_sec_{0.3};
+  double pivot_reacquire_yaw_tolerance_{0.05};
+  int pivot_max_corrections_{1};
+  double pivot_brake_reaction_time_sec_{0.3};
+  double pivot_brake_deceleration_radps2_{0.2};
+  double pivot_brake_margin_rad_{0.01};
+  PivotBrakeState pivot_brake_state_;
+  double primitive_brake_reaction_time_sec_{0.5};
+  double primitive_brake_deceleration_mps2_{0.5};
+  double pivot_entry_lateral_tolerance_m_{0.15};
   double pivot_stop_velocity_threshold_{0.02};
   double pivot_activation_distance_{0.20};
   bool pivot_step_enabled_{true};
@@ -188,6 +237,20 @@ private:
   bool post_pivot_capture_enabled_{true};
   double post_pivot_capture_distance_m_{0.3};
   double post_pivot_capture_speed_mps_{0.15};
+  double post_pivot_capture_heading_tolerance_{0.025};
+  double post_pivot_capture_lateral_tolerance_m_{0.20};
+  double post_pivot_steering_settle_duration_sec_{0.2};
+  bool post_pivot_recovery_enabled_{true};
+  double post_pivot_recovery_speed_mps_{0.20};
+  double post_pivot_recovery_max_speed_mps_{0.30};
+  double post_pivot_recovery_timeout_sec_{20.0};
+  int64_t post_pivot_recovery_started_ns_{0};
+  double post_pivot_recovery_motion_sec_{0.0};
+  double post_pivot_recovery_steering_limit_rad_{0.35};
+  double post_pivot_recovery_heading_tolerance_{0.035};
+  double post_pivot_recovery_max_heading_error_{0.15};
+  double post_pivot_recovery_lateral_tolerance_m_{0.05};
+  double post_pivot_recovery_settle_duration_sec_{0.3};
   // Stop-pivot-go latch: brake only on the approach motion BEFORE a pivot
   // starts, then commit. Once committed we must not re-brake on the pivot's own
   // rotation, or the gate stutters/stalls the spin (and on the real vehicle the
@@ -202,6 +265,7 @@ private:
   double active_pivot_x_{0.0};
   double active_pivot_y_{0.0};
   double active_pivot_target_yaw_{0.0};
+  double active_pivot_remaining_yaw_{0.0};
   double active_pivot_departure_steering_{0.0};
   bool pivot_step_target_active_{false};
   bool pivot_step_drive_started_{false};
@@ -209,7 +273,6 @@ private:
   double pivot_step_target_yaw_{0.0};
   double pivot_step_direction_{0.0};
   int64_t pivot_step_hold_start_ns_{0};
-  int64_t pivot_yaw_within_tolerance_since_ns_{0};
   bool pivot_completion_latched_{false};
   std::size_t completed_pivot_index_{std::numeric_limits<std::size_t>::max()};
   double completed_pivot_x_{0.0};
@@ -222,16 +285,52 @@ private:
   double post_pivot_capture_start_x_{0.0};
   double post_pivot_capture_start_y_{0.0};
   double post_pivot_capture_target_yaw_{0.0};
+  geometry_msgs::msg::PoseStamped post_pivot_capture_start_pose_;
   double pivot_departure_steering_{0.0};
   int64_t pivot_departure_ready_ns_{0};
+  int64_t post_pivot_steering_centered_since_ns_{0};
+  bool post_pivot_recovery_active_{false};
+  int64_t post_pivot_recovery_ready_ns_{0};
+  double post_pivot_recovery_target_yaw_{0.0};
   bool new_goal_steering_settle_enabled_{true};
   double new_goal_steering_tolerance_{0.08};
   double new_goal_steering_hold_duration_sec_{0.2};
   bool new_goal_steering_settle_active_{false};
   int64_t new_goal_steering_ready_ns_{0};
+  // Continuous trajectories can legitimately return briefly to a small
+  // steering reference between two bends.  Treating that as a completed turn
+  // made the controller stop and recenter in the middle of an S curve.
+  // Keep this legacy handoff opt-in; pivot handling has its own transition.
+  bool curve_exit_steering_settle_enabled_{false};
+  double curve_exit_reference_max_angle_rad_{0.12};
+  double curve_exit_steering_enter_error_rad_{0.20};
+  double curve_exit_steering_reference_drop_rad_{0.10};
+  double curve_exit_steering_tolerance_rad_{0.05};
+  double curve_exit_steering_settle_duration_sec_{0.20};
+  double curve_exit_recovery_distance_m_{0.50};
+  double curve_exit_recovery_max_speed_mps_{0.20};
+  double curve_exit_recovery_heading_tolerance_rad_{0.08726646259971647};
+  double curve_exit_recovery_lateral_tolerance_m_{0.12};
+  bool curve_exit_steering_settle_active_{false};
+  int64_t curve_exit_steering_ready_ns_{0};
+  double curve_exit_steering_target_rad_{0.0};
+  bool curve_exit_recovery_active_{false};
+  double curve_exit_recovery_start_x_{0.0};
+  double curve_exit_recovery_start_y_{0.0};
+  int64_t curve_exit_recovery_started_ns_{0};
+  int64_t curve_exit_recovery_aligned_since_ns_{0};
+  double curve_exit_recovery_timeout_sec_{8.0};
+  double curve_exit_recovery_settle_duration_sec_{0.30};
+  bool curve_exit_curve_seen_{false};
   double horizon_time_{1.8};
   double time_step_{0.2};
   double lookahead_distance_{1.4};
+  double preview_min_distance_{0.75};
+  double tracking_preview_min_distance_m_{3.80};
+  double profile_preview_design_speed_mps_{1.90};
+  double preview_distance_margin_{0.30};
+  double preview_max_distance_{6.0};
+  double preview_time_sec_{2.0};
   double xy_goal_tolerance_{0.25};
   double yaw_goal_tolerance_{0.35};
   double transform_tolerance_{0.2};
@@ -253,6 +352,7 @@ private:
   bool use_collision_check_{true};
   bool allow_unknown_{false};
   bool preprocess_path_{true};
+  bool reject_pivot_paths_{true};
   bool respect_reverse_path_orientation_{false};
   bool curvature_slowdown_enabled_{true};
 
@@ -266,21 +366,42 @@ private:
   std::atomic_bool pallet_exemption_active_{false};
   std::atomic<int64_t> pallet_exemption_received_ns_{0};
 
-  double path_distance_weight_{8.0};
+  double path_distance_weight_{12.0};
+  double lateral_error_weight_{-1.0};
+  double longitudinal_error_weight_{0.2};
+  double steering_reference_weight_{3.0};
+  double immediate_steering_reference_weight_{30.0};
   double local_goal_weight_{14.0};
   double global_goal_weight_{2.0};
-  double heading_weight_{2.0};
+  double heading_weight_{6.0};
   double obstacle_weight_{12.0};
   double smoothness_weight_{1.0};
-  double steering_change_weight_{8.0};
+  double steering_change_weight_{120.0};
   double velocity_reward_weight_{0.6};
-  double trajectory_resample_spacing_{0.10};
+  double velocity_reference_weight_{4.0};
+  double acceleration_weight_{2.0};
+  bool steering_axle_preview_enabled_{true};
+  double steering_axle_offset_m_{1.40};
+  double steering_axle_lateral_weight_{3.0};
+  double trajectory_resample_spacing_{0.05};
   int trajectory_smoothing_iterations_{1};
   double trajectory_smoothing_corner_cut_ratio_{0.25};
   double sharp_turn_warning_angle_{0.7853981633974483};
   double minimum_turning_radius_{0.0};
   double curvature_slowdown_lateral_accel_{0.12};
+  double max_lateral_jerk_mps3_{0.80};
+  double max_longitudinal_acceleration_mps2_{0.50};
+  double planned_deceleration_mps2_{0.50};
+  double minimum_controllable_speed_mps_{0.09};
+  double steering_profile_window_m_{0.30};
+  double drive_track_width_m_{0.937};
+  double drive_wheel_radius_m_{0.2285};
+  double drive_gear_ratio_{26.75};
+  double max_drive_rpm_{2485.0};
   double min_curvature_speed_{0.08};
+  bool steering_rate_slowdown_enabled_{true};
+  double steering_rate_speed_margin_{0.60};
+  double steering_rate_lookahead_distance_m_{0.75};
   double heading_slowdown_threshold_{0.35};
   double heading_slowdown_full_error_{0.70};
   double heading_alignment_max_speed_{0.10};
@@ -288,10 +409,28 @@ private:
   double steering_slowdown_start_angle_{0.30};
   double steering_slowdown_full_angle_{0.90};
   double steering_slowdown_max_speed_{0.12};
+  double steering_reference_tracking_tolerance_{0.05};
+  double steering_reference_tracking_full_error_{0.20};
+  double steering_reference_tracking_max_speed_{0.10};
+  double cross_track_slowdown_threshold_m_{0.10};
+  double cross_track_slowdown_full_error_m_{0.30};
+  double cross_track_recovery_max_speed_mps_{0.15};
+  bool cross_track_steering_recovery_enabled_{true};
+  double cross_track_steering_recovery_threshold_m_{0.20};
+  double cross_track_steering_recovery_lateral_gain_{0.65};
+  double cross_track_steering_recovery_heading_gain_{1.00};
+  double cross_track_steering_recovery_max_angle_rad_{0.40};
+  double cross_track_steering_recovery_max_speed_mps_{0.35};
+  double cross_track_steering_recovery_max_rate_radps_{0.18};
   double max_path_deviation_{0.75};
+  double hard_collision_prediction_horizon_sec_{0.60};
   double candidate_score_abort_ratio_{4.0};
   double candidate_score_abort_margin_{100.0};
-  int candidate_score_abort_cycles_{5};
+  // Candidate scores include route-dependent curvature and preview costs, so
+  // they are not comparable against the best score from an entire route.
+  // Collision, path-deviation and Safety Gate checks remain the stop guards.
+  // A positive value explicitly re-enables this legacy diagnostic abort.
+  int candidate_score_abort_cycles_{0};
 
   bool safety_gate_enabled_{false};
   bool safety_emergency_stop_active_{false};
@@ -321,6 +460,8 @@ private:
   std::string control_cmd_topic_{"/forklift/control_cmd"};
   double control_cmd_accel_time_{0.3};
   double control_cmd_decel_time_{0.3};
+  mutable double last_navigation_output_velocity_{0.0};
+  mutable int64_t last_navigation_output_ns_{0};
   bool use_steering_feedback_{false};
   std::string steering_feedback_topic_{"/forklift/vehicle_state"};
   double steering_feedback_timeout_sec_{0.5};
@@ -331,8 +472,11 @@ private:
   rclcpp::Subscription<forklift_msgs::msg::ForkliftVehicleState>::SharedPtr
   steering_feedback_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pallet_exemption_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr anchor_index_sub_;
   rclcpp_lifecycle::LifecyclePublisher<
     forklift_msgs::msg::ForkliftControlCommand>::SharedPtr control_cmd_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<
+    forklift_msgs::msg::ForkliftControllerDebug>::SharedPtr controller_debug_pub_;
 };
 
 } // namespace forklift_nav2_plugins

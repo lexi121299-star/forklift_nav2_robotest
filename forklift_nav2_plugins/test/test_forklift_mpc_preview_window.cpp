@@ -99,6 +99,33 @@ TEST(ForkliftMpcPreviewWindow, StartIndexPastEndUsesLastPoint)
   EXPECT_DOUBLE_EQ(window.points.front().state.x, 2.0);
 }
 
+TEST(ForkliftMpcPreviewWindow, BuildsWindowByArcLength)
+{
+  const auto trajectory = makeStraightTrajectory(6);
+
+  const auto window = makeMpcPreviewWindowFromIndexByDistance(
+    trajectory, 1, 2.4);
+
+  ASSERT_TRUE(window.valid);
+  ASSERT_EQ(window.points.size(), 4u);
+  EXPECT_EQ(window.start_index, 1u);
+  EXPECT_EQ(window.end_index, 4u);
+  EXPECT_DOUBLE_EQ(window.length, 3.0);
+}
+
+TEST(ForkliftMpcPreviewWindow, DistanceWindowClampsAtTrajectoryEnd)
+{
+  const auto trajectory = makeStraightTrajectory(4);
+
+  const auto window = makeMpcPreviewWindowFromIndexByDistance(
+    trajectory, 2, 5.0);
+
+  ASSERT_TRUE(window.valid);
+  ASSERT_EQ(window.points.size(), 2u);
+  EXPECT_EQ(window.end_index, 3u);
+  EXPECT_DOUBLE_EQ(window.length, 1.0);
+}
+
 TEST(ForkliftMpcPreviewWindow, DetectsConsumedTerminalWindow)
 {
   const auto trajectory = makeStraightTrajectory(4);

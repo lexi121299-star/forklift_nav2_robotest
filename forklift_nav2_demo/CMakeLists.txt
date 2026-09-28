@@ -89,6 +89,12 @@ install(
 )
 
 install(
+  PROGRAMS scripts/plot_controller_debug.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME plot_controller_debug
+)
+
+install(
   PROGRAMS scripts/map_odom_localization_adapter.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME map_odom_localization_adapter

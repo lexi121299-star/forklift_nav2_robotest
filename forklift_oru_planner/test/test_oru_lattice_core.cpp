@@ -396,5 +396,20 @@ TEST(OruLatticeCore, ReedsSheppShortcutKeepsOriginalWhenObstacleBlocksIt)
   EXPECT_EQ(smoothed.states.size(), 4u);
 }
 
+TEST(OruLatticeCore, LargeMapSearchUsesSparseStateBudget)
+{
+  auto options = makeOptions();
+  options.use_holonomic_obstacle_heuristic = false;
+  options.analytic_expansion_enabled = false;
+  options.pivot_enabled = false;
+  options.max_iterations = 5;
+  options.max_planning_time_sec = 0.2;
+  const auto result = LatticeCore(options).plan(
+    makeGrid(5000, 5000), {10, 10}, 0.0, {4900, 4900}, 0.0);
+
+  EXPECT_FALSE(result.succeeded);
+  EXPECT_LE(result.stats.expanded, 7u);
+}
+
 }  // namespace
 }  // namespace forklift_oru_planner

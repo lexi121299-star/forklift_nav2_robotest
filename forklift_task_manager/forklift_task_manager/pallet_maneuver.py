@@ -25,6 +25,8 @@ class PalletManeuverConfig:
     turn_runup_distance_m: float = 0.60
     turn_clearance_padding_m: float = 0.10
     pallet_turn_keepout_radius_m: float = 1.50
+    pallet_exemption_length_m: float = 1.80
+    pallet_exemption_width_m: float = 1.60
     collision_cost_threshold: int = 254
     footprint: Tuple[Point2D, ...] = (
         (1.709, 0.610),
@@ -73,6 +75,8 @@ def validate_maneuver_config(config: PalletManeuverConfig) -> None:
     _positive(config.turn_lateral_step_m, 'turn_lateral_step_m')
     _positive(config.turn_runup_distance_m, 'turn_runup_distance_m')
     _positive(config.pallet_turn_keepout_radius_m, 'pallet_turn_keepout_radius_m')
+    _positive(config.pallet_exemption_length_m, 'pallet_exemption_length_m')
+    _positive(config.pallet_exemption_width_m, 'pallet_exemption_width_m')
     if config.turn_lateral_max_m < 0.0:
         raise ValueError('turn_lateral_max_m must not be negative')
     if len(config.footprint) < 3:
@@ -263,6 +267,7 @@ def straight_sweep_is_clear(
     footprint: Sequence[Point2D],
     padding_m: float,
     cost_threshold: int,
+    pallet_exemption: Optional[PalletExemption] = None,
 ) -> bool:
     """Check a straight vehicle-body sweep using filled local footprint samples."""
 
@@ -285,6 +290,10 @@ def straight_sweep_is_clear(
         for local_x, local_y in local_samples:
             world_x = px + local_x * cos_yaw - local_y * sin_yaw
             world_y = py + local_x * sin_yaw + local_y * cos_yaw
+            if _point_in_pallet_exemption(
+                (world_x, world_y), pallet_exemption
+            ):
+                continue
             if cost_at(costmap, world_x, world_y) >= cost_threshold:
                 return False
     return True
@@ -319,8 +328,20 @@ def select_clear_candidates(
         pallet_x + config.stop_base_distance_m * nx,
         pallet_y + config.stop_base_distance_m * ny,
     )
+    pallet_exemption = (
+        pallet_x,
+        pallet_y,
+        outward_yaw,
+        0.5 * config.pallet_exemption_length_m,
+        0.5 * config.pallet_exemption_width_m,
+    )
     candidates: List[PalletStagingCandidate] = []
+    # Continuous navigation approaches a staging pose on the pallet normal.
+    # Lateral candidates require an extra infeed maneuver and are intentionally
+    # excluded from the single-pivot workflow.
     for distance, lateral in ranked_candidate_offsets(config):
+        if abs(lateral) > 1e-9:
+            continue
         candidate = build_candidate(
             pallet_x=pallet_x,
             pallet_y=pallet_y,
@@ -339,27 +360,7 @@ def select_clear_candidates(
             costmap, center, turn_radius, config.collision_cost_threshold
         ):
             continue
-        # Nav2 stops at ``runup`` before task-level fine motion takes over.
-        # Usually it already has the infeed heading, but a local corrective
-        # pivot may be needed before the fixed 0.6 m infeed. Validate that
-        # recovery pivot here rather than discovering an obstructed turn after
-        # leaving Nav2 control.
-        runup_center = (candidate.runup.x, candidate.runup.y)
-        if not circular_turn_is_clear(
-            costmap, runup_center, turn_radius, config.collision_cost_threshold
-        ):
-            continue
         if not straight_sweep_is_clear(
-            costmap,
-            (candidate.runup.x, candidate.runup.y),
-            center,
-            candidate.staging.yaw,
-            config.footprint,
-            config.turn_clearance_padding_m,
-            config.collision_cost_threshold,
-        ):
-            continue
-        if candidate.direct_final_approach and not straight_sweep_is_clear(
             costmap,
             center,
             stop,
@@ -367,6 +368,7 @@ def select_clear_candidates(
             config.footprint,
             config.turn_clearance_padding_m,
             config.collision_cost_threshold,
+            pallet_exemption,
         ):
             continue
         candidates.append(candidate)

@@ -107,6 +107,18 @@ class TaskStateMachine:
         self._set_state(IDLE)
         return True, reason
 
+    def reject_pending(self, route_name: str, reason: str):
+        """Report a pre-navigation failure while remaining ready for new work."""
+        if self.state in _ACTIVE_STATES:
+            return False, 'another task is active'
+        self.route = None
+        self.active_route = route_name
+        self.segment_index = -1
+        self._retry_count = 0
+        self.reason = reason
+        self._set_state(FAILED)
+        return True, reason
+
     def observe_safety_status(self, reason: str) -> bool:
         normalized = reason.strip().lower()
         if normalized not in _SAFETY_PAUSE_REASONS:

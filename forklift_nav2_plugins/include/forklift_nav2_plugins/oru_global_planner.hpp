@@ -1,8 +1,10 @@
 #ifndef FORKLIFT_NAV2_PLUGINS__ORU_GLOBAL_PLANNER_HPP_
 #define FORKLIFT_NAV2_PLUGINS__ORU_GLOBAL_PLANNER_HPP_
 
+#include <chrono>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +19,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "tf2_ros/buffer.h"
 
 namespace forklift_nav2_plugins
@@ -49,6 +52,14 @@ private:
   {
     unsigned int x{0};
     unsigned int y{0};
+  };
+
+  struct RouteGuidanceSegment
+  {
+    double start_x{0.0};
+    double start_y{0.0};
+    double end_x{0.0};
+    double end_y{0.0};
   };
 
   struct LatticeState
@@ -122,6 +133,11 @@ private:
   };
 
   std::vector<Cell> searchAStar(const Cell & start, const Cell & goal) const;
+  // Topology-only plans are used solely to select safe intermediate anchors.
+  // Searching a coarse grid keeps a long factory-map query bounded; every
+  // candidate coarse pose still receives the normal full-footprint check.
+  std::vector<Cell> searchTopologyAStar(
+    const Cell & start, const Cell & goal) const;
   std::vector<Cell> reconstructPath(
     const std::vector<unsigned int> & parent,
     unsigned int start_index,
@@ -145,14 +161,29 @@ private:
     const nav_msgs::msg::Path & path,
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal) const;
+  nav_msgs::msg::Path buildReedsSheppAnchorFallback(
+    const nav_msgs::msg::Path & anchor_path,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal) const;
   bool validateAStarSmoothedPath(
     const nav_msgs::msg::Path & path,
     double & max_curvature,
     std::size_t & rejected_index,
     AStarPathValidationFailure & failure) const;
+  bool hasPreferredAStarClearance(
+    const nav_msgs::msg::Path & path,
+    double & peak_footprint_cost,
+    std::size_t & rejected_index) const;
   bool isAStarSmoothedPoseTraversable(
     double wx, double wy, double yaw,
     AStarPathValidationFailure & failure) const;
+  bool pointInsideActivePalletKeepout(double wx, double wy) const;
+  bool footprintIntersectsActivePalletKeepout(
+    double wx, double wy, double yaw) const;
+  void palletKeepoutPoseCallback(
+    const geometry_msgs::msg::PoseStamped::SharedPtr message);
+  void palletExemptionActiveCallback(
+    const std_msgs::msg::Bool::SharedPtr message);
   double sampledFootprintCostAtPose(double wx, double wy, double yaw) const;
   double fullFootprintCostAtPose(double wx, double wy, double yaw) const;
   double cachedAStarFootprintCost(
@@ -185,6 +216,16 @@ private:
     double & max_curvature,
     std::size_t & rejected_index,
     AStarPathValidationFailure & failure) const;
+  bool buildAStarInternalPivotRelocationPath(
+    const nav_msgs::msg::Path & astar_path, const Cell & goal_cell,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal,
+    nav_msgs::msg::Path & relocated_path,
+    double & relocation_distance,
+    std::size_t & pivot_count,
+    double & max_curvature,
+    std::size_t & rejected_index,
+    AStarPathValidationFailure & failure) const;
   bool departurePathInitiallyBacktracks(
     const nav_msgs::msg::Path & path, double departure_x,
     double departure_y, double departure_yaw) const;
@@ -194,6 +235,7 @@ private:
     AStarPathValidationFailure & failure) const;
   const char * aStarValidationFailureName(
     AStarPathValidationFailure failure) const;
+  bool planningTimedOut() const;
   LatticePath searchLattice(
     const Cell & start, double start_yaw,
     const Cell & goal, double goal_yaw) const;
@@ -241,6 +283,8 @@ private:
   PrimitiveDirection directionFromLatticeIndex(unsigned int index) const;
 
   double traversalCost(unsigned int x, unsigned int y, int dx, int dy) const;
+  bool loadRouteGuidanceFile();
+  double routeGuidancePenalty(double wx, double wy) const;
   double heuristic(const Cell & a, const Cell & b) const;
   double latticeHeuristic(
     const LatticeState & state, const Cell & goal,
@@ -282,11 +326,17 @@ private:
     nav2_costmap_2d::FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>>
   footprint_collision_checker_;
   nav2_costmap_2d::Footprint footprint_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
+  pallet_keepout_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
+  pallet_exemption_active_sub_;
 
   std::string name_;
   std::string global_frame_;
 
   bool allow_unknown_{false};
+  bool topology_only_{false};
+  bool topology_emit_segmented_path_{false};
   bool use_diagonal_{true};
   bool prevent_corner_cutting_{true};
   bool use_footprint_collision_check_{true};
@@ -296,6 +346,11 @@ private:
     nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE};
   double cost_travel_multiplier_{2.0};
   double footprint_cost_travel_multiplier_{2.0};
+  bool route_guidance_enabled_{false};
+  std::string route_guidance_file_;
+  double route_guidance_influence_width_m_{2.0};
+  double route_guidance_off_route_cost_multiplier_{0.60};
+  std::vector<RouteGuidanceSegment> route_guidance_segments_;
   double unknown_cost_penalty_{5.0};
   double start_tolerance_{1.0};
   double goal_tolerance_{0.5};
@@ -310,20 +365,55 @@ private:
   double astar_bspline_sample_spacing_{0.05};
   double astar_bspline_min_turning_radius_{0.60};
   double astar_bspline_start_tangent_distance_{1.20};
+  double astar_bspline_anchor_spacing_{1.25};
   unsigned int astar_bspline_retry_count_{8};
+  bool astar_reeds_shepp_fallback_enabled_{false};
   bool astar_start_pivot_enabled_{true};
+  bool astar_start_pivot_preferred_{true};
   double astar_start_pivot_threshold_{0.7853981634};
   double astar_pivot_collision_sample_angle_{0.0872664626};
   bool astar_segmented_fallback_enabled_{true};
   bool astar_prefer_segmented_path_{false};
   double astar_segmented_pivot_threshold_{0.20};
+  // A coarse topology route may contain several artificial grid corners. Do
+  // not hand a long stop-pivot-go chain to the real controller: the task
+  // manager can instead split the verified topology route into safe stops.
+  unsigned int astar_max_automatic_pivots_{1};
   double astar_goal_endpoint_tolerance_{0.0};
   bool astar_departure_fallback_enabled_{true};
   double astar_departure_min_distance_{0.50};
   double astar_departure_max_distance_{2.50};
   double astar_departure_step_distance_{0.25};
+  double planner_total_timeout_sec_{10.0};
+  // Full-resolution footprint A* is prohibitively expensive on the factory
+  // map. The coarse search still tests every candidate pose with the complete
+  // footprint; its output is subsequently sampled and validated at 0.05 m.
+  bool astar_coarse_topology_search_enabled_{true};
+  double topology_search_resolution_m_{0.20};
+  mutable std::chrono::steady_clock::time_point planning_deadline_{
+    std::chrono::steady_clock::time_point::max()};
+  bool astar_internal_pivot_relocation_enabled_{true};
+  double astar_internal_pivot_min_distance_{0.75};
+  double astar_internal_pivot_max_distance_{4.00};
+  double astar_internal_pivot_step_distance_{0.25};
+  double astar_internal_pivot_exit_distance_{0.75};
   mutable std::unordered_map<unsigned long long, double>
   astar_footprint_cost_cache_;
+
+  bool pallet_keepout_enabled_{true};
+  std::string pallet_keepout_pose_topic_{
+    "/forklift/pallet_approach/exemption_pose"};
+  std::string pallet_exemption_active_topic_{
+    "/forklift/pallet_approach/exemption_active"};
+  double pallet_keepout_timeout_sec_{0.5};
+  double pallet_keepout_half_length_m_{0.70};
+  double pallet_keepout_half_width_m_{0.65};
+  double pallet_keepout_padding_m_{0.10};
+  mutable std::mutex pallet_keepout_mutex_;
+  bool pallet_keepout_pose_received_{false};
+  bool pallet_exemption_active_{false};
+  geometry_msgs::msg::PoseStamped pallet_keepout_pose_;
+  std::chrono::steady_clock::time_point pallet_keepout_received_time_{};
 
   bool use_lattice_planner_{false};
   bool lattice_fallback_to_astar_{false};
@@ -362,6 +452,7 @@ private:
   bool lattice_shortcut_smoothing_enabled_{false};
   unsigned int lattice_shortcut_max_lookahead_{12};
   unsigned int lattice_max_iterations_{250000};
+  double lattice_max_planning_time_sec_{1.5};
 };
 
 } // namespace forklift_nav2_plugins

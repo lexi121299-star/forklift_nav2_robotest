@@ -12,6 +12,108 @@
 namespace forklift_nav2_plugins
 {
 
+MpcTrajectory transformMpcTrajectory(
+  const MpcTrajectory & trajectory, double x, double y, double yaw)
+{
+  auto result = trajectory;
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  for (auto & point : result) {
+    const auto state = point.state;
+    point.state.x = x + c * state.x - s * state.y;
+    point.state.y = y + s * state.x + c * state.y;
+    point.state.theta = ForkliftVehicleModel::normalizeAngle(state.theta + yaw);
+    point.tangent_yaw = ForkliftVehicleModel::normalizeAngle(point.tangent_yaw + yaw);
+    point.body_heading_ref = ForkliftVehicleModel::normalizeAngle(
+      point.body_heading_ref + yaw);
+  }
+  return result;
+}
+
+MpcSegmentProjection projectMpcSegment(
+  const MpcTrajectory & trajectory, const MpcState & state,
+  std::size_t begin, std::size_t end)
+{
+  MpcSegmentProjection best;
+  if (trajectory.empty()) {
+    return best;
+  }
+  end = std::min(end, trajectory.size() - 1);
+  for (std::size_t i = begin; i < end; ++i) {
+    const auto & a = trajectory[i].state;
+    const auto & b = trajectory[i + 1].state;
+    const double dx = b.x - a.x;
+    const double dy = b.y - a.y;
+    const double length = std::hypot(dx, dy);
+    if (length < 1e-6) {
+      continue;
+    }
+    const double raw_along =
+      ((state.x - a.x) * dx + (state.y - a.y) * dy) / length;
+    const double u = std::clamp(raw_along / length, 0.0, 1.0);
+    const double distance = std::hypot(state.x - a.x - u * dx, state.y - a.y - u * dy);
+    if (!best.valid || distance < best.distance) {
+      best.valid = true;
+      best.distance = distance;
+      best.cross_track = (dx * (state.y - a.y) - dy * (state.x - a.x)) / length;
+      const bool reverse = trajectory[i].reverse_motion || trajectory[i + 1].reverse_motion;
+      const double tangent = std::atan2(dy, dx);
+      best.heading = ForkliftVehicleModel::normalizeAngle(tangent + (reverse ? M_PI : 0.0));
+      best.heading_error = ForkliftVehicleModel::normalizeAngle(state.theta - best.heading);
+      best.arc_length = trajectory[i].distance + u * length;
+      best.along_track_error = raw_along - u * length;
+      best.projected_x = a.x + u * dx;
+      best.projected_y = a.y + u * dy;
+      // A pivot shares its position with the first point of its departure
+      // block. Never interpolate the +/-90 degree pivot reference into that
+      // moving segment: after the pivot, follow the departure road reference.
+      const auto & reference_a = trajectory[i];
+      const auto & reference_b = trajectory[i + 1];
+      if (reference_a.pivot_motion != reference_b.pivot_motion) {
+        const auto & moving_reference = reference_a.pivot_motion ? reference_b : reference_a;
+        best.curvature = moving_reference.curvature;
+        best.steering_reference = moving_reference.steering_angle;
+        best.speed_limit = moving_reference.speed_limit;
+      } else {
+        best.curvature = reference_a.curvature +
+          u * (reference_b.curvature - reference_a.curvature);
+        best.steering_reference = reference_a.steering_angle +
+          u * (reference_b.steering_angle - reference_a.steering_angle);
+        best.speed_limit = reference_a.speed_limit +
+          u * (reference_b.speed_limit - reference_a.speed_limit);
+      }
+      best.reverse_motion = reverse;
+      best.segment_index = i;
+      best.remaining = (1.0 - u) * length;
+      for (std::size_t j = i + 1; j < end; ++j) {
+        best.remaining += std::hypot(
+          trajectory[j + 1].state.x - trajectory[j].state.x,
+          trajectory[j + 1].state.y - trajectory[j].state.y);
+      }
+    }
+  }
+  return best;
+}
+
+double steeringAxleCrossTrackError(
+  const MpcSegmentProjection & projection,
+  const MpcState & state,
+  double steering_axle_offset)
+{
+  if (!projection.valid) {
+    return 0.0;
+  }
+  const double offset = std::max(0.0, steering_axle_offset);
+  const double reference_x = projection.projected_x +
+    offset * std::cos(projection.heading);
+  const double reference_y = projection.projected_y +
+    offset * std::sin(projection.heading);
+  const double actual_x = state.x + offset * std::cos(state.theta);
+  const double actual_y = state.y + offset * std::sin(state.theta);
+  return -std::sin(projection.heading) * (actual_x - reference_x) +
+         std::cos(projection.heading) * (actual_y - reference_y);
+}
+
 namespace
 {
 
@@ -97,29 +199,6 @@ bool isProtectedPivotDeparturePose(
   return departure_distance <= options.pivot_departure_capture_distance + 1e-9;
 }
 
-bool hasLocalYawChange(
-  const std::vector<geometry_msgs::msg::PoseStamped> & poses,
-  std::size_t index,
-  double threshold)
-{
-  const double yaw = poseYaw(poses[index].pose);
-  if (index > 0) {
-    const double previous_change = std::abs(
-      ForkliftVehicleModel::normalizeAngle(yaw - poseYaw(poses[index - 1].pose)));
-    if (previous_change >= threshold) {
-      return true;
-    }
-  }
-  if (index + 1 < poses.size()) {
-    const double next_change = std::abs(
-      ForkliftVehicleModel::normalizeAngle(poseYaw(poses[index + 1].pose) - yaw));
-    if (next_change >= threshold) {
-      return true;
-    }
-  }
-  return false;
-}
-
 double signedCurvature(
   const geometry_msgs::msg::Point & a,
   const geometry_msgs::msg::Point & b,
@@ -203,16 +282,22 @@ std::vector<geometry_msgs::msg::PoseStamped> filterPathPoses(
       ForkliftVehicleModel::normalizeAngle(poseYaw(pose.pose) - poseYaw(poses.back().pose)));
     if (poses.empty() ||
       distanceBetween(poses.back().pose.position, pose.pose.position) >= min_spacing ||
-      yaw_change > 1e-6)
+      yaw_change >= 0.02)
     {
       poses.push_back(pose);
     }
   }
 
-  if (!path.poses.empty() && !poses.empty() &&
-    distanceBetween(poses.back().pose.position, path.poses.back().pose.position) > 1e-9)
-  {
-    poses.push_back(path.poses.back());
+  if (!path.poses.empty() && !poses.empty()) {
+    const double final_distance = distanceBetween(
+      poses.back().pose.position, path.poses.back().pose.position);
+    const double final_yaw_change = std::abs(ForkliftVehicleModel::normalizeAngle(
+      poseYaw(path.poses.back().pose) - poseYaw(poses.back().pose)));
+    if (final_distance >= min_spacing || final_yaw_change >= 0.02) {
+      poses.push_back(path.poses.back());
+    } else if (final_distance > 1e-9) {
+      poses.back() = path.poses.back();
+    }
   }
 
   if (!path.poses.empty() && poses.empty()) {
@@ -498,71 +583,265 @@ MpcTrajectory buildTrajectory(
 
     if (options.preserve_path_orientation_for_reverse && poses.size() > 1) {
       const double path_theta = poseYaw(pose);
+      double motion_theta = theta;
+      if (i + 1u < poses.size() &&
+        distanceBetween(pose.position, poses[i + 1u].pose.position) > 1e-6)
+      {
+        motion_theta = headingBetween(pose.position, poses[i + 1u].pose.position);
+      } else if (i > 0u &&
+        distanceBetween(poses[i - 1u].pose.position, pose.position) > 1e-6)
+      {
+        motion_theta = headingBetween(poses[i - 1u].pose.position, pose.position);
+      }
       const double path_vs_motion = std::abs(
-        ForkliftVehicleModel::normalizeAngle(path_theta - theta));
-      const bool local_yaw_is_turning =
-        hasLocalYawChange(poses, i, options.pivot_min_heading_change);
-      if (!pivot_motion && !local_yaw_is_turning && path_vs_motion > kReverseOrientationThreshold) {
+        ForkliftVehicleModel::normalizeAngle(path_theta - motion_theta));
+      if (!pivot_motion) {
         theta = path_theta;
+      }
+      if (!pivot_motion && path_vs_motion > kReverseOrientationThreshold) {
         reverse_motion = true;
         ++diagnostics.reverse_motion_points;
       }
     }
 
-    double curvature = 0.0;
-    if (poses.size() >= 3) {
-      if (i == 0) {
-        curvature = signedCurvature(
-          poses[0].pose.position,
-          poses[1].pose.position,
-          poses[2].pose.position);
-      } else if (i + 1 == poses.size()) {
-        curvature = signedCurvature(
-          poses[i - 2].pose.position,
-          poses[i - 1].pose.position,
-          poses[i].pose.position);
-      } else {
-        curvature = signedCurvature(
-          poses[i - 1].pose.position,
-          poses[i].pose.position,
-          poses[i + 1].pose.position);
+    const double tangent_yaw = reverse_motion ?
+      ForkliftVehicleModel::normalizeAngle(theta + M_PI) : theta;
+    MpcTrajectoryPoint point;
+    point.state = makeMpcState(
+      pose.position.x, pose.position.y, theta, 0.0, vehicle_model);
+    point.distance = cumulative_distance;
+    point.speed_limit = default_speed;
+    point.velocity_reference = default_speed;
+    point.reverse_motion = reverse_motion;
+    point.pivot_motion = pivot_motion;
+    point.tangent_yaw = tangent_yaw;
+    point.body_heading_ref = theta;
+    if (pivot_motion) {
+      const double turn_sign = pivot_heading_delta >= 0.0 ? 1.0 : -1.0;
+      point.curvature = turn_sign / std::max(0.05, parameters.pivot_turn_radius);
+    }
+    trajectory.push_back(point);
+  }
+
+  const auto same_motion_block = [&](std::size_t lhs, std::size_t rhs) {
+      return !trajectory[lhs].pivot_motion && !trajectory[rhs].pivot_motion &&
+             trajectory[lhs].reverse_motion == trajectory[rhs].reverse_motion;
+    };
+
+  // Compute curvature only inside one forward/reverse motion block. This is
+  // deliberately separate from point construction: a Reeds-Shepp cusp must
+  // not look like a tiny-radius road curve merely because adjacent samples
+  // have opposite directions.
+  for (std::size_t i = 0; i < trajectory.size(); ++i) {
+    if (!trajectory[i].pivot_motion) {
+      std::size_t block_begin = i;
+      while (block_begin > 0u && same_motion_block(block_begin - 1u, block_begin)) {
+        --block_begin;
+      }
+      std::size_t block_end = i;
+      while (block_end + 1u < trajectory.size() &&
+        same_motion_block(block_end, block_end + 1u))
+      {
+        ++block_end;
+      }
+      if (block_end >= block_begin + 2u) {
+        const std::size_t middle = std::clamp(i, block_begin + 1u, block_end - 1u);
+        trajectory[i].curvature = signedCurvature(
+          poses[middle - 1u].pose.position,
+          poses[middle].pose.position,
+          poses[middle + 1u].pose.position);
       }
     }
-    if (pivot_motion) {
-      const auto & parameters = vehicle_model.parameters();
-      const double turn_sign = pivot_heading_delta >= 0.0 ? 1.0 : -1.0;
-      curvature = turn_sign / std::max(0.05, parameters.pivot_turn_radius);
+    if (i > 0u && trajectory[i].reverse_motion != trajectory[i - 1u].reverse_motion) {
+      trajectory[i].stop_before_point = true;
+      ++diagnostics.direction_change_count;
     }
 
-    const double abs_curvature = std::abs(curvature);
+    const double abs_curvature = std::abs(trajectory[i].curvature);
     diagnostics.max_curvature = std::max(diagnostics.max_curvature, abs_curvature);
     if (diagnostics.max_allowed_curvature > 0.0 &&
       abs_curvature > diagnostics.max_allowed_curvature + 1e-9)
     {
       diagnostics.curvature_exceeds_limit = true;
     }
+    const double steering_curvature = trajectory[i].reverse_motion ?
+      -trajectory[i].curvature : trajectory[i].curvature;
+    trajectory[i].steering_angle = steeringFromCurvature(
+      steering_curvature, vehicle_model, diagnostics.max_allowed_curvature,
+      trajectory[i].pivot_motion);
+    trajectory[i].state.phi = trajectory[i].steering_angle;
+    trajectory[i].speed_limit = trajectorySpeedLimit(
+      trajectory[i].curvature, vehicle_model, options,
+      diagnostics.max_allowed_curvature, trajectory[i].pivot_motion);
+  }
 
-    const double steering_angle = steeringFromCurvature(
-      curvature, vehicle_model, diagnostics.max_allowed_curvature, pivot_motion);
-    const double speed_limit =
-      trajectorySpeedLimit(
-      curvature, vehicle_model, options, diagnostics.max_allowed_curvature,
-      pivot_motion);
-    diagnostics.min_speed_limit = std::min(diagnostics.min_speed_limit, speed_limit);
+  // Curvature derivatives and steering slew use a spatial window instead of
+  // adjacent 0.05 m samples. This suppresses quantization spikes without
+  // hiding sustained curvature changes.
+  const double profile_window = std::max(0.30, options.steering_profile_window);
+  for (std::size_t i = 0u; i < trajectory.size(); ++i) {
+    if (trajectory[i].pivot_motion) {
+      continue;
+    }
+    std::size_t lo = i;
+    std::size_t hi = i;
+    while (lo > 0u && same_motion_block(lo - 1u, lo) &&
+      trajectory[i].distance - trajectory[lo].distance < 0.5 * profile_window)
+    {
+      --lo;
+    }
+    while (hi + 1u < trajectory.size() && same_motion_block(hi, hi + 1u) &&
+      trajectory[hi].distance - trajectory[i].distance < 0.5 * profile_window)
+    {
+      ++hi;
+    }
+    const double ds = trajectory[hi].distance - trajectory[lo].distance;
+    if (ds > 1e-6) {
+      trajectory[i].curvature_derivative =
+        (trajectory[hi].curvature - trajectory[lo].curvature) / ds;
+    }
+  }
 
-    trajectory.push_back({
-      makeMpcState(
-        pose.position.x,
-        pose.position.y,
-        theta,
-        steering_angle,
-        vehicle_model),
-      cumulative_distance,
-      curvature,
-      steering_angle,
-      speed_limit,
-      reverse_motion,
-      pivot_motion});
+  // Apply local geometry, actuator, and drive-wheel limits. The steering-rate
+  // equation is d(delta)/dt = L*kappa'*v/(1+(L*kappa)^2).
+  diagnostics.min_steering_rate_speed_limit = default_speed;
+  const double wheel_linear_limit =
+    options.max_drive_rpm > 0.0 && options.drive_wheel_radius > 0.0 &&
+    options.drive_gear_ratio > 0.0 ?
+    options.max_drive_rpm * 2.0 * M_PI * options.drive_wheel_radius /
+    (60.0 * options.drive_gear_ratio) : 0.0;
+  for (auto & point : trajectory) {
+    if (point.pivot_motion) {
+      continue;
+    }
+    if (options.max_lateral_jerk > 0.0 &&
+      std::abs(point.curvature_derivative) > 1e-9)
+    {
+      point.speed_limit = std::min(
+        point.speed_limit,
+        std::cbrt(options.max_lateral_jerk /
+        std::abs(point.curvature_derivative)));
+    }
+    if (options.enable_steering_rate_slowdown) {
+      const double steering_rate = parameters.max_steering_angle_velocity *
+        std::clamp(options.steering_rate_speed_margin, 0.05, 1.0);
+      const double steering_per_meter = std::abs(
+        parameters.wheel_base * point.curvature_derivative /
+        (1.0 + std::pow(parameters.wheel_base * point.curvature, 2.0)));
+      if (steering_per_meter > 1e-9) {
+        const double steering_limit = steering_rate / steering_per_meter;
+        point.speed_limit = std::min(point.speed_limit, steering_limit);
+        diagnostics.min_steering_rate_speed_limit = std::min(
+          diagnostics.min_steering_rate_speed_limit, steering_limit);
+      }
+    }
+    if (wheel_linear_limit > 0.0 && options.drive_track_width > 0.0) {
+      point.speed_limit = std::min(
+        point.speed_limit,
+        wheel_linear_limit /
+        (1.0 + std::abs(point.curvature) * options.drive_track_width * 0.5));
+    }
+  }
+
+  // Anticipate steering limits so speed is reduced before entering a rapid
+  // curvature transition.
+  if (options.enable_steering_rate_slowdown && trajectory.size() > 1u) {
+    std::vector<double> rate_limits(trajectory.size(), default_speed);
+    for (std::size_t i = 0u; i < trajectory.size(); ++i) {
+      rate_limits[i] = trajectory[i].speed_limit;
+    }
+    const double lookahead = std::max(
+      0.0, options.steering_rate_lookahead_distance);
+    for (std::size_t i = 0u; i < trajectory.size(); ++i) {
+      double anticipated_limit = rate_limits[i];
+      for (std::size_t j = i + 1u; j < trajectory.size(); ++j) {
+        if (trajectory[j].pivot_motion || trajectory[j - 1u].pivot_motion ||
+          trajectory[j].reverse_motion != trajectory[i].reverse_motion ||
+          trajectory[j].stop_before_point)
+        {
+          break;
+        }
+        if (trajectory[j].distance - trajectory[i].distance > lookahead + 1e-9) {
+          break;
+        }
+        anticipated_limit = std::min(anticipated_limit, rate_limits[j]);
+      }
+      trajectory[i].speed_limit = std::min(
+        trajectory[i].speed_limit, anticipated_limit);
+    }
+  }
+
+  for (std::size_t i = 1u; i < trajectory.size(); ++i) {
+    if (trajectory[i].reverse_motion != trajectory[i - 1u].reverse_motion) {
+      trajectory[i].speed_limit = 0.0;
+      trajectory[i - 1u].speed_limit = 0.0;
+    }
+  }
+  if (!trajectory.empty()) {
+    trajectory.back().stop_before_point = true;
+    trajectory.back().speed_limit = 0.0;
+  }
+
+  // Time-parameterize each direction block. Backward propagation guarantees
+  // braking before stops; forward propagation prevents an instantaneous jump
+  // from zero to cruise speed after a cusp.
+  const double deceleration = std::max(0.0, options.planned_deceleration);
+  if (deceleration > 1e-9) {
+    for (std::size_t i = trajectory.size(); i-- > 1u;) {
+      if (!same_motion_block(i - 1u, i)) {
+        continue;
+      }
+      const double ds = trajectory[i].distance - trajectory[i - 1u].distance;
+      const double reachable = std::sqrt(std::max(
+        0.0, trajectory[i].speed_limit * trajectory[i].speed_limit +
+        2.0 * deceleration * ds));
+      trajectory[i - 1u].speed_limit = std::min(
+        trajectory[i - 1u].speed_limit, reachable);
+    }
+  }
+  const double acceleration = std::max(0.0, options.max_longitudinal_acceleration);
+  if (!trajectory.empty() && acceleration > 1e-9) {
+    for (std::size_t i = 1u; i < trajectory.size(); ++i) {
+      if (!same_motion_block(i - 1u, i)) {
+        continue;
+      }
+      const double ds = trajectory[i].distance - trajectory[i - 1u].distance;
+      const double reachable = std::sqrt(std::max(
+        0.0, trajectory[i - 1u].speed_limit * trajectory[i - 1u].speed_limit +
+        2.0 * acceleration * ds));
+      trajectory[i].speed_limit = std::min(trajectory[i].speed_limit, reachable);
+    }
+  }
+
+  const double minimum_speed = std::max(0.0, options.minimum_controllable_speed);
+  for (std::size_t i = 0u; i < trajectory.size(); ++i) {
+    auto & point = trajectory[i];
+    if (point.speed_limit > 1e-9 && point.speed_limit < minimum_speed) {
+      point.speed_limit = minimum_speed;
+      ++diagnostics.minimum_speed_clamp_count;
+    }
+    const double direction = point.reverse_motion ? -1.0 : 1.0;
+    point.velocity_reference = direction * point.speed_limit;
+    if (i > 0u) {
+      const double ds = point.distance - trajectory[i - 1u].distance;
+      if (ds > 1e-6 && same_motion_block(i - 1u, i)) {
+        point.acceleration_reference = direction *
+          (point.speed_limit * point.speed_limit -
+          trajectory[i - 1u].speed_limit * trajectory[i - 1u].speed_limit) /
+          (2.0 * ds);
+      }
+    }
+  }
+
+  diagnostics.min_speed_limit = default_speed;
+  diagnostics.min_nonzero_speed_limit = default_speed;
+  for (const auto & point : trajectory) {
+    if (point.speed_limit > 1e-9) {
+      diagnostics.min_speed_limit = std::min(
+        diagnostics.min_speed_limit, point.speed_limit);
+      diagnostics.min_nonzero_speed_limit = std::min(
+        diagnostics.min_nonzero_speed_limit, point.speed_limit);
+    }
   }
 
   return trajectory;

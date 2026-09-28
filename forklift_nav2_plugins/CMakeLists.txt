@@ -41,6 +41,7 @@ set(dependencies
 )
 
 add_library(${PROJECT_NAME} SHARED
+  src/doorway_static_map_exemption_layer.cpp
   src/forklift_mpc_controller.cpp
   src/forklift_mpc_preview_window.cpp
   src/forklift_mpc_solver.cpp
@@ -63,6 +64,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE BT_PLUGIN_EXPORT)
 ament_target_dependencies(${PROJECT_NAME} ${dependencies})
 
 pluginlib_export_plugin_description_file(nav2_core plugins.xml)
+pluginlib_export_plugin_description_file(nav2_costmap_2d plugins.xml)
 
 install(
   TARGETS ${PROJECT_NAME}
@@ -84,6 +86,12 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_forklift_mpc_transition test/test_forklift_mpc_transition.cpp)
+  if(TARGET test_forklift_mpc_transition)
+    target_link_libraries(test_forklift_mpc_transition ${PROJECT_NAME})
+    ament_target_dependencies(test_forklift_mpc_transition ${dependencies})
+  endif()
 
   ament_add_gtest(test_forklift_vehicle_model
     test/test_forklift_vehicle_model.cpp

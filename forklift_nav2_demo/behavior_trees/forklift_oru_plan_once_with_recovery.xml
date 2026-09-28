@@ -8,9 +8,12 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="2" name="NavigateRecovery">
+    <!-- A failed complete trajectory is handled once by the persistent Task
+         Manager's topology/anchor fallback. Retrying this tree repeats the
+         same expensive GridBased search and delays the first drive command. -->
+    <RecoveryNode number_of_retries="0" name="NavigateRecovery">
       <Sequence name="PlanOnceThenFollow">
-        <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+        <RecoveryNode number_of_retries="0" name="ComputePathToPose">
           <!--
             Foxy may otherwise retain the BT action node's 20 ms response
             timeout. Large-map departure fallback can legitimately take close

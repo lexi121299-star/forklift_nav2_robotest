@@ -10,6 +10,7 @@ from forklift_safety.safety_command_gate import (
     PalletExemptionZone,
     apply_drive_envelope,
     angle_in_scan_fov,
+    cap_control_command_speed,
     clamp_control_command,
     costmap_error,
     costmap_stop_reason,
@@ -22,6 +23,7 @@ from forklift_safety.safety_command_gate import (
     point_in_pallet_exemption,
     scan_stop_reason,
     scan_sweep_collision,
+    spatial_sweep_time_step,
     predicted_poses_for_command,
     recovery_command_from_twist,
     stop_command,
@@ -123,6 +125,17 @@ def test_apply_drive_envelope_caps_rpm_and_keeps_explicit_ramp():
     # Explicit upstream accel is preserved; unset decel is filled with the default.
     assert command.accel_time_sec == pytest.approx(2.0)
     assert command.decel_time_sec == pytest.approx(3.0)
+
+
+def test_scan_freshness_cap_scales_speed_and_motor_rpm_together():
+    command = ForkliftControlCommand()
+    command.velocity_mps = 1.5
+    command.drive_rpm = 1800.0
+
+    assert cap_control_command_speed(command, 1.0) is True
+    assert command.velocity_mps == pytest.approx(1.0)
+    assert command.drive_rpm == pytest.approx(1200.0)
+    assert cap_control_command_speed(command, 1.0) is False
 
 
 def test_recovery_backoff_is_low_speed_reverse_command():
@@ -232,11 +245,19 @@ def test_dynamic_stopping_distance_matches_three_meter_per_second_design_case():
     assert dynamic_stopping_distance(3.0, 0.9, 1.5, 0.5) == pytest.approx(6.2)
 
 
+def test_spatial_sweep_step_avoids_low_speed_temporal_oversampling():
+    assert spatial_sweep_time_step(0.1, 0.05, 6.0) == pytest.approx(0.5)
+    assert spatial_sweep_time_step(3.0, 0.05, 2.1) == pytest.approx(1.0 / 60.0)
+    assert spatial_sweep_time_step(0.0, 0.05, 2.1) == pytest.approx(2.1)
+
+
 def test_scan_stop_reason_rejects_missing_stale_or_short_range_scan():
     assert scan_stop_reason(True, 0.0, False, 0.0, 0.25, 8.0) == 'scan missing'
     assert scan_stop_reason(True, 0.3, True, 8.0, 0.25, 8.0) == 'scan timeout'
     assert 'below required 8.00 m' in scan_stop_reason(True, 0.1, True, 3.0, 0.25, 8.0)
     assert scan_stop_reason(True, 0.1, True, 8.0, 0.25, 8.0) == ''
+    assert scan_stop_reason(True, 0.69, True, 8.0, 0.7, 8.0) == ''
+    assert scan_stop_reason(True, 0.71, True, 8.0, 0.7, 8.0) == 'scan timeout'
 
 
 def test_scan_fov_accepts_reverse_at_negative_pi_boundary():
@@ -316,6 +337,66 @@ def test_scan_sweep_only_exempts_the_selected_pallet_rectangle():
     )
     assert collision is True
     assert reason == 'scan footprint sweep collision'
+
+
+def test_scan_sweep_allows_validated_straight_reverse_escape():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.reverse = True
+    command.velocity_mps = 0.1
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+
+    collision, reason = scan_sweep_collision(
+        [(0.08, 0.0)],
+        footprint,
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.3,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
+        allow_reverse_escape=True,
+    )
+
+    assert collision is False
+    assert reason == 'scan reverse escape clear'
+
+
+def test_scan_sweep_reverse_escape_rejects_rear_or_new_obstacle():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.reverse = True
+    command.velocity_mps = 0.1
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+    arguments = dict(
+        footprint=footprint,
+        command=command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.3,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
+        allow_reverse_escape=True,
+    )
+
+    collision, _reason = scan_sweep_collision(
+        scan_points=[(-0.08, 0.0)], **arguments
+    )
+    assert collision is True
+
+    collision, reason = scan_sweep_collision(
+        scan_points=[(0.08, 0.0), (-0.25, 0.0)], **arguments
+    )
+    assert collision is True
+    assert reason == 'scan reverse escape would hit a new obstacle'
 
 
 def test_parse_footprint_matches_foxy_yaml_string():
@@ -473,6 +554,38 @@ def test_footprint_sweep_collision_allows_clear_backoff():
 
     assert collision is False
     assert reason == 'footprint sweep clear'
+
+
+def test_footprint_sweep_allows_scan_validated_initial_collision_escape():
+    costmap = make_costmap()
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+    set_cost(costmap, 0.1, 0.0, 100)
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.reverse = True
+    command.velocity_mps = 0.1
+
+    collision, reason = footprint_sweep_collision(
+        costmap,
+        footprint,
+        (0.0, 0.0, 0.0),
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        horizon_sec=2.0,
+        time_step_sec=0.2,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        sample_spacing=0.05,
+        cost_threshold=100,
+        unknown_is_collision=True,
+        allow_initial_collision_escape=True,
+    )
+
+    assert collision is False
+    assert reason == 'footprint reverse escape clear'
 
 
 def test_pivot_prediction_keeps_rear_axle_fixed():

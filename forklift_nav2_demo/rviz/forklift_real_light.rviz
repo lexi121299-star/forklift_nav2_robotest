@@ -144,7 +144,10 @@ Visualization Manager:
         Value: /initialpose
     - Class: rviz_default_plugins/SetGoal
       Topic:
-        Value: /goal_pose
+        Value: /forklift/navigation_goal
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /forklift/pallet_goal
   Transformation:
     Current:
       Class: rviz_default_plugins/TF

@@ -88,8 +88,32 @@ TEST(ForkliftMpcSolver, StraightWindowSelectsForwardCommandNearZeroSteeringRate)
     testParameters());
 
   ASSERT_TRUE(result.valid);
-  EXPECT_GT(result.control.v, 0.0);
-  EXPECT_NEAR(result.control.w, 0.0, 1e-9);
+  EXPECT_GT(result.control.acceleration, 0.0);
+  EXPECT_NEAR(result.control.steering_rate, 0.0, 1e-9);
+  EXPECT_NEAR(result.command.steering_angle, 0.0, 1e-9);
+}
+
+TEST(ForkliftMpcSolver, VelocityReferencePullsStraightCommandToAvailableLimit)
+{
+  const auto vehicle_model = testVehicleModel();
+  auto window = straightWindow(3.0);
+  for (auto & point : window.points) {
+    point.velocity_reference = 0.6;
+  }
+  auto parameters = testParameters();
+  parameters.velocity_reward_weight = 0.0;
+  parameters.velocity_reference_weight = 20.0;
+  parameters.smoothness_weight = 0.0;
+
+  const auto result = solveMpcCommand(
+    window,
+    makeMpcState(0.0, 0.0, 0.0, 0.0, vehicle_model),
+    geometry_msgs::msg::Twist{},
+    vehicle_model,
+    parameters);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_NEAR(result.command.velocity, 0.1, 1e-9);
   EXPECT_NEAR(result.command.steering_angle, 0.0, 1e-9);
 }
 
@@ -108,8 +132,34 @@ TEST(ForkliftMpcSolver, ReverseWindowSelectsNegativeVelocityWhenAllowed)
     parameters);
 
   ASSERT_TRUE(result.valid);
-  EXPECT_LT(result.control.v, 0.0);
+  EXPECT_LT(result.control.acceleration, 0.0);
   EXPECT_LT(result.command.velocity, 0.0);
+}
+
+TEST(ForkliftMpcSolver, ReverseDirectionIsHardConstraintEvenWhenForwardScoresBetter)
+{
+  auto parameters = testParameters();
+  parameters.allow_reverse = true;
+  parameters.max_reverse_velocity = .4;
+  parameters.motion_direction = -1;
+  const auto result = solveMpcCommand(
+    straightWindow(2.0), makeMpcState(0., 0., 0., 0., testVehicleModel()),
+    geometry_msgs::msg::Twist{}, testVehicleModel(), parameters);
+  ASSERT_TRUE(result.valid);
+  EXPECT_LT(result.command.velocity, 0.);
+}
+
+TEST(ForkliftMpcSolver, ForwardDirectionCannotChooseReverseForBehindTarget)
+{
+  auto parameters = testParameters();
+  parameters.allow_reverse = true;
+  parameters.max_reverse_velocity = .4;
+  parameters.motion_direction = 1;
+  const auto result = solveMpcCommand(
+    reverseWindow(2.), makeMpcState(0., 0., 0., 0., testVehicleModel()),
+    geometry_msgs::msg::Twist{}, testVehicleModel(), parameters);
+  ASSERT_TRUE(result.valid);
+  EXPECT_GT(result.command.velocity, 0.);
 }
 
 TEST(ForkliftMpcSolver, LeftTurnWindowSelectsPositiveSteeringRate)
@@ -123,8 +173,8 @@ TEST(ForkliftMpcSolver, LeftTurnWindowSelectsPositiveSteeringRate)
     testParameters());
 
   ASSERT_TRUE(result.valid);
-  EXPECT_GT(result.control.v, 0.0);
-  EXPECT_GT(result.control.w, 0.0);
+  EXPECT_GT(result.control.acceleration, 0.0);
+  EXPECT_GT(result.control.steering_rate, 0.0);
   EXPECT_GT(result.command.steering_angle, 0.0);
 }
 
@@ -143,8 +193,12 @@ TEST(ForkliftMpcSolver, RespectsVelocityAndSteeringRateLimits)
     parameters);
 
   ASSERT_TRUE(result.valid);
-  EXPECT_LE(std::abs(result.control.v), vehicle_model.parameters().max_velocity);
-  EXPECT_LE(std::abs(result.control.w), vehicle_model.parameters().max_steering_angle_velocity);
+  EXPECT_LE(
+    std::abs(result.control.acceleration),
+    vehicle_model.parameters().max_acceleration);
+  EXPECT_LE(
+    std::abs(result.control.steering_rate),
+    vehicle_model.parameters().max_steering_angle_velocity);
   EXPECT_LE(std::abs(result.command.steering_angle), vehicle_model.parameters().max_steering_angle);
 }
 
@@ -164,7 +218,7 @@ TEST(ForkliftMpcSolver, AllowsStopInsideGoalTolerance)
     parameters);
 
   ASSERT_TRUE(result.valid);
-  EXPECT_NEAR(result.control.v, 0.0, 1e-9);
+  EXPECT_NEAR(result.control.acceleration, 0.0, 1e-9);
 }
 
 }  // namespace

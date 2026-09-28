@@ -33,6 +33,7 @@ def generate_launch_description():
     nav2_share = get_package_share_directory('nav2_bringup')
     vehicle_share = get_package_share_directory('forklift_vehicle_interface')
     safety_share = get_package_share_directory('forklift_safety')
+    task_manager_share = get_package_share_directory('forklift_task_manager')
 
     map_file = LaunchConfiguration('map')
     params_file = LaunchConfiguration('nav2_params_file')
@@ -64,6 +65,9 @@ def generate_launch_description():
     localization_offset_y_m = LaunchConfiguration('localization_offset_y_m')
     localization_offset_yaw_rad = LaunchConfiguration('localization_offset_yaw_rad')
     runtime_velocity_limit_mps = LaunchConfiguration('runtime_velocity_limit_mps')
+    scan_timeout_sec = LaunchConfiguration('scan_timeout_sec')
+    high_speed_empty_test_mode = LaunchConfiguration('high_speed_empty_test_mode')
+    use_task_manager = LaunchConfiguration('use_task_manager')
 
     nav2_params = RewrittenYaml(
         source_file=params_file,
@@ -133,13 +137,28 @@ def generate_launch_description():
         }],
     )
 
+    def validate_high_speed_configuration(context, *args, **kwargs):
+        speed_limit = float(runtime_velocity_limit_mps.perform(context))
+        high_speed_enabled = high_speed_empty_test_mode.perform(context).lower() in (
+            'true', '1', 'yes', 'on')
+        if speed_limit <= 0.0 or speed_limit > 2.0:
+            raise RuntimeError(
+                'runtime_velocity_limit_mps must be greater than 0 and no more than 2.0')
+        if speed_limit > 1.0 and not high_speed_enabled:
+            raise RuntimeError(
+                'runtime_velocity_limit_mps above 1.0 requires '
+                'high_speed_empty_test_mode:=true')
+        return []
+
     def launch_safety(context, *args, **kwargs):
         footprint = footprint_from_params(params_file.perform(context))
+        speed_limit = float(runtime_velocity_limit_mps.perform(context))
         arguments = {
             'use_sim_time': 'false',
             'enabled': 'true',
             'collision_check_enabled': 'true',
-            'costmap_monitor_enabled': 'true',
+            'costmap_monitor_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
+            'costmap_collision_check_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'raw_command_topic': '/forklift/control_cmd_raw',
             'gated_command_topic': '/forklift/control_cmd',
             'recovery_twist_topic': '/cmd_vel',
@@ -156,19 +175,35 @@ def generate_launch_description():
             'dynamic_stop_reaction_time_sec': '0.9',
             'dynamic_stop_brake_deceleration_mps2': '1.5',
             'dynamic_stop_clearance_m': '0.5',
+            'pivot_brake_deceleration_radps2': LaunchConfiguration(
+                'pivot_brake_deceleration_radps2').perform(context),
+            'pivot_stop_margin_rad': LaunchConfiguration('pivot_stop_margin_rad').perform(context),
+            'collision_compute_budget_sec': LaunchConfiguration('collision_compute_budget_sec').perform(context),
             'scan_protection_enabled': 'true',
             'scan_topic': '/scan',
-            'scan_timeout_sec': '0.4',
+            # A late frame first caps travel at 1 m/s. Only the hard timeout
+            # stops the vehicle. Expose it instead of overriding the gate's
+            # configurable timeout with a hidden launch constant.
+            'scan_timeout_sec': scan_timeout_sec.perform(context),
+            'scan_high_speed_freshness_timeout_sec': '0.25',
+            'scan_degraded_max_speed_mps': '1.0',
+            'scan_fresh_recovery_duration_sec': '1.0',
             'scan_required_range_m': '8.0',
             'scan_collision_sample_spacing_m': '0.05',
             'scan_collision_padding_m': '0.05',
             'scan_require_motion_fov_coverage': 'true',
+            # Permit only a straight, low-speed reverse that the raw scan
+            # predicts will leave an existing front-side footprint overlap.
+            'allow_reverse_collision_escape': 'true',
+            'reverse_collision_escape_max_speed_mps': '0.15',
+            'reverse_collision_escape_max_steering_angle_rad': '0.05',
+            'reverse_collision_escape_obstacle_min_x_m': '0.0',
             'max_forward_velocity_mps': runtime_velocity_limit_mps.perform(context),
             # Only logical reverse motion may ignore the selected pallet cells.
             'pallet_exemption_reverse_only': 'true',
             # Cover the pallet and its near scan returns, not the aisle.
-            'pallet_exemption_length_m': '1.40',
-            'pallet_exemption_width_m': '1.30',
+            'pallet_exemption_length_m': '1.80',
+            'pallet_exemption_width_m': '1.60',
             'wheel_base': '1.4',
             'rear_axle_x_offset': '0.0',
         }
@@ -226,6 +261,14 @@ def generate_launch_description():
         output='screen',
     )
 
+    task_manager = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                task_manager_share, 'launch', 'pallet_approach.launch.py')),
+        condition=IfCondition(use_task_manager),
+        launch_arguments={'use_sim_time': 'false'}.items(),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'map',
@@ -250,12 +293,32 @@ def generate_launch_description():
             default_value='true',
             description='Safety default. Set false only when CAN hardware is ready.'),
         DeclareLaunchArgument('can_interface', default_value='can0'),
+        DeclareLaunchArgument('pivot_brake_deceleration_radps2', default_value='0.15'),
+        DeclareLaunchArgument('pivot_stop_margin_rad', default_value='0.05'),
+        DeclareLaunchArgument('collision_compute_budget_sec', default_value='0.15'),
+        DeclareLaunchArgument('safety_costmap_enabled', default_value='true',
+                             description='Enable costmap collision and freshness checks in Safety Gate; raw scan protection remains enabled'),
+        DeclareLaunchArgument(
+            'scan_timeout_sec', default_value='0.7',
+            description='Hard scan freshness stop timeout in seconds.'),
         DeclareLaunchArgument(
             'runtime_velocity_limit_mps',
             default_value='0.47',
             description=(
                 'Shared forward speed ceiling for FollowPath and Safety Gate. '
-                'Raise in measured .6/.8/1.0 m/s steps only.')),
+                'Raise in measured steps; values above 1.0 require empty-test mode.')),
+        DeclareLaunchArgument(
+            'high_speed_empty_test_mode',
+            default_value='false',
+            description=(
+                'Explicit empty-vehicle test gate required when the runtime '
+                'speed ceiling is above 1.0 m/s.')),
+        DeclareLaunchArgument(
+            'use_task_manager',
+            default_value='true',
+            description=(
+                'Start the persistent Task Manager with separate normal '
+                'navigation and pallet goal topics.')),
         DeclareLaunchArgument(
             'invert_drive_direction',
             default_value='false',
@@ -334,6 +397,7 @@ def generate_launch_description():
             'localization_offset_yaw_rad',
             default_value='0.0',
             description='Temporary yaw offset applied to external localization.'),
+        OpaqueFunction(function=validate_high_speed_configuration),
         robot_state_publisher,
         vehicle_interface,
         fine_motion_adapter,
@@ -341,5 +405,8 @@ def generate_launch_description():
         OpaqueFunction(function=launch_safety),
         map_server,
         lifecycle_manager_map,
-        TimerAction(period=nav2_start_delay, actions=[nav2_navigation, rviz]),
+        TimerAction(
+            period=nav2_start_delay,
+            actions=[nav2_navigation, task_manager, rviz],
+        ),
     ])

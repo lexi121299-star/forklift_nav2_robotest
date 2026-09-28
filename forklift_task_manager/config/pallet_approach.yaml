@@ -1,7 +1,64 @@
 forklift_task_manager:
   ros__parameters:
-    # Interpret RViz /goal_pose as the pallet pose, not the vehicle stop pose.
+    # Legacy /goal_pose is disabled. Use the two explicit task-manager topics.
     rviz_goal_mode: pallet_approach
+    legacy_goal_pose_enabled: false
+    navigation_goal_topic: /forklift/navigation_goal
+    pallet_goal_topic: /forklift/pallet_goal
+    compute_path_timeout_sec: 12.0
+    pallet_selection_total_timeout_sec: 20.0
+
+    # A failed continuous trajectory falls back to a footprint-validated
+    # topology path. The task manager owns and executes the intermediate stops.
+    hierarchical_navigation_enabled: true
+    topology_planner_id: TopologyOnly
+    # First try one driveable topology route through FollowPath. It uses one
+    # coarse topology A* query and only stops for explicit, swept-footprint
+    # pivots. If unavailable or interrupted, the existing anchor queue remains
+    # the conservative fallback.
+    continuous_anchor_path_enabled: true
+    continuous_topology_planner_id: TopologyContinuous
+    # HierarchicalNav2Navigator already retries individual anchor segments and
+    # can split them again. Do not repeat the entire failed final goal before
+    # entering that fallback, otherwise one GridBased timeout is paid twice.
+    max_retries: 0
+    # Anchor mode is a final fallback. Use fewer, longer aisle segments so a
+    # normal route does not stop every 3 m or place an intermediate goal beside
+    # a doorway; GridBased now handles the usual complete route directly.
+    anchor_preferred_spacing_m: 6.0
+    anchor_min_spacing_m: 1.5
+    anchor_max_spacing_m: 6.0
+    # This is the physical footprint padding used when validating a stopping
+    # anchor, not an additional desired aisle clearance. It must match the
+    # Nav2 global-costmap padding; 0.25 m made every anchor in the surveyed
+    # doorway appear blocked although TopologyOnly had found a legal corridor.
+    anchor_min_clearance_m: 0.03
+    anchor_approach_clearance_m: 0.50
+    anchor_max_count: 20
+    anchor_split_max_depth: 4
+    # Retry one identical anchor before splitting. A controller transient at a
+    # doorway can clear after its fresh-path steering settle; immediately
+    # splitting used to turn a valid aisle route into many 1.5 m low-speed legs.
+    # A second failure still recomputes topology and uses the bounded split path.
+    anchor_segment_retry_count: 1
+    # A non-final anchor may be accepted only after TF says base_link is close
+    # and vehicle feedback has been stationary for this duration. This avoids
+    # an otherwise-active Nav2 action blocking the remaining anchor queue.
+    anchor_arrival_tolerance_m: 0.35
+    anchor_arrival_speed_mps: 0.03
+    # The physical stop is still required for an independent Nav2 anchor
+    # goal, but keep the guard-owned handoff brief. This changes no planning
+    # search and avoids a visibly long idle gap before the next segment.
+    anchor_arrival_settle_sec: 0.15
+    anchor_arrival_transition_delay_sec: 0.10
+    anchor_collision_cost_threshold: 254
+    # Do not turn coarse-grid corner jitter into stop points. Failed segments
+    # still split locally through the existing bounded fallback.
+    anchor_force_corner_anchors: false
+    # TopologyOnly simplifies clear aisles. Restore samples before selecting
+    # anchors so a 9 m straight produces a nearby first segment rather than a
+    # target at the narrow doorway.
+    anchor_topology_sample_spacing_m: 0.25
 
     # If an RViz Nav2 Goal client accidentally also sends NavigateToPose,
     # cancel it before calculating and starting the pallet maneuver.
@@ -35,7 +92,8 @@ forklift_task_manager:
     pallet_turn_preferred_max_distance_m: 4.00
     pallet_turn_max_distance_m: 5.00
     pallet_turn_distance_step_m: 0.25
-    pallet_turn_lateral_max_m: 1.50
+    # Single-pivot workflow: staging candidates stay on the pallet normal.
+    pallet_turn_lateral_max_m: 0.0
     pallet_turn_lateral_step_m: 0.25
     pallet_turn_runup_distance_m: 0.60
     pallet_turn_clearance_padding_m: 0.10
@@ -45,13 +103,20 @@ forklift_task_manager:
     pallet_turn_keepout_radius_m: 1.50
     pallet_turn_collision_cost_threshold: 254
     pallet_turn_blocked_wait_sec: 5.0
-    # Accept the two staging navigation segments once the vehicle is close and
+    # Accept the staging navigation segment once the vehicle is close and
     # stationary, even if Nav2 leaves its action active near the path endpoint.
     pallet_nav_arrival_tolerance_m: 0.35
     pallet_nav_arrival_speed_mps: 0.03
     pallet_nav_arrival_settle_sec: 0.30
     pallet_pivot_speed_mps: 0.12
     pallet_pivot_timeout_sec: 60.0
+    # Verify absolute pallet alignment after the relative action has stopped.
+    # Odom yaw disagreement alone must not reject a correctly aligned map pose.
+    pallet_pivot_verify_timeout_sec: 3.0
+    pallet_pivot_yaw_tolerance_rad: 0.05
+    pallet_pivot_yaw_rate_tolerance_radps: 0.03
+    pallet_pivot_feedback_timeout_sec: 0.5
+    pallet_pivot_odom_topic: /odom
     pallet_vehicle_footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
     pallet_global_costmap_topic: /global_costmap/costmap_raw
     pallet_local_costmap_topic: /local_costmap/costmap_raw
@@ -60,9 +125,12 @@ forklift_task_manager:
     # approach after the pallet-facing pivot, then restricted to this box.
     pallet_exemption_activation_distance_m: 4.0
     pallet_exemption_deactivation_distance_m: 4.5
-    pallet_exemption_length_m: 1.40
-    pallet_exemption_width_m: 1.30
+    pallet_exemption_length_m: 1.80
+    pallet_exemption_width_m: 1.60
 
     # Check several locally clear staging candidates with ComputePathToPose.
     # The first globally reachable candidate is used for the pallet task.
     pallet_reachability_max_candidates: 32
+    # Allow the planner-server subscription to receive the temporary pallet
+    # keepout before the first ComputePathToPose request is dispatched.
+    pallet_keepout_publish_settle_sec: 0.15

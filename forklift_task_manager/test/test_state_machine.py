@@ -164,3 +164,20 @@ def test_relative_motion_failure_is_not_retried():
     assert machine.state == FAILED
     assert machine.reason == 'no progress'
     assert len(action_client.sent) == 1
+
+
+def test_pending_failure_does_not_prevent_next_goal():
+    action_client = MockActionClient()
+    machine = TaskStateMachine(action_client)
+
+    reported, _ = machine.reject_pending(
+        'rviz_pallet_approach', 'staging selection timed out'
+    )
+    assert reported is True
+    assert machine.state == FAILED
+    assert machine.active_route == 'rviz_pallet_approach'
+
+    accepted, _ = machine.start(make_route())
+    assert accepted is True
+    assert machine.state == RUNNING
+    assert action_client.sent[-1].name == 'first'

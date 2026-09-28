@@ -2,10 +2,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <fstream>
+#include <functional>
 #include <limits>
 #include <queue>
+#include <set>
 #include <stdexcept>
+#include <sstream>
 #include <utility>
 
 #include "forklift_oru_planner/oru_lattice_core.hpp"
@@ -57,11 +62,52 @@ bool pointInsideConvexFootprint(
   return true;
 }
 
-Point2D evaluateClampedCubicBSpline(
+bool convexPolygonsIntersect(
+  const nav2_costmap_2d::Footprint & first,
+  const nav2_costmap_2d::Footprint & second)
+{
+  const auto separated_on_axis = [](
+      const nav2_costmap_2d::Footprint & lhs,
+      const nav2_costmap_2d::Footprint & rhs,
+      double axis_x, double axis_y) {
+      double lhs_min = std::numeric_limits<double>::infinity();
+      double lhs_max = -std::numeric_limits<double>::infinity();
+      double rhs_min = std::numeric_limits<double>::infinity();
+      double rhs_max = -std::numeric_limits<double>::infinity();
+      for (const auto & point : lhs) {
+        const double projection = point.x * axis_x + point.y * axis_y;
+        lhs_min = std::min(lhs_min, projection);
+        lhs_max = std::max(lhs_max, projection);
+      }
+      for (const auto & point : rhs) {
+        const double projection = point.x * axis_x + point.y * axis_y;
+        rhs_min = std::min(rhs_min, projection);
+        rhs_max = std::max(rhs_max, projection);
+      }
+      return lhs_max < rhs_min || rhs_max < lhs_min;
+    };
+
+  const auto has_separating_axis = [&](const nav2_costmap_2d::Footprint & polygon) {
+      for (std::size_t index = 0u; index < polygon.size(); ++index) {
+        const auto & start = polygon[index];
+        const auto & end = polygon[(index + 1u) % polygon.size()];
+        const double axis_x = -(end.y - start.y);
+        const double axis_y = end.x - start.x;
+        if (separated_on_axis(first, second, axis_x, axis_y)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+  return !has_separating_axis(first) && !has_separating_axis(second);
+}
+
+Point2D evaluateClampedBSpline(
   const std::vector<Point2D> & control_points,
   double parameter)
 {
-  constexpr std::size_t degree = 3;
+  const std::size_t degree = std::min<std::size_t>(5u, control_points.size() - 1u);
   const std::size_t last_control = control_points.size() - 1;
   std::vector<double> knots(last_control + degree + 2, 0.0);
   const std::size_t interior_span_count = last_control - degree + 1;
@@ -82,7 +128,7 @@ Point2D evaluateClampedCubicBSpline(
       degree, last_control);
   }
 
-  std::array<Point2D, degree + 1> work;
+  std::vector<Point2D> work(degree + 1u);
   for (std::size_t j = 0; j <= degree; ++j) {
     work[j] = control_points[span - degree + j];
   }
@@ -168,6 +214,11 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_unknown", rclcpp::ParameterValue(allow_unknown_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".topology_only", rclcpp::ParameterValue(topology_only_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".topology_emit_segmented_path",
+    rclcpp::ParameterValue(topology_emit_segmented_path_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".use_diagonal", rclcpp::ParameterValue(use_diagonal_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".prevent_corner_cutting",
@@ -191,6 +242,18 @@ void OruGlobalPlanner::configure(
     node, name_ + ".footprint_cost_travel_multiplier",
     rclcpp::ParameterValue(footprint_cost_travel_multiplier_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".route_guidance_enabled",
+    rclcpp::ParameterValue(route_guidance_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".route_guidance_file",
+    rclcpp::ParameterValue(route_guidance_file_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".route_guidance_influence_width_m",
+    rclcpp::ParameterValue(route_guidance_influence_width_m_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".route_guidance_off_route_cost_multiplier",
+    rclcpp::ParameterValue(route_guidance_off_route_cost_multiplier_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".unknown_cost_penalty",
     rclcpp::ParameterValue(unknown_cost_penalty_));
   nav2_util::declare_parameter_if_not_declared(
@@ -201,6 +264,27 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".max_iterations",
     rclcpp::ParameterValue(static_cast<int>(max_iterations_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_enabled",
+    rclcpp::ParameterValue(pallet_keepout_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_pose_topic",
+    rclcpp::ParameterValue(pallet_keepout_pose_topic_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_exemption_active_topic",
+    rclcpp::ParameterValue(pallet_exemption_active_topic_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_timeout_sec",
+    rclcpp::ParameterValue(pallet_keepout_timeout_sec_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_length_m",
+    rclcpp::ParameterValue(2.0 * pallet_keepout_half_length_m_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_width_m",
+    rclcpp::ParameterValue(2.0 * pallet_keepout_half_width_m_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pallet_keepout_padding_m",
+    rclcpp::ParameterValue(pallet_keepout_padding_m_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_path_smoothing_enabled",
     rclcpp::ParameterValue(astar_path_smoothing_enabled_));
@@ -229,11 +313,20 @@ void OruGlobalPlanner::configure(
     node, name_ + ".astar_bspline_start_tangent_distance",
     rclcpp::ParameterValue(astar_bspline_start_tangent_distance_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_bspline_anchor_spacing",
+    rclcpp::ParameterValue(astar_bspline_anchor_spacing_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_bspline_retry_count",
     rclcpp::ParameterValue(static_cast<int>(astar_bspline_retry_count_)));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_reeds_shepp_fallback_enabled",
+    rclcpp::ParameterValue(astar_reeds_shepp_fallback_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_start_pivot_enabled",
     rclcpp::ParameterValue(astar_start_pivot_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_start_pivot_preferred",
+    rclcpp::ParameterValue(astar_start_pivot_preferred_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_start_pivot_threshold",
     rclcpp::ParameterValue(astar_start_pivot_threshold_));
@@ -250,6 +343,9 @@ void OruGlobalPlanner::configure(
     node, name_ + ".astar_segmented_pivot_threshold",
     rclcpp::ParameterValue(astar_segmented_pivot_threshold_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_max_automatic_pivots",
+    rclcpp::ParameterValue(static_cast<int>(astar_max_automatic_pivots_)));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_goal_endpoint_tolerance",
     rclcpp::ParameterValue(astar_goal_endpoint_tolerance_));
   nav2_util::declare_parameter_if_not_declared(
@@ -264,6 +360,30 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".astar_departure_step_distance",
     rclcpp::ParameterValue(astar_departure_step_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".planner_total_timeout_sec",
+    rclcpp::ParameterValue(planner_total_timeout_sec_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_coarse_topology_search_enabled",
+    rclcpp::ParameterValue(astar_coarse_topology_search_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".topology_search_resolution_m",
+    rclcpp::ParameterValue(topology_search_resolution_m_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_internal_pivot_relocation_enabled",
+    rclcpp::ParameterValue(astar_internal_pivot_relocation_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_internal_pivot_min_distance",
+    rclcpp::ParameterValue(astar_internal_pivot_min_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_internal_pivot_max_distance",
+    rclcpp::ParameterValue(astar_internal_pivot_max_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_internal_pivot_step_distance",
+    rclcpp::ParameterValue(astar_internal_pivot_step_distance_));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".astar_internal_pivot_exit_distance",
+    rclcpp::ParameterValue(astar_internal_pivot_exit_distance_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".use_lattice_planner",
     rclcpp::ParameterValue(use_lattice_planner_));
@@ -359,8 +479,14 @@ void OruGlobalPlanner::configure(
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".lattice_max_iterations",
     rclcpp::ParameterValue(static_cast<int>(lattice_max_iterations_)));
+  nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".lattice_max_planning_time_sec",
+    rclcpp::ParameterValue(lattice_max_planning_time_sec_));
 
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
+  node->get_parameter(name_ + ".topology_only", topology_only_);
+  node->get_parameter(
+    name_ + ".topology_emit_segmented_path", topology_emit_segmented_path_);
   node->get_parameter(name_ + ".use_diagonal", use_diagonal_);
   node->get_parameter(
     name_ + ".prevent_corner_cutting",
@@ -381,9 +507,34 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".footprint_cost_travel_multiplier",
     footprint_cost_travel_multiplier_);
+  node->get_parameter(name_ + ".route_guidance_enabled", route_guidance_enabled_);
+  node->get_parameter(name_ + ".route_guidance_file", route_guidance_file_);
+  node->get_parameter(
+    name_ + ".route_guidance_influence_width_m",
+    route_guidance_influence_width_m_);
+  node->get_parameter(
+    name_ + ".route_guidance_off_route_cost_multiplier",
+    route_guidance_off_route_cost_multiplier_);
   node->get_parameter(name_ + ".unknown_cost_penalty", unknown_cost_penalty_);
   node->get_parameter(name_ + ".start_tolerance", start_tolerance_);
   node->get_parameter(name_ + ".goal_tolerance", goal_tolerance_);
+  node->get_parameter(name_ + ".pallet_keepout_enabled", pallet_keepout_enabled_);
+  node->get_parameter(
+    name_ + ".pallet_keepout_pose_topic", pallet_keepout_pose_topic_);
+  node->get_parameter(
+    name_ + ".pallet_exemption_active_topic", pallet_exemption_active_topic_);
+  node->get_parameter(
+    name_ + ".pallet_keepout_timeout_sec", pallet_keepout_timeout_sec_);
+  double pallet_keepout_length_m = 2.0 * pallet_keepout_half_length_m_;
+  double pallet_keepout_width_m = 2.0 * pallet_keepout_half_width_m_;
+  node->get_parameter(name_ + ".pallet_keepout_length_m", pallet_keepout_length_m);
+  node->get_parameter(name_ + ".pallet_keepout_width_m", pallet_keepout_width_m);
+  node->get_parameter(
+    name_ + ".pallet_keepout_padding_m", pallet_keepout_padding_m_);
+  pallet_keepout_half_length_m_ = 0.5 * std::max(0.01, pallet_keepout_length_m);
+  pallet_keepout_half_width_m_ = 0.5 * std::max(0.01, pallet_keepout_width_m);
+  pallet_keepout_timeout_sec_ = std::max(0.05, pallet_keepout_timeout_sec_);
+  pallet_keepout_padding_m_ = std::max(0.0, pallet_keepout_padding_m_);
 
   int max_iterations = 0;
   node->get_parameter(name_ + ".max_iterations", max_iterations);
@@ -421,6 +572,9 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".astar_bspline_start_tangent_distance",
     astar_bspline_start_tangent_distance_);
+  node->get_parameter(
+    name_ + ".astar_bspline_anchor_spacing",
+    astar_bspline_anchor_spacing_);
   int astar_bspline_retry_count = 0;
   node->get_parameter(
     name_ + ".astar_bspline_retry_count",
@@ -428,8 +582,14 @@ void OruGlobalPlanner::configure(
   astar_bspline_retry_count_ = astar_bspline_retry_count > 0 ?
     static_cast<unsigned int>(astar_bspline_retry_count) : 0u;
   node->get_parameter(
+    name_ + ".astar_reeds_shepp_fallback_enabled",
+    astar_reeds_shepp_fallback_enabled_);
+  node->get_parameter(
     name_ + ".astar_start_pivot_enabled",
     astar_start_pivot_enabled_);
+  node->get_parameter(
+    name_ + ".astar_start_pivot_preferred",
+    astar_start_pivot_preferred_);
   node->get_parameter(
     name_ + ".astar_start_pivot_threshold",
     astar_start_pivot_threshold_);
@@ -445,6 +605,11 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".astar_segmented_pivot_threshold",
     astar_segmented_pivot_threshold_);
+  int astar_max_automatic_pivots = 0;
+  node->get_parameter(
+    name_ + ".astar_max_automatic_pivots", astar_max_automatic_pivots);
+  astar_max_automatic_pivots_ = astar_max_automatic_pivots > 0 ?
+    static_cast<unsigned int>(astar_max_automatic_pivots) : 0u;
   node->get_parameter(
     name_ + ".astar_goal_endpoint_tolerance",
     astar_goal_endpoint_tolerance_);
@@ -462,6 +627,28 @@ void OruGlobalPlanner::configure(
   node->get_parameter(
     name_ + ".astar_departure_step_distance",
     astar_departure_step_distance_);
+  node->get_parameter(
+    name_ + ".planner_total_timeout_sec", planner_total_timeout_sec_);
+  node->get_parameter(
+    name_ + ".astar_coarse_topology_search_enabled",
+    astar_coarse_topology_search_enabled_);
+  node->get_parameter(
+    name_ + ".topology_search_resolution_m", topology_search_resolution_m_);
+  node->get_parameter(
+    name_ + ".astar_internal_pivot_relocation_enabled",
+    astar_internal_pivot_relocation_enabled_);
+  node->get_parameter(
+    name_ + ".astar_internal_pivot_min_distance",
+    astar_internal_pivot_min_distance_);
+  node->get_parameter(
+    name_ + ".astar_internal_pivot_max_distance",
+    astar_internal_pivot_max_distance_);
+  node->get_parameter(
+    name_ + ".astar_internal_pivot_step_distance",
+    astar_internal_pivot_step_distance_);
+  node->get_parameter(
+    name_ + ".astar_internal_pivot_exit_distance",
+    astar_internal_pivot_exit_distance_);
   node->get_parameter(name_ + ".use_lattice_planner", use_lattice_planner_);
   node->get_parameter(
     name_ + ".lattice_fallback_to_astar",
@@ -563,6 +750,9 @@ void OruGlobalPlanner::configure(
     lattice_max_iterations > 0 ?
     static_cast<unsigned int>(lattice_max_iterations) :
     0u;
+  node->get_parameter(
+    name_ + ".lattice_max_planning_time_sec",
+    lattice_max_planning_time_sec_);
 
   lethal_cost_threshold_ = std::clamp(lethal_cost_threshold_, 1, 255);
   footprint_collision_cost_threshold_ =
@@ -570,6 +760,13 @@ void OruGlobalPlanner::configure(
   cost_travel_multiplier_ = std::max(0.0, cost_travel_multiplier_);
   footprint_cost_travel_multiplier_ =
     std::max(0.0, footprint_cost_travel_multiplier_);
+  route_guidance_influence_width_m_ = std::clamp(
+    route_guidance_influence_width_m_, 0.10, 20.0);
+  route_guidance_off_route_cost_multiplier_ = std::clamp(
+    route_guidance_off_route_cost_multiplier_, 0.0, 10.0);
+  if (!loadRouteGuidanceFile()) {
+    route_guidance_enabled_ = false;
+  }
   unknown_cost_penalty_ = std::max(0.0, unknown_cost_penalty_);
   start_tolerance_ = std::max(0.0, start_tolerance_);
   goal_tolerance_ = std::max(0.0, goal_tolerance_);
@@ -587,6 +784,8 @@ void OruGlobalPlanner::configure(
     std::clamp(astar_bspline_min_turning_radius_, 0.05, 20.0);
   astar_bspline_start_tangent_distance_ =
     std::clamp(astar_bspline_start_tangent_distance_, 0.05, 5.0);
+  astar_bspline_anchor_spacing_ =
+    std::clamp(astar_bspline_anchor_spacing_, 1.0, 1.5);
   astar_bspline_retry_count_ =
     std::min(astar_bspline_retry_count_, 10u);
   astar_start_pivot_threshold_ =
@@ -601,6 +800,19 @@ void OruGlobalPlanner::configure(
     astar_departure_max_distance_, astar_departure_min_distance_, 10.0);
   astar_departure_step_distance_ =
     std::clamp(astar_departure_step_distance_, 0.05, 1.0);
+  planner_total_timeout_sec_ = std::clamp(
+    planner_total_timeout_sec_, 1.0, 60.0);
+  topology_search_resolution_m_ = std::clamp(
+    topology_search_resolution_m_, costmap_->getResolution(), 1.0);
+  astar_internal_pivot_min_distance_ =
+    std::clamp(astar_internal_pivot_min_distance_, 0.10, 8.0);
+  astar_internal_pivot_max_distance_ = std::clamp(
+    astar_internal_pivot_max_distance_, astar_internal_pivot_min_distance_,
+    12.0);
+  astar_internal_pivot_step_distance_ =
+    std::clamp(astar_internal_pivot_step_distance_, 0.05, 1.0);
+  astar_internal_pivot_exit_distance_ =
+    std::clamp(astar_internal_pivot_exit_distance_, 0.10, 5.0);
   lattice_heading_bins_ = std::clamp(lattice_heading_bins_, 4u, 72u);
   lattice_step_distance_ = std::clamp(lattice_step_distance_, 0.05, 2.0);
   lattice_arc_radius_ = std::clamp(lattice_arc_radius_, 0.05, 20.0);
@@ -647,26 +859,48 @@ void OruGlobalPlanner::configure(
     std::clamp(lattice_goal_heading_tolerance_, 0.0, M_PI);
   lattice_shortcut_max_lookahead_ =
     std::max(2u, lattice_shortcut_max_lookahead_);
+  lattice_max_planning_time_sec_ =
+    std::clamp(lattice_max_planning_time_sec_, 0.1, 5.0);
+
+  if (pallet_keepout_enabled_) {
+    pallet_keepout_pose_sub_ = node->create_subscription<
+      geometry_msgs::msg::PoseStamped>(
+      pallet_keepout_pose_topic_, rclcpp::QoS(10),
+      std::bind(
+        &OruGlobalPlanner::palletKeepoutPoseCallback, this,
+        std::placeholders::_1));
+    pallet_exemption_active_sub_ = node->create_subscription<std_msgs::msg::Bool>(
+      pallet_exemption_active_topic_, rclcpp::QoS(10),
+      std::bind(
+        &OruGlobalPlanner::palletExemptionActiveCallback, this,
+        std::placeholders::_1));
+  }
 
   RCLCPP_INFO(
     logger_,
-    "Configured %s in frame %s: allow_unknown=%s use_diagonal=%s "
+    "Configured %s in frame %s: topology_only=%s topology_emit_segmented_path=%s "
+    "allow_unknown=%s use_diagonal=%s "
     "footprint_check=%s footprint_points=%zu lethal_cost_threshold=%d "
     "footprint_cost_multiplier=%.2f start_tolerance=%.2f "
     "astar_smoothing=%s astar_shortcut_lookahead=%u astar_shortcut_cost=%d "
     "astar_preferred_footprint_cost=%d start_clearance_relax=%.2f "
     "astar_bspline=%s bspline_spacing=%.2f bspline_min_radius=%.2f "
     "bspline_start_tangent=%.2f bspline_retries=%u "
-    "astar_start_pivot=%s pivot_threshold=%.2f pivot_sample_angle=%.2f "
+    "astar_start_pivot=%s pivot_preferred=%s pivot_threshold=%.2f "
+    "pivot_sample_angle=%.2f "
     "segmented_fallback=%s prefer_segmented=%s "
     "segmented_pivot_threshold=%.2f goal_endpoint_tolerance=%.2f "
     "departure_fallback=%s departure_distance=%.2f..%.2f step=%.2f "
+    "planner_timeout=%.1f coarse_topology_search=%s topology_resolution=%.2f "
+    "internal_pivot_relocation=%s distance=%.2f..%.2f step=%.2f exit=%.2f "
     "use_lattice=%s "
     "lattice_bins=%u lattice_step=%.2f lattice_arc_radius=%.2f "
     "lattice_goal_tolerance=%.2f lattice_reverse=%s "
     "reverse_requires_goal_behind=%s "
     "lattice_pivot=%s analytic_expansion=%s lattice_max_iterations=%u",
-    name_.c_str(), global_frame_.c_str(), allow_unknown_ ? "true" : "false",
+    name_.c_str(), global_frame_.c_str(), topology_only_ ? "true" : "false",
+    topology_emit_segmented_path_ ? "true" : "false",
+    allow_unknown_ ? "true" : "false",
     use_diagonal_ ? "true" : "false",
     use_footprint_collision_check_ ? "true" : "false", footprint_.size(),
     lethal_cost_threshold_, footprint_cost_travel_multiplier_, start_tolerance_,
@@ -678,13 +912,19 @@ void OruGlobalPlanner::configure(
     astar_bspline_sample_spacing_, astar_bspline_min_turning_radius_,
     astar_bspline_start_tangent_distance_, astar_bspline_retry_count_,
     astar_start_pivot_enabled_ ? "true" : "false",
+    astar_start_pivot_preferred_ ? "true" : "false",
     astar_start_pivot_threshold_, astar_pivot_collision_sample_angle_,
     astar_segmented_fallback_enabled_ ? "true" : "false",
     astar_prefer_segmented_path_ ? "true" : "false",
     astar_segmented_pivot_threshold_, astar_goal_endpoint_tolerance_,
     astar_departure_fallback_enabled_ ? "true" : "false",
     astar_departure_min_distance_, astar_departure_max_distance_,
-    astar_departure_step_distance_,
+    astar_departure_step_distance_, planner_total_timeout_sec_,
+    astar_coarse_topology_search_enabled_ ? "true" : "false",
+    topology_search_resolution_m_,
+    astar_internal_pivot_relocation_enabled_ ? "true" : "false",
+    astar_internal_pivot_min_distance_, astar_internal_pivot_max_distance_,
+    astar_internal_pivot_step_distance_, astar_internal_pivot_exit_distance_,
     use_lattice_planner_ ? "true" : "false", lattice_heading_bins_,
     lattice_step_distance_, lattice_arc_radius_, lattice_goal_tolerance_,
     lattice_reverse_enabled_ ? "true" : "false",
@@ -696,6 +936,13 @@ void OruGlobalPlanner::configure(
 
 void OruGlobalPlanner::cleanup()
 {
+  pallet_keepout_pose_sub_.reset();
+  pallet_exemption_active_sub_.reset();
+  {
+    std::lock_guard<std::mutex> lock(pallet_keepout_mutex_);
+    pallet_keepout_pose_received_ = false;
+    pallet_exemption_active_ = false;
+  }
   RCLCPP_INFO(logger_, "Cleaning up %s", name_.c_str());
 }
 
@@ -714,6 +961,22 @@ OruGlobalPlanner::createPlan(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal)
 {
+  const auto planning_started = std::chrono::steady_clock::now();
+  planning_deadline_ = planning_started + std::chrono::duration_cast<
+    std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(planner_total_timeout_sec_));
+  const auto throw_if_timed_out = [this, &planning_started](const char * stage) {
+      if (!planningTimedOut()) {
+        return;
+      }
+      const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - planning_started).count();
+      RCLCPP_WARN(
+        logger_, "Planner total timeout at stage=%s elapsed=%.3f s limit=%.3f s",
+        stage, elapsed, planner_total_timeout_sec_);
+      throw nav2_core::PlannerException(
+              std::string("OruGlobalPlanner total timeout at stage ") + stage);
+    };
   if (!costmap_) {
     throw nav2_core::PlannerException("OruGlobalPlanner has no costmap");
   }
@@ -797,7 +1060,9 @@ OruGlobalPlanner::createPlan(
   }
 
   Cell astar_start_cell = start_cell;
-  if (!isAStarSearchPoseTraversable(astar_start_cell, start_yaw)) {
+  const bool requested_start_footprint_clear =
+    isAStarSearchPoseTraversable(astar_start_cell, start_yaw);
+  if (!requested_start_footprint_clear) {
     RCLCPP_WARN(
       logger_,
       "A* start pose violates the configured shortcut safety cost %d",
@@ -832,7 +1097,17 @@ OruGlobalPlanner::createPlan(
         planning_start_y - start.pose.position.y));
   }
 
-  const auto cells = searchAStar(astar_start_cell, goal_cell);
+  // GridBased uses a footprint-validated coarse search rather than a dense
+  // 0.05 m global A*. The configured resolution must still retain enough
+  // corridor geometry for the continuous trajectory generator; a 1 m route
+  // is useful as a connectivity test but is too sparse to represent doorway
+  // turns as a driveable curve.
+  const bool use_coarse_topology_search =
+    topology_only_ || astar_coarse_topology_search_enabled_;
+  const auto cells = use_coarse_topology_search ?
+    searchTopologyAStar(astar_start_cell, goal_cell) :
+    searchAStar(astar_start_cell, goal_cell);
+  throw_if_timed_out("topology_astar");
   if (cells.empty()) {
     if (astar_departure_fallback_enabled_) {
       nav_msgs::msg::Path departure_path;
@@ -858,6 +1133,44 @@ OruGlobalPlanner::createPlan(
       }
     }
     throw nav2_core::PlannerException("OruGlobalPlanner could not find a path");
+  }
+
+  if (topology_only_) {
+    const auto topology_cells = trimAStarGoalDogleg(
+      simplifyAStarPath(cells), goal);
+    auto topology_path = buildPath(topology_cells, planning_start, goal);
+    if (topology_path.poses.size() < 2u) {
+      throw nav2_core::PlannerException(
+              "OruGlobalPlanner topology mode produced an empty path");
+    }
+    if (topology_emit_segmented_path_) {
+      nav_msgs::msg::Path segmented_path;
+      std::size_t pivot_count = 0u;
+      double max_curvature = 0.0;
+      std::size_t rejected_index = 0u;
+      AStarPathValidationFailure failure = AStarPathValidationFailure::NONE;
+      if (!buildAStarSegmentedFallbackPath(
+          topology_path, planning_start, goal, segmented_path, pivot_count,
+          max_curvature, rejected_index, failure))
+      {
+        RCLCPP_WARN(
+          logger_, "Topology continuous route rejected: reason=%s sample=%zu",
+          aStarValidationFailureName(failure), rejected_index);
+        throw nav2_core::PlannerException(
+                "OruGlobalPlanner topology route is not driveable as a "
+                "segmented continuous path");
+      }
+      RCLCPP_INFO(
+        logger_, "Topology continuous route accepted: raw_cells=%zu "
+        "samples=%zu pivots=%zu",
+        cells.size(), segmented_path.poses.size(), pivot_count);
+      return segmented_path;
+    }
+    RCLCPP_INFO(
+      logger_,
+      "Topology-only A* path accepted: raw_cells=%zu anchors=%zu",
+      cells.size(), topology_path.poses.size());
+    return topology_path;
   }
 
   const auto smoothed_cells = trimAStarGoalDogleg(
@@ -892,9 +1205,38 @@ OruGlobalPlanner::createPlan(
     RCLCPP_WARN(
       logger_,
       "A* preferred segmented path rejected: reason=%s sample=%zu; "
-      "trying B-spline",
+      "trying internal pivot relocation / B-spline",
       aStarValidationFailureName(segmented_failure),
       segmented_rejected_index);
+    if (astar_internal_pivot_relocation_enabled_ &&
+      segmented_failure == AStarPathValidationFailure::FOOTPRINT)
+    {
+      nav_msgs::msg::Path relocated_path;
+      double relocation_distance = 0.0;
+      std::size_t relocated_pivots = 0u;
+      double relocated_max_curvature = 0.0;
+      std::size_t relocated_rejected_index = 0u;
+      AStarPathValidationFailure relocated_failure =
+        AStarPathValidationFailure::NONE;
+      if (buildAStarInternalPivotRelocationPath(
+          astar_path, goal_cell, planning_start, goal, relocated_path,
+          relocation_distance, relocated_pivots, relocated_max_curvature,
+          relocated_rejected_index, relocated_failure))
+      {
+        RCLCPP_WARN(
+          logger_,
+          "A* internal pivot relocation accepted: lookback=%.2f m "
+          "samples=%zu pivots=%zu",
+          relocation_distance, relocated_path.poses.size(), relocated_pivots);
+        return relocated_path;
+      }
+      RCLCPP_WARN(
+        logger_,
+        "A* internal pivot relocation rejected: reason=%s sample=%zu; "
+        "trying B-spline",
+        aStarValidationFailureName(relocated_failure),
+        relocated_rejected_index);
+    }
   }
 
   const auto & first_route_point = astar_path.poses[1].pose.position;
@@ -904,7 +1246,7 @@ OruGlobalPlanner::createPlan(
   const double initial_heading_error = std::abs(
     normalizeAngle(route_yaw - start_yaw));
   const bool pivot_preferred =
-    astar_start_pivot_enabled_ &&
+    astar_start_pivot_enabled_ && astar_start_pivot_preferred_ &&
     initial_heading_error >= astar_start_pivot_threshold_;
   bool pivot_attempted = false;
   if (pivot_preferred) {
@@ -939,20 +1281,44 @@ OruGlobalPlanner::createPlan(
   double max_curvature = 0.0;
   std::size_t rejected_index = 0u;
   AStarPathValidationFailure failure = AStarPathValidationFailure::NONE;
+  nav_msgs::msg::Path best_hard_safe_path;
+  double best_hard_safe_cost = std::numeric_limits<double>::infinity();
+  bool have_repair_pose = false;
+  double repair_x = 0.0;
+  double repair_y = 0.0;
+  const auto remember_hard_safe_path =
+    [&](const nav_msgs::msg::Path & candidate, double peak_cost) {
+      if (best_hard_safe_path.poses.empty() || peak_cost < best_hard_safe_cost) {
+        best_hard_safe_path = candidate;
+        best_hard_safe_cost = peak_cost;
+      }
+    };
   if (validateAStarSmoothedPath(
       smooth_path, max_curvature, rejected_index, failure))
   {
-    RCLCPP_INFO(
+    double peak_cost = 0.0;
+    std::size_t clearance_index = 0u;
+    if (hasPreferredAStarClearance(smooth_path, peak_cost, clearance_index)) {
+      RCLCPP_INFO(
+        logger_,
+        "A* B-spline accepted: mode=continuous anchors=%zu samples=%zu "
+        "max_curvature=%.3f 1/m min_radius=%.3f m peak_cost=%.1f",
+        astar_path.poses.size(), smooth_path.poses.size(), max_curvature,
+        max_curvature > 1e-9 ? 1.0 / max_curvature :
+        std::numeric_limits<double>::infinity(), peak_cost);
+      return smooth_path;
+    }
+    remember_hard_safe_path(smooth_path, peak_cost);
+    RCLCPP_WARN(
       logger_,
-      "A* B-spline accepted: mode=continuous anchors=%zu samples=%zu "
-      "max_curvature=%.3f 1/m min_radius=%.3f m",
-      astar_path.poses.size(), smooth_path.poses.size(), max_curvature,
-      max_curvature > 1e-9 ? 1.0 / max_curvature :
-      std::numeric_limits<double>::infinity());
-    return smooth_path;
-  }
-  if (rejected_index < smooth_path.poses.size()) {
+      "A* continuous B-spline is collision-free but below preferred "
+      "clearance at sample=%zu peak_cost=%.1f; trying denser anchors",
+      clearance_index, peak_cost);
+  } else if (rejected_index < smooth_path.poses.size()) {
     const auto & rejected_pose = smooth_path.poses[rejected_index].pose;
+    have_repair_pose = true;
+    repair_x = rejected_pose.position.x;
+    repair_y = rejected_pose.position.y;
     RCLCPP_WARN(
       logger_,
       "A* continuous B-spline rejected: reason=%s sample=%zu "
@@ -1002,7 +1368,93 @@ OruGlobalPlanner::createPlan(
   for (unsigned int retry = 0u;
     retry < astar_bspline_retry_count_ && retry_lookahead >= 2u; ++retry)
   {
-    const auto retry_cells = simplifyAStarPath(cells, retry_lookahead);
+    throw_if_timed_out("adaptive_bspline");
+    if (failure == AStarPathValidationFailure::CURVATURE && retry > 0u) {
+      RCLCPP_WARN(
+        logger_, "A* adaptive B-spline stopped densifying anchors after "
+        "curvature rejection; advancing to reversible/segmented fallback");
+      break;
+    }
+    auto retry_cells = failure == AStarPathValidationFailure::NONE ?
+      simplifyAStarPath(cells, retry_lookahead) : smoothed_cells;
+    if (failure == AStarPathValidationFailure::FOOTPRINT && have_repair_pose) {
+      std::size_t nearest_raw_index = 0u;
+      double nearest_distance = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0u; i < cells.size(); ++i) {
+        double wx = 0.0;
+        double wy = 0.0;
+        costmap_->mapToWorld(cells[i].x, cells[i].y, wx, wy);
+        const double distance = std::hypot(wx - repair_x, wy - repair_y);
+        if (distance < nearest_distance) {
+          nearest_distance = distance;
+          nearest_raw_index = i;
+        }
+      }
+
+      std::vector<std::size_t> selected_indices;
+      selected_indices.reserve(retry_cells.size() + 3u);
+      std::size_t raw_cursor = 0u;
+      for (const auto & selected : retry_cells) {
+        while (raw_cursor < cells.size() &&
+          (cells[raw_cursor].x != selected.x || cells[raw_cursor].y != selected.y))
+        {
+          ++raw_cursor;
+        }
+        if (raw_cursor < cells.size()) {
+          selected_indices.push_back(raw_cursor);
+        }
+      }
+      const std::size_t repair_span = std::max<std::size_t>(
+        1u, static_cast<std::size_t>(std::ceil(
+          0.50 / std::max(1e-6, costmap_->getResolution()))));
+      selected_indices.push_back(nearest_raw_index);
+      selected_indices.push_back(
+        nearest_raw_index > repair_span ? nearest_raw_index - repair_span : 0u);
+      selected_indices.push_back(std::min(
+        cells.size() - 1u, nearest_raw_index + repair_span));
+      std::sort(selected_indices.begin(), selected_indices.end());
+      selected_indices.erase(
+        std::unique(selected_indices.begin(), selected_indices.end()),
+        selected_indices.end());
+      retry_cells.clear();
+      retry_cells.reserve(selected_indices.size());
+      for (const auto index : selected_indices) {
+        retry_cells.push_back(cells[index]);
+      }
+      RCLCPP_INFO(
+        logger_, "A* local B-spline repair: failure_pose=(%.3f, %.3f) "
+        "raw_index=%zu anchors=%zu", repair_x, repair_y,
+        nearest_raw_index, retry_cells.size());
+    } else if (failure == AStarPathValidationFailure::CURVATURE &&
+      have_repair_pose && retry_cells.size() > 2u)
+    {
+      std::size_t nearest_anchor = 1u;
+      double nearest_distance = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 1u; i + 1u < retry_cells.size(); ++i) {
+        double wx = 0.0;
+        double wy = 0.0;
+        costmap_->mapToWorld(retry_cells[i].x, retry_cells[i].y, wx, wy);
+        const double distance = std::hypot(wx - repair_x, wy - repair_y);
+        if (distance < nearest_distance) {
+          nearest_distance = distance;
+          nearest_anchor = i;
+        }
+      }
+      if (!isAStarShortcutTraversable(
+          retry_cells[nearest_anchor - 1u],
+          retry_cells[nearest_anchor + 1u], &cells.front()))
+      {
+        RCLCPP_WARN(
+          logger_, "A* local curvature repair cannot remove anchor %zu "
+          "without leaving the safe corridor", nearest_anchor);
+        break;
+      }
+      retry_cells.erase(retry_cells.begin() + nearest_anchor);
+      RCLCPP_INFO(
+        logger_, "A* local curvature repair widened the transition near "
+        "(%.3f, %.3f) by removing anchor=%zu; anchors=%zu",
+        repair_x, repair_y, nearest_anchor, retry_cells.size());
+    }
     const auto retry_astar_path = buildPath(
       retry_cells, planning_start, goal);
     if (retry_astar_path.poses.size() < 2u) {
@@ -1016,7 +1468,7 @@ OruGlobalPlanner::createPlan(
     const double retry_heading_error = std::abs(
       normalizeAngle(retry_route_yaw - start_yaw));
 
-    if (astar_start_pivot_enabled_ &&
+    if (astar_start_pivot_enabled_ && astar_start_pivot_preferred_ &&
       retry_heading_error >= astar_start_pivot_threshold_)
     {
       nav_msgs::msg::Path retry_pivot_path;
@@ -1050,24 +1502,42 @@ OruGlobalPlanner::createPlan(
         retry_smooth_path, retry_max_curvature,
         retry_rejected_index, retry_failure))
     {
+      double retry_peak_cost = 0.0;
+      std::size_t clearance_index = 0u;
+      if (hasPreferredAStarClearance(
+          retry_smooth_path, retry_peak_cost, clearance_index))
+      {
+        RCLCPP_WARN(
+          logger_,
+          "A* adaptive B-spline accepted: retry=%u lookahead=%u "
+          "anchors=%zu samples=%zu max_curvature=%.3f 1/m peak_cost=%.1f",
+          retry + 1u, retry_lookahead, retry_astar_path.poses.size(),
+          retry_smooth_path.poses.size(), retry_max_curvature,
+          retry_peak_cost);
+        return retry_smooth_path;
+      }
+      remember_hard_safe_path(retry_smooth_path, retry_peak_cost);
       RCLCPP_WARN(
         logger_,
-        "A* adaptive B-spline accepted: retry=%u lookahead=%u "
-        "anchors=%zu samples=%zu max_curvature=%.3f 1/m",
+        "A* adaptive B-spline is collision-free but below preferred "
+        "clearance: retry=%u lookahead=%u sample=%zu peak_cost=%.1f",
+        retry + 1u, retry_lookahead, clearance_index, retry_peak_cost);
+    } else {
+      failure = retry_failure;
+      rejected_index = retry_rejected_index;
+      max_curvature = retry_max_curvature;
+      if (retry_rejected_index < retry_smooth_path.poses.size()) {
+        have_repair_pose = true;
+        repair_x = retry_smooth_path.poses[retry_rejected_index].pose.position.x;
+        repair_y = retry_smooth_path.poses[retry_rejected_index].pose.position.y;
+      }
+      RCLCPP_WARN(
+        logger_,
+        "A* adaptive B-spline rejected: retry=%u lookahead=%u anchors=%zu "
+        "reason=%s sample=%zu",
         retry + 1u, retry_lookahead, retry_astar_path.poses.size(),
-        retry_smooth_path.poses.size(), retry_max_curvature);
-      return retry_smooth_path;
+        aStarValidationFailureName(retry_failure), retry_rejected_index);
     }
-
-    failure = retry_failure;
-    rejected_index = retry_rejected_index;
-    max_curvature = retry_max_curvature;
-    RCLCPP_WARN(
-      logger_,
-      "A* adaptive B-spline rejected: retry=%u lookahead=%u anchors=%zu "
-      "reason=%s sample=%zu",
-      retry + 1u, retry_lookahead, retry_astar_path.poses.size(),
-      aStarValidationFailureName(retry_failure), retry_rejected_index);
 
     if (retry_lookahead == 2u) {
       break;
@@ -1075,7 +1545,90 @@ OruGlobalPlanner::createPlan(
     retry_lookahead = std::max(2u, retry_lookahead / 2u);
   }
 
+  if (!best_hard_safe_path.poses.empty()) {
+    RCLCPP_WARN(
+      logger_,
+      "No B-spline met preferred clearance after adaptive retries; "
+      "returning best collision-free route to preserve reachability "
+      "(peak_cost=%.1f)",
+      best_hard_safe_cost);
+    return best_hard_safe_path;
+  }
+
+  // A segmented fallback can be map-valid while placing its pivot directly
+  // beside a doorway. Prefer relocating that pivot into the inbound aisle
+  // before trying more expensive reverse-curve search or accepting direct
+  // stop-pivot-go representation.
+  if (astar_internal_pivot_relocation_enabled_) {
+    throw_if_timed_out("internal_pivot_relocation");
+    nav_msgs::msg::Path relocated_path;
+    double relocation_distance = 0.0;
+    std::size_t relocated_pivots = 0u;
+    double relocated_max_curvature = 0.0;
+    std::size_t relocated_rejected_index = 0u;
+    AStarPathValidationFailure relocated_failure =
+      AStarPathValidationFailure::NONE;
+    if (buildAStarInternalPivotRelocationPath(
+        astar_path, goal_cell, planning_start, goal, relocated_path,
+        relocation_distance, relocated_pivots, relocated_max_curvature,
+        relocated_rejected_index, relocated_failure))
+    {
+      if (relocated_pivots <= astar_max_automatic_pivots_) {
+        RCLCPP_WARN(
+          logger_,
+          "A* B-spline retries exhausted; accepted internal pivot relocation: "
+          "lookback=%.2f m samples=%zu pivots=%zu",
+          relocation_distance, relocated_path.poses.size(), relocated_pivots);
+        return relocated_path;
+      }
+      RCLCPP_WARN(
+        logger_, "A* internal pivot relocation has %zu pivots (limit=%u); "
+        "deferring to hierarchical anchor routing",
+        relocated_pivots, astar_max_automatic_pivots_);
+    }
+    RCLCPP_WARN(
+      logger_,
+      "A* internal pivot relocation rejected: reason=%s sample=%zu; "
+      "trying Reeds-Shepp/direct segmented fallback",
+      aStarValidationFailureName(relocated_failure), relocated_rejected_index);
+  }
+
+  // Reeds-Shepp is attempted by the sparse kinodynamic core before it expands
+  // bounded lattice states. It supplies reverse curves when a forward-only
+  // B-spline cannot satisfy footprint or minimum-radius constraints.
+  if (astar_reeds_shepp_fallback_enabled_) {
+    throw_if_timed_out("reeds_shepp");
+    const auto reversible_path = buildReedsSheppAnchorFallback(
+      astar_path, planning_start, goal);
+    if (!reversible_path.poses.empty()) {
+      double fallback_max_curvature = 0.0;
+      std::size_t fallback_rejected_index = 0u;
+      AStarPathValidationFailure fallback_failure =
+        AStarPathValidationFailure::NONE;
+      if (validateAStarSmoothedPath(
+          reversible_path, fallback_max_curvature, fallback_rejected_index,
+          fallback_failure))
+      {
+        RCLCPP_WARN(
+          logger_,
+          "A* B-spline retries exhausted; accepted validated local "
+          "Reeds-Shepp/lattice fallback");
+        return reversible_path;
+      }
+      RCLCPP_WARN(
+        logger_,
+        "Rejected malformed Reeds-Shepp/lattice fallback: reason=%s "
+        "sample=%zu max_curvature=%.3f",
+        aStarValidationFailureName(fallback_failure),
+        fallback_rejected_index, fallback_max_curvature);
+    }
+    RCLCPP_WARN(
+      logger_,
+      "Sparse Reeds-Shepp/lattice fallback exhausted its bounded search budget");
+  }
+
   if (astar_segmented_fallback_enabled_ && !astar_prefer_segmented_path_) {
+    throw_if_timed_out("segmented_fallback");
     nav_msgs::msg::Path segmented_path;
     std::size_t pivot_count = 0u;
     double segmented_max_curvature = 0.0;
@@ -1087,24 +1640,35 @@ OruGlobalPlanner::createPlan(
         segmented_max_curvature, segmented_rejected_index,
         segmented_failure))
     {
+      if (pivot_count <= astar_max_automatic_pivots_) {
+        RCLCPP_WARN(
+          logger_,
+          "A* global B-spline retries exhausted; accepted validated segmented "
+          "fallback: anchors=%zu samples=%zu pivots=%zu",
+          astar_path.poses.size(), segmented_path.poses.size(), pivot_count);
+        return segmented_path;
+      }
+      RCLCPP_WARN(
+        logger_, "A* segmented fallback has %zu pivots (limit=%u); "
+        "deferring to hierarchical anchor routing",
+        pivot_count, astar_max_automatic_pivots_);
+      failure = AStarPathValidationFailure::CURVATURE;
+      rejected_index = segmented_rejected_index;
+      max_curvature = segmented_max_curvature;
+    } else {
+      failure = segmented_failure;
+      rejected_index = segmented_rejected_index;
+      max_curvature = segmented_max_curvature;
       RCLCPP_WARN(
         logger_,
-        "A* global B-spline retries exhausted; accepted validated segmented "
-        "fallback: anchors=%zu samples=%zu pivots=%zu",
-        astar_path.poses.size(), segmented_path.poses.size(), pivot_count);
-      return segmented_path;
+        "A* segmented fallback rejected: reason=%s sample=%zu",
+        aStarValidationFailureName(segmented_failure),
+        segmented_rejected_index);
     }
-    failure = segmented_failure;
-    rejected_index = segmented_rejected_index;
-    max_curvature = segmented_max_curvature;
-    RCLCPP_WARN(
-      logger_,
-      "A* segmented fallback rejected: reason=%s sample=%zu",
-      aStarValidationFailureName(segmented_failure),
-      segmented_rejected_index);
   }
 
-  if (astar_departure_fallback_enabled_) {
+  if (astar_departure_fallback_enabled_ && !requested_start_footprint_clear) {
+    throw_if_timed_out("departure_fallback");
     nav_msgs::msg::Path departure_path;
     double departure_distance = 0.0;
     std::size_t departure_pivots = 0u;
@@ -1118,12 +1682,19 @@ OruGlobalPlanner::createPlan(
         departure_curvature, departure_rejected_index,
         departure_failure))
     {
+      if (departure_pivots <= astar_max_automatic_pivots_) {
+        RCLCPP_WARN(
+          logger_,
+          "A* smoothing and direct segmentation failed; accepted departure "
+          "fallback: distance=%.2f m samples=%zu pivots=%zu",
+          departure_distance, departure_path.poses.size(), departure_pivots);
+        return departure_path;
+      }
       RCLCPP_WARN(
-        logger_,
-        "A* smoothing and direct segmentation failed; accepted departure "
-        "fallback: distance=%.2f m samples=%zu pivots=%zu",
-        departure_distance, departure_path.poses.size(), departure_pivots);
-      return departure_path;
+        logger_, "A* departure fallback has %zu pivots (limit=%u); "
+        "deferring to hierarchical anchor routing",
+        departure_pivots, astar_max_automatic_pivots_);
+      departure_failure = AStarPathValidationFailure::CURVATURE;
     }
     failure = departure_failure;
     rejected_index = departure_rejected_index;
@@ -1133,13 +1704,44 @@ OruGlobalPlanner::createPlan(
       "A* departure fallback rejected: reason=%s sample=%zu",
       aStarValidationFailureName(departure_failure),
       departure_rejected_index);
+  } else if (astar_departure_fallback_enabled_) {
+    // Departure moves only solve a constrained start footprint. Once the
+    // requested start is clear, repeating full-map departure A* cannot repair
+    // a distant curve/goal failure and delays hierarchical anchor routing.
+    RCLCPP_WARN(
+      logger_,
+      "A* skipping departure fallback: requested start footprint is clear; "
+      "deferring to hierarchical anchor routing");
   }
 
+  const double elapsed_sec = std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - planning_started).count();
+  double rejected_x = std::numeric_limits<double>::quiet_NaN();
+  double rejected_y = std::numeric_limits<double>::quiet_NaN();
+  double rejected_cost = -1.0;
+  if (rejected_index < astar_path.poses.size()) {
+    rejected_x = astar_path.poses[rejected_index].pose.position.x;
+    rejected_y = astar_path.poses[rejected_index].pose.position.y;
+    rejected_cost = fullFootprintCostAtPose(
+      rejected_x, rejected_y,
+      tf2::getYaw(astar_path.poses[rejected_index].pose.orientation));
+  }
+  RCLCPP_ERROR(
+    logger_, "Planner failed: stage=all_fallbacks reason=%s sample=%zu "
+    "pose=(%.3f, %.3f) footprint_cost=%.1f max_curvature=%.3f elapsed=%.3f s",
+    aStarValidationFailureName(failure), rejected_index, rejected_x, rejected_y,
+    rejected_cost, max_curvature, elapsed_sec);
   throw nav2_core::PlannerException(
-          "OruGlobalPlanner rejected A* B-spline path: reason=" +
+          "OruGlobalPlanner rejected all validated paths: reason=" +
           std::string(aStarValidationFailureName(failure)) +
           " sample=" + std::to_string(rejected_index) +
-          " max_curvature=" + std::to_string(max_curvature));
+          " max_curvature=" + std::to_string(max_curvature) +
+          " elapsed_sec=" + std::to_string(elapsed_sec));
+}
+
+bool OruGlobalPlanner::planningTimedOut() const
+{
+  return std::chrono::steady_clock::now() >= planning_deadline_;
 }
 
 std::vector<OruGlobalPlanner::Cell>
@@ -1168,6 +1770,10 @@ OruGlobalPlanner::searchAStar(const Cell & start, const Cell & goal) const
 
   unsigned int iterations = 0;
   while (!open_set.empty()) {
+    if ((iterations & 0x7fu) == 0u && planningTimedOut()) {
+      RCLCPP_WARN(logger_, "A* stopped at the shared planner deadline");
+      return {};
+    }
     const auto current = open_set.top();
     open_set.pop();
 
@@ -1239,6 +1845,139 @@ OruGlobalPlanner::searchAStar(const Cell & start, const Cell & goal) const
     }
   }
 
+  return {};
+}
+
+std::vector<OruGlobalPlanner::Cell>
+OruGlobalPlanner::searchTopologyAStar(const Cell & start, const Cell & goal) const
+{
+  if (!costmap_) {
+    return {};
+  }
+
+  astar_footprint_cost_cache_.clear();
+  const unsigned int fine_x = costmap_->getSizeInCellsX();
+  const unsigned int fine_y = costmap_->getSizeInCellsY();
+  const unsigned int stride = std::max(
+    1u, static_cast<unsigned int>(std::lround(
+      topology_search_resolution_m_ / costmap_->getResolution())));
+  const unsigned int coarse_x = (fine_x + stride - 1u) / stride;
+  const unsigned int coarse_y = (fine_y + stride - 1u) / stride;
+  const unsigned int coarse_count = coarse_x * coarse_y;
+
+  const auto to_coarse = [stride](const Cell & cell) {
+      return Cell{cell.x / stride, cell.y / stride};
+    };
+  const auto to_fine = [fine_x, fine_y, stride](const Cell & cell) {
+      return Cell{
+        std::min(fine_x - 1u, cell.x * stride + stride / 2u),
+        std::min(fine_y - 1u, cell.y * stride + stride / 2u)};
+    };
+  const auto coarse_index = [coarse_x](const Cell & cell) {
+      return cell.y * coarse_x + cell.x;
+    };
+
+  const Cell coarse_start = to_coarse(start);
+  const Cell coarse_goal = to_coarse(goal);
+  const unsigned int start_index = coarse_index(coarse_start);
+  const unsigned int goal_index = coarse_index(coarse_goal);
+  std::vector<double> g_score(
+    coarse_count, std::numeric_limits<double>::infinity());
+  std::vector<unsigned int> parent(coarse_count, kNoParent);
+  std::vector<bool> closed(coarse_count, false);
+  std::priority_queue<QueueNode, std::vector<QueueNode>, QueueGreater> open_set;
+
+  const auto heuristic_coarse = [&coarse_goal, stride](const Cell & cell) {
+      return static_cast<double>(stride) * std::hypot(
+        static_cast<double>(cell.x) - static_cast<double>(coarse_goal.x),
+        static_cast<double>(cell.y) - static_cast<double>(coarse_goal.y));
+    };
+  const auto coarse_pose_traversable = [&to_fine, this](
+      const Cell & cell, double yaw) {
+      return isAStarSearchPoseTraversable(to_fine(cell), yaw);
+    };
+
+  g_score[start_index] = 0.0;
+  parent[start_index] = start_index;
+  open_set.push({start_index, heuristic_coarse(coarse_start)});
+  const std::array<std::pair<int, int>, 8> neighbors = {
+    {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}}};
+
+  unsigned int iterations = 0u;
+  while (!open_set.empty()) {
+    if ((iterations & 0x7fu) == 0u && planningTimedOut()) {
+      RCLCPP_WARN(logger_, "Topology A* stopped at the shared planner deadline");
+      return {};
+    }
+    const auto current = open_set.top();
+    open_set.pop();
+    if (closed[current.index]) {
+      continue;
+    }
+    closed[current.index] = true;
+    if (current.index == goal_index) {
+      std::vector<Cell> cells;
+      for (unsigned int index = goal_index;; index = parent[index]) {
+        cells.push_back(to_fine(Cell{index % coarse_x, index / coarse_x}));
+        if (index == start_index || parent[index] == kNoParent) {
+          break;
+        }
+      }
+      std::reverse(cells.begin(), cells.end());
+      if (!cells.empty()) {
+        cells.front() = start;
+        cells.back() = goal;
+      }
+      RCLCPP_INFO(
+        logger_, "Topology A* accepted: resolution=%.2f m stride=%u raw_cells=%zu",
+        topology_search_resolution_m_, stride, cells.size());
+      return cells;
+    }
+    if (max_iterations_ > 0u && ++iterations > max_iterations_) {
+      RCLCPP_WARN(logger_, "Topology A* stopped after max_iterations=%u", max_iterations_);
+      return {};
+    }
+
+    const Cell current_cell{current.index % coarse_x, current.index / coarse_x};
+    for (size_t i = 0u; i < neighbors.size(); ++i) {
+      if (!use_diagonal_ && i >= 4u) {
+        break;
+      }
+      const auto [dx, dy] = neighbors[i];
+      const int next_x = static_cast<int>(current_cell.x) + dx;
+      const int next_y = static_cast<int>(current_cell.y) + dy;
+      if (next_x < 0 || next_y < 0 ||
+        next_x >= static_cast<int>(coarse_x) || next_y >= static_cast<int>(coarse_y))
+      {
+        continue;
+      }
+      const Cell next{static_cast<unsigned int>(next_x), static_cast<unsigned int>(next_y)};
+      const unsigned int next_index = coarse_index(next);
+      const double yaw = std::atan2(static_cast<double>(dy), static_cast<double>(dx));
+      if (closed[next_index] || !coarse_pose_traversable(next, yaw)) {
+        continue;
+      }
+      if (prevent_corner_cutting_ && dx != 0 && dy != 0) {
+        const Cell adjacent_x{static_cast<unsigned int>(next_x), current_cell.y};
+        const Cell adjacent_y{current_cell.x, static_cast<unsigned int>(next_y)};
+        if (!coarse_pose_traversable(adjacent_x, yaw) ||
+          !coarse_pose_traversable(adjacent_y, yaw))
+        {
+          continue;
+        }
+      }
+      const Cell fine_next = to_fine(next);
+      const double step_cost = static_cast<double>(stride) *
+        traversalCost(fine_next.x, fine_next.y, dx, dy);
+      const double tentative_g = g_score[current.index] + step_cost;
+      if (tentative_g >= g_score[next_index]) {
+        continue;
+      }
+      parent[next_index] = current.index;
+      g_score[next_index] = tentative_g;
+      open_set.push({next_index, tentative_g + heuristic_coarse(next)});
+    }
+  }
   return {};
 }
 
@@ -1376,6 +2115,12 @@ bool OruGlobalPlanner::isAStarSearchPoseTraversable(
   if (!costmap_) {
     return false;
   }
+  double wx = 0.0;
+  double wy = 0.0;
+  costmap_->mapToWorld(cell.x, cell.y, wx, wy);
+  if (pointInsideActivePalletKeepout(wx, wy)) {
+    return false;
+  }
   const auto cell_cost = costmap_->getCost(cell.x, cell.y);
   if ((cell_cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
     (cell_cost != nav2_costmap_2d::NO_INFORMATION &&
@@ -1394,9 +2139,110 @@ bool OruGlobalPlanner::isAStarSearchPoseTraversable(
          footprint_cost < static_cast<double>(astar_shortcut_cost_threshold_));
 }
 
+void OruGlobalPlanner::palletKeepoutPoseCallback(
+  const geometry_msgs::msg::PoseStamped::SharedPtr message)
+{
+  if (!message || message->header.frame_id != global_frame_) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(pallet_keepout_mutex_);
+  pallet_keepout_pose_ = *message;
+  pallet_keepout_pose_received_ = true;
+  pallet_keepout_received_time_ = std::chrono::steady_clock::now();
+}
+
+void OruGlobalPlanner::palletExemptionActiveCallback(
+  const std_msgs::msg::Bool::SharedPtr message)
+{
+  if (!message) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(pallet_keepout_mutex_);
+  pallet_exemption_active_ = message->data;
+}
+
+bool OruGlobalPlanner::pointInsideActivePalletKeepout(
+  double wx, double wy) const
+{
+  if (!pallet_keepout_enabled_) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(pallet_keepout_mutex_);
+  const double age_sec = std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - pallet_keepout_received_time_).count();
+  if (!pallet_keepout_pose_received_ || pallet_exemption_active_ ||
+    age_sec > pallet_keepout_timeout_sec_)
+  {
+    return false;
+  }
+
+  const double yaw = tf2::getYaw(pallet_keepout_pose_.pose.orientation);
+  const double dx = wx - pallet_keepout_pose_.pose.position.x;
+  const double dy = wy - pallet_keepout_pose_.pose.position.y;
+  const double local_x = std::cos(yaw) * dx + std::sin(yaw) * dy;
+  const double local_y = -std::sin(yaw) * dx + std::cos(yaw) * dy;
+  return std::abs(local_x) <=
+         pallet_keepout_half_length_m_ + pallet_keepout_padding_m_ &&
+         std::abs(local_y) <=
+         pallet_keepout_half_width_m_ + pallet_keepout_padding_m_;
+}
+
+bool OruGlobalPlanner::footprintIntersectsActivePalletKeepout(
+  double wx, double wy, double yaw) const
+{
+  if (!pallet_keepout_enabled_ || footprint_.size() < 3u) {
+    return false;
+  }
+
+  geometry_msgs::msg::PoseStamped pallet_pose;
+  {
+    std::lock_guard<std::mutex> lock(pallet_keepout_mutex_);
+    const double age_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - pallet_keepout_received_time_).count();
+    if (!pallet_keepout_pose_received_ || pallet_exemption_active_ ||
+      age_sec > pallet_keepout_timeout_sec_)
+    {
+      return false;
+    }
+    pallet_pose = pallet_keepout_pose_;
+  }
+
+  nav2_costmap_2d::Footprint vehicle_polygon;
+  nav2_costmap_2d::transformFootprint(
+    wx, wy, yaw, footprint_, vehicle_polygon);
+
+  const double pallet_yaw = tf2::getYaw(pallet_pose.pose.orientation);
+  const double cos_yaw = std::cos(pallet_yaw);
+  const double sin_yaw = std::sin(pallet_yaw);
+  const double half_length =
+    pallet_keepout_half_length_m_ + pallet_keepout_padding_m_;
+  const double half_width =
+    pallet_keepout_half_width_m_ + pallet_keepout_padding_m_;
+  nav2_costmap_2d::Footprint pallet_polygon;
+  pallet_polygon.reserve(4u);
+  for (const auto & corner : std::array<Point2D, 4>{
+      Point2D{half_length, half_width},
+      Point2D{half_length, -half_width},
+      Point2D{-half_length, -half_width},
+      Point2D{-half_length, half_width}})
+  {
+    geometry_msgs::msg::Point point;
+    point.x = pallet_pose.pose.position.x +
+      cos_yaw * corner.x - sin_yaw * corner.y;
+    point.y = pallet_pose.pose.position.y +
+      sin_yaw * corner.x + cos_yaw * corner.y;
+    pallet_polygon.push_back(point);
+  }
+  return convexPolygonsIntersect(vehicle_polygon, pallet_polygon);
+}
+
 double OruGlobalPlanner::sampledFootprintCostAtPose(
   double wx, double wy, double yaw) const
 {
+  if (footprintIntersectsActivePalletKeepout(wx, wy, yaw)) {
+    return static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE);
+  }
   if (!costmap_ || footprint_.size() < 3u || !footprint_collision_checker_) {
     return -1.0;
   }
@@ -1470,6 +2316,9 @@ double OruGlobalPlanner::sampledFootprintCostAtPose(
 double OruGlobalPlanner::fullFootprintCostAtPose(
   double wx, double wy, double yaw) const
 {
+  if (footprintIntersectsActivePalletKeepout(wx, wy, yaw)) {
+    return static_cast<double>(nav2_costmap_2d::LETHAL_OBSTACLE);
+  }
   if (!costmap_ || footprint_.size() < 3u || !footprint_collision_checker_) {
     return -1.0;
   }
@@ -1780,7 +2629,7 @@ nav_msgs::msg::Path OruGlobalPlanner::smoothAStarPathWithBSpline(
   for (std::size_t i = 0; i <= sample_count; ++i) {
     const double parameter =
       static_cast<double>(i) / static_cast<double>(sample_count);
-    const auto point = evaluateClampedCubicBSpline(controls, parameter);
+    const auto point = evaluateClampedBSpline(controls, parameter);
     if (!smoothed.poses.empty()) {
       const auto & previous = smoothed.poses.back().pose.position;
       if (std::hypot(point.x - previous.x, point.y - previous.y) <= 1e-6) {
@@ -1824,6 +2673,237 @@ nav_msgs::msg::Path OruGlobalPlanner::smoothAStarPathWithBSpline(
   return smoothed;
 }
 
+nav_msgs::msg::Path OruGlobalPlanner::buildReedsSheppAnchorFallback(
+  const nav_msgs::msg::Path & anchor_path,
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal) const
+{
+  if (anchor_path.poses.size() < 2u) {
+    return nav_msgs::msg::Path{};
+  }
+
+  nav_msgs::msg::Path anchors;
+  anchors.header = anchor_path.header;
+  anchors.poses.push_back(anchor_path.poses.front());
+  for (std::size_t i = 1u; i < anchor_path.poses.size(); ++i) {
+    const auto & a = anchor_path.poses[i - 1u];
+    const auto & b = anchor_path.poses[i];
+    const double length = std::hypot(
+      b.pose.position.x - a.pose.position.x,
+      b.pose.position.y - a.pose.position.y);
+    const auto pieces = std::max(
+      1u, static_cast<unsigned int>(std::ceil(length / astar_bspline_anchor_spacing_)));
+    for (unsigned int piece = 1u; piece <= pieces; ++piece) {
+      const double ratio = static_cast<double>(piece) / static_cast<double>(pieces);
+      auto pose = b;
+      pose.pose.position.x = a.pose.position.x +
+        ratio * (b.pose.position.x - a.pose.position.x);
+      pose.pose.position.y = a.pose.position.y +
+        ratio * (b.pose.position.y - a.pose.position.y);
+      anchors.poses.push_back(std::move(pose));
+    }
+  }
+
+  const auto started = std::chrono::steady_clock::now();
+  const auto total_timed_out = [this, &started]() {
+      return planningTimedOut() || std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count() >= 5.0;
+    };
+  const auto anchor_yaw = [&anchors](std::size_t index) {
+      if (index == 0u) {
+        return tf2::getYaw(anchors.poses.front().pose.orientation);
+      }
+      const std::size_t lo = index - 1u;
+      const std::size_t hi = std::min(index + 1u, anchors.poses.size() - 1u);
+      const auto & a = anchors.poses[lo].pose.position;
+      const auto & b = anchors.poses[hi].pose.position;
+      return std::atan2(b.y - a.y, b.x - a.x);
+    };
+
+  auto base_options = makeCoreOptions();
+  base_options.pivot_enabled = false;
+  base_options.reverse_enabled = true;
+  base_options.max_iterations = base_options.max_iterations == 0u ?
+    30000u : std::min(30000u, base_options.max_iterations);
+  base_options.max_planning_time_sec = std::min(1.5, base_options.max_planning_time_sec);
+  base_options.use_holonomic_obstacle_heuristic = false;
+
+  LatticePath assembled;
+  Cell current_cell;
+  if (!costmap_->worldToMap(
+      start.pose.position.x, start.pose.position.y,
+      current_cell.x, current_cell.y))
+  {
+    return nav_msgs::msg::Path{};
+  }
+  double current_yaw = tf2::getYaw(start.pose.orientation);
+  auto previous_direction = forklift_oru_planner::PrimitiveDirection::NONE;
+  unsigned int gear_switches = 0u;
+  assembled.states.push_back({
+      current_cell.x, current_cell.y, headingIndex(current_yaw)});
+
+  std::size_t source = 0u;
+  while (source + 1u < anchors.poses.size() && !total_timed_out()) {
+    bool connected = false;
+    const std::size_t furthest = std::min(source + 2u, anchors.poses.size() - 1u);
+    for (std::size_t target = furthest; target > source && !connected; --target) {
+      Cell goal_cell;
+      const auto & target_position = anchors.poses[target].pose.position;
+      if (!costmap_->worldToMap(
+          target_position.x, target_position.y, goal_cell.x, goal_cell.y))
+      {
+        continue;
+      }
+
+      const double nominal_yaw = anchor_yaw(target);
+      const std::array<double, 5> offsets{{0.0, M_PI / 12.0, -M_PI / 12.0,
+          M_PI / 6.0, -M_PI / 6.0}};
+      std::vector<forklift_oru_planner::Primitive> best;
+      double best_cost = std::numeric_limits<double>::infinity();
+      double best_yaw = nominal_yaw;
+      double current_x = 0.0;
+      double current_y = 0.0;
+      costmap_->mapToWorld(current_cell.x, current_cell.y, current_x, current_y);
+
+      for (const double offset : offsets) {
+        if (target + 1u == anchors.poses.size() && std::abs(offset) > 1e-9) {
+          continue;
+        }
+        const double candidate_yaw = normalizeAngle(nominal_yaw + offset);
+
+        for (const double window_size : {8.0, 12.0}) {
+          const double half = 0.5 * window_size;
+          const double center_x = 0.5 * (current_x + target_position.x);
+          const double center_y = 0.5 * (current_y + target_position.y);
+          auto options = base_options;
+          options.resolution = 0.10;
+          options.origin_x = center_x - half;
+          options.origin_y = center_y - half;
+          const forklift_oru_planner::LatticeCore core(options);
+          forklift_oru_planner::GridAdapter local_grid;
+          local_grid.width = static_cast<unsigned int>(std::ceil(window_size / options.resolution));
+          local_grid.height = local_grid.width;
+          local_grid.cell_traversable = [this, &options](
+              unsigned int x, unsigned int y) {
+              const double wx = options.origin_x + (static_cast<double>(x) + 0.5) *
+                options.resolution;
+              const double wy = options.origin_y + (static_cast<double>(y) + 0.5) *
+                options.resolution;
+              unsigned int map_x = 0u;
+              unsigned int map_y = 0u;
+              return costmap_->worldToMap(wx, wy, map_x, map_y) &&
+                     isTraversable(map_x, map_y);
+            };
+          local_grid.footprint_traversable = [this](
+              double x, double y, double yaw) {
+              return isFootprintTraversableAtPose(x, y, yaw);
+            };
+          local_grid.normalized_cost = [this](double x, double y) {
+              unsigned int map_x = 0u;
+              unsigned int map_y = 0u;
+              if (!costmap_->worldToMap(x, y, map_x, map_y)) {
+                return 1.0;
+              }
+              const auto cost = costmap_->getCost(map_x, map_y);
+              return cost == nav2_costmap_2d::NO_INFORMATION ?
+                     (allow_unknown_ ? 0.0 : 1.0) :
+                     std::min(1.0, static_cast<double>(cost) / kMaxNonObstacleCost);
+            };
+          const auto to_local_cell = [&options](double x, double y) {
+              return forklift_oru_planner::Cell{
+                static_cast<unsigned int>((x - options.origin_x) / options.resolution),
+                static_cast<unsigned int>((y - options.origin_y) / options.resolution)};
+            };
+          const auto local_start = to_local_cell(current_x, current_y);
+          const auto local_goal = to_local_cell(target_position.x, target_position.y);
+          const forklift_oru_planner::State current_state{
+            local_start.x, local_start.y, core.headingIndex(current_yaw)};
+
+          auto candidate = core.analyticExpansion(
+            local_grid, current_state, local_goal,
+            candidate_yaw, previous_direction);
+          if (candidate.empty() && window_size > 8.0 && !total_timed_out()) {
+            const auto local_result = core.plan(
+              local_grid, local_start, current_yaw,
+              local_goal, candidate_yaw);
+            if (local_result.succeeded) {
+              candidate = local_result.transitions;
+            }
+          }
+          if (candidate.empty()) {
+            continue;
+          }
+
+          double cost = 0.0;
+          auto direction = previous_direction;
+          unsigned int candidate_switches = gear_switches;
+          for (const auto & transition : candidate) {
+            cost += core.transitionCost(local_grid, transition, direction);
+            if (direction != forklift_oru_planner::PrimitiveDirection::NONE &&
+              transition.direction != direction)
+            {
+              ++candidate_switches;
+            }
+            direction = transition.direction;
+          }
+          if (candidate_switches <= 2u && cost < best_cost) {
+            best_cost = cost;
+            best = std::move(candidate);
+            best_yaw = candidate_yaw;
+          }
+          break;
+        }
+      }
+
+      if (best.empty()) {
+        continue;
+      }
+      for (const auto & transition : best) {
+        if (previous_direction != forklift_oru_planner::PrimitiveDirection::NONE &&
+          transition.direction != previous_direction)
+        {
+          ++gear_switches;
+        }
+        previous_direction = transition.direction;
+        assembled.transitions.push_back(fromCoreTransition(transition));
+        assembled.states.push_back({transition.state.x, transition.state.y,
+            transition.state.theta_index});
+      }
+      current_cell = goal_cell;
+      current_yaw = best_yaw;
+      source = target;
+      connected = true;
+    }
+    if (!connected) {
+      return nav_msgs::msg::Path{};
+    }
+  }
+
+  if (source + 1u != anchors.poses.size() || total_timed_out()) {
+    return nav_msgs::msg::Path{};
+  }
+  const auto raw_path = buildLatticePath(assembled, start, goal);
+  nav_msgs::msg::Path cleaned_path;
+  cleaned_path.header = raw_path.header;
+  cleaned_path.poses.reserve(raw_path.poses.size());
+  for (const auto & pose : raw_path.poses) {
+    if (!cleaned_path.poses.empty()) {
+      const auto & previous = cleaned_path.poses.back();
+      const double spacing = std::hypot(
+        pose.pose.position.x - previous.pose.position.x,
+        pose.pose.position.y - previous.pose.position.y);
+      const double yaw_change = std::abs(normalizeAngle(
+        tf2::getYaw(pose.pose.orientation) -
+        tf2::getYaw(previous.pose.orientation)));
+      if (spacing < 0.02 && yaw_change < 0.02) {
+        continue;
+      }
+    }
+    cleaned_path.poses.push_back(pose);
+  }
+  return cleaned_path;
+}
+
 bool OruGlobalPlanner::validateAStarSmoothedPath(
   const nav_msgs::msg::Path & path,
   double & max_curvature,
@@ -1852,11 +2932,40 @@ bool OruGlobalPlanner::validateAStarSmoothedPath(
   const double maximum_allowed_curvature =
     1.0 / astar_bspline_min_turning_radius_;
   for (std::size_t i = 1; i + 1 < path.poses.size(); ++i) {
+    const auto & previous = path.poses[i - 1u].pose;
+    const auto & current = path.poses[i].pose;
+    const auto & next = path.poses[i + 1u].pose;
+    const double previous_distance = std::hypot(
+      current.position.x - previous.position.x,
+      current.position.y - previous.position.y);
+    const double next_distance = std::hypot(
+      next.position.x - current.position.x,
+      next.position.y - current.position.y);
+    if (previous_distance < 0.02 || next_distance < 0.02) {
+      const double yaw_change = std::abs(normalizeAngle(
+        tf2::getYaw(next.orientation) - tf2::getYaw(previous.orientation)));
+      if (yaw_change >= 0.02) {
+        continue;
+      }
+      rejected_index = i;
+      failure = AStarPathValidationFailure::BACKTRACK;
+      return false;
+    }
+    const double previous_tangent = std::atan2(
+      current.position.y - previous.position.y,
+      current.position.x - previous.position.x);
+    const double next_tangent = std::atan2(
+      next.position.y - current.position.y,
+      next.position.x - current.position.x);
+    const double body_yaw = tf2::getYaw(current.orientation);
+    const bool previous_reverse = std::cos(body_yaw - previous_tangent) < 0.0;
+    const bool next_reverse = std::cos(body_yaw - next_tangent) < 0.0;
+    if (previous_reverse != next_reverse) {
+      continue;
+    }
     const double curvature = std::abs(
       threePointCurvature(
-        path.poses[i - 1].pose.position,
-        path.poses[i].pose.position,
-        path.poses[i + 1].pose.position));
+        previous.position, current.position, next.position));
     max_curvature = std::max(max_curvature, curvature);
     if (curvature > maximum_allowed_curvature + 1e-3) {
       rejected_index = i;
@@ -1865,6 +2974,42 @@ bool OruGlobalPlanner::validateAStarSmoothedPath(
     }
   }
   return true;
+}
+
+bool OruGlobalPlanner::hasPreferredAStarClearance(
+  const nav_msgs::msg::Path & path,
+  double & peak_footprint_cost,
+  std::size_t & rejected_index) const
+{
+  peak_footprint_cost = 0.0;
+  rejected_index = 0u;
+  if (!costmap_ || path.poses.empty()) {
+    return false;
+  }
+
+  double traveled = 0.0;
+  bool preferred = true;
+  for (std::size_t i = 0; i < path.poses.size(); ++i) {
+    if (i > 0u) {
+      const auto & previous = path.poses[i - 1u].pose.position;
+      const auto & current = path.poses[i].pose.position;
+      traveled += std::hypot(current.x - previous.x, current.y - previous.y);
+    }
+    const auto & pose = path.poses[i].pose;
+    const double cost = fullFootprintCostAtPose(
+      pose.position.x, pose.position.y, tf2::getYaw(pose.orientation));
+    if (traveled < astar_start_clearance_relax_distance_) {
+      continue;
+    }
+    peak_footprint_cost = std::max(peak_footprint_cost, cost);
+    if (preferred &&
+      cost >= static_cast<double>(astar_preferred_footprint_cost_threshold_))
+    {
+      preferred = false;
+      rejected_index = i;
+    }
+  }
+  return preferred;
 }
 
 bool OruGlobalPlanner::isAStarSmoothedPoseTraversable(
@@ -2012,11 +3157,36 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
     return false;
   }
 
+  // Small grid-path corners do not justify a stop-pivot-go maneuver. Merge
+  // them only when the direct chord remains valid for the complete footprint.
+  // Corners that cannot be merged are retained and handled as validated
+  // pivots below, preserving reachability without weakening collision checks.
+  nav_msgs::msg::Path working_path = astar_path;
+  for (std::size_t i = 1u; i + 1u < working_path.poses.size();) {
+    const auto & a = working_path.poses[i - 1u].pose.position;
+    const auto & b = working_path.poses[i].pose.position;
+    const auto & c = working_path.poses[i + 1u].pose.position;
+    const double incoming = std::atan2(b.y - a.y, b.x - a.x);
+    const double outgoing = std::atan2(c.y - b.y, c.x - b.x);
+    const double change = std::abs(normalizeAngle(outgoing - incoming));
+    Cell a_cell{};
+    Cell c_cell{};
+    if (change > 1e-3 && change < astar_segmented_pivot_threshold_ &&
+      costmap_->worldToMap(a.x, a.y, a_cell.x, a_cell.y) &&
+      costmap_->worldToMap(c.x, c.y, c_cell.x, c_cell.y) &&
+      isAStarShortcutTraversable(a_cell, c_cell))
+    {
+      working_path.poses.erase(working_path.poses.begin() + i);
+      continue;
+    }
+    ++i;
+  }
+
   std::vector<double> segment_yaws;
-  segment_yaws.reserve(astar_path.poses.size() - 1u);
-  for (std::size_t i = 0u; i + 1u < astar_path.poses.size(); ++i) {
-    const auto & from = astar_path.poses[i].pose.position;
-    const auto & to = astar_path.poses[i + 1u].pose.position;
+  segment_yaws.reserve(working_path.poses.size() - 1u);
+  for (std::size_t i = 0u; i + 1u < working_path.poses.size(); ++i) {
+    const auto & from = working_path.poses[i].pose.position;
+    const auto & to = working_path.poses[i + 1u].pose.position;
     if (std::hypot(to.x - from.x, to.y - from.y) <= 1e-6) {
       failure = AStarPathValidationFailure::EMPTY_PATH;
       rejected_index = i;
@@ -2061,8 +3231,8 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
   }
 
   for (std::size_t segment = 0u; segment < segment_yaws.size(); ++segment) {
-    const auto & from = astar_path.poses[segment].pose.position;
-    const auto & to = astar_path.poses[segment + 1u].pose.position;
+    const auto & from = working_path.poses[segment].pose.position;
+    const auto & to = working_path.poses[segment + 1u].pose.position;
     const double dx = to.x - from.x;
     const double dy = to.y - from.y;
     const double length = std::hypot(dx, dy);
@@ -2089,14 +3259,9 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
       continue;
     }
     if (std::abs(heading_change) < astar_segmented_pivot_threshold_) {
-      failure = AStarPathValidationFailure::CURVATURE;
-      rejected_index = segmented_path.poses.size() - 1u;
-      RCLCPP_WARN(
-        logger_,
-        "A* segmented corner is below pivot threshold but not straight: "
-        "sample=%zu pose=(%.3f, %.3f) heading_change=%.3f",
-        rejected_index, to.x, to.y, heading_change);
-      return false;
+      RCLCPP_DEBUG(
+        logger_, "A* segmented retained non-mergeable small corner as pivot: "
+        "pose=(%.3f, %.3f) heading_change=%.3f", to.x, to.y, heading_change);
     }
     if (!validateAStarPivotSweep(
         to.x, to.y, segment_yaws[segment], next_yaw,
@@ -2139,6 +3304,223 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
     segmented_path, max_curvature, rejected_index, failure);
 }
 
+bool OruGlobalPlanner::buildAStarInternalPivotRelocationPath(
+  const nav_msgs::msg::Path & astar_path, const Cell & goal_cell,
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path & relocated_path,
+  double & relocation_distance,
+  std::size_t & pivot_count,
+  double & max_curvature,
+  std::size_t & rejected_index,
+  AStarPathValidationFailure & failure) const
+{
+  relocated_path = nav_msgs::msg::Path();
+  relocation_distance = 0.0;
+  pivot_count = 0u;
+  max_curvature = 0.0;
+  rejected_index = 0u;
+  failure = AStarPathValidationFailure::EMPTY_PATH;
+  if (!costmap_ || astar_path.poses.size() < 3u ||
+    astar_internal_pivot_max_distance_ <= 0.0)
+  {
+    return false;
+  }
+
+  const auto append_unique = [](nav_msgs::msg::Path & path,
+      const geometry_msgs::msg::Point & point, double z) {
+      if (!path.poses.empty()) {
+        const auto & previous = path.poses.back().pose.position;
+        if (std::hypot(point.x - previous.x, point.y - previous.y) <= 1e-6) {
+          return;
+        }
+      }
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.position = point;
+      pose.pose.position.z = z;
+      pose.pose.orientation.w = 1.0;
+      path.poses.push_back(pose);
+    };
+
+  // Search each internal turn from the farthest reachable point back toward
+  // its A* corner. The farthest valid point is normally the open aisle, while
+  // the original corner is often close to a rack or the selected pallet.
+  for (std::size_t turn = 1u; turn + 1u < astar_path.poses.size(); ++turn) {
+    const auto & inbound_start = astar_path.poses[turn - 1u].pose.position;
+    const auto & corner = astar_path.poses[turn].pose.position;
+    const auto & outbound_end = astar_path.poses[turn + 1u].pose.position;
+    const double inbound_dx = corner.x - inbound_start.x;
+    const double inbound_dy = corner.y - inbound_start.y;
+    const double inbound_length = std::hypot(inbound_dx, inbound_dy);
+    const double outbound_dx = outbound_end.x - corner.x;
+    const double outbound_dy = outbound_end.y - corner.y;
+    const double outbound_length = std::hypot(outbound_dx, outbound_dy);
+    if (inbound_length <= 1e-6 || outbound_length <= 1e-6) {
+      continue;
+    }
+
+    const double inbound_yaw = std::atan2(inbound_dy, inbound_dx);
+    const double outbound_yaw = std::atan2(outbound_dy, outbound_dx);
+    if (std::abs(normalizeAngle(outbound_yaw - inbound_yaw)) <
+      astar_segmented_pivot_threshold_)
+    {
+      continue;
+    }
+
+    const double maximum_lookback = std::min(
+      astar_internal_pivot_max_distance_,
+      inbound_length - std::max(0.10, astar_internal_pivot_min_distance_));
+    if (maximum_lookback + 1e-9 < astar_internal_pivot_min_distance_) {
+      continue;
+    }
+
+    Cell previous_pivot_cell{};
+    bool have_previous_pivot_cell = false;
+    for (double requested_lookback = maximum_lookback;
+      requested_lookback + 1e-9 >= astar_internal_pivot_min_distance_;
+      requested_lookback -= astar_internal_pivot_step_distance_)
+    {
+      const double requested_pivot_x = corner.x -
+        requested_lookback * std::cos(inbound_yaw);
+      const double requested_pivot_y = corner.y -
+        requested_lookback * std::sin(inbound_yaw);
+      Cell pivot_cell{};
+      if (!costmap_->worldToMap(
+          requested_pivot_x, requested_pivot_y, pivot_cell.x, pivot_cell.y))
+      {
+        continue;
+      }
+      if (have_previous_pivot_cell && pivot_cell.x == previous_pivot_cell.x &&
+        pivot_cell.y == previous_pivot_cell.y)
+      {
+        continue;
+      }
+      previous_pivot_cell = pivot_cell;
+      have_previous_pivot_cell = true;
+
+      double pivot_x = 0.0;
+      double pivot_y = 0.0;
+      costmap_->mapToWorld(pivot_cell.x, pivot_cell.y, pivot_x, pivot_y);
+      const double actual_lookback = std::hypot(
+        corner.x - pivot_x, corner.y - pivot_y);
+      if (actual_lookback + 1e-9 < astar_internal_pivot_min_distance_) {
+        continue;
+      }
+
+      const double requested_exit_x = pivot_x +
+        astar_internal_pivot_exit_distance_ * std::cos(outbound_yaw);
+      const double requested_exit_y = pivot_y +
+        astar_internal_pivot_exit_distance_ * std::sin(outbound_yaw);
+      Cell exit_cell{};
+      if (!costmap_->worldToMap(
+          requested_exit_x, requested_exit_y, exit_cell.x, exit_cell.y) ||
+        (exit_cell.x == pivot_cell.x && exit_cell.y == pivot_cell.y))
+      {
+        continue;
+      }
+
+      double exit_x = 0.0;
+      double exit_y = 0.0;
+      costmap_->mapToWorld(exit_cell.x, exit_cell.y, exit_x, exit_y);
+      const double candidate_inbound_yaw = std::atan2(
+        pivot_y - inbound_start.y, pivot_x - inbound_start.x);
+      const double candidate_exit_yaw = std::atan2(
+        exit_y - pivot_y, exit_x - pivot_x);
+      std::size_t pivot_rejected_index = 0u;
+      AStarPathValidationFailure pivot_failure =
+        AStarPathValidationFailure::NONE;
+      if (!validateAStarPivotSweep(
+          pivot_x, pivot_y, candidate_inbound_yaw, candidate_exit_yaw,
+          pivot_rejected_index, pivot_failure) ||
+        !isAStarShortcutTraversable(pivot_cell, exit_cell))
+      {
+        failure = pivot_failure == AStarPathValidationFailure::NONE ?
+          AStarPathValidationFailure::FOOTPRINT : pivot_failure;
+        rejected_index = pivot_rejected_index;
+        continue;
+      }
+
+      const auto replan_cells = searchAStar(exit_cell, goal_cell);
+      if (replan_cells.empty()) {
+        failure = AStarPathValidationFailure::CELL_COST;
+        continue;
+      }
+      const auto replan_anchors = trimAStarGoalDogleg(
+        simplifyAStarPath(replan_cells), goal);
+      if (replan_anchors.size() < 2u) {
+        continue;
+      }
+
+      nav_msgs::msg::Path candidate_path;
+      candidate_path.header = astar_path.header;
+      for (std::size_t prefix = 0u; prefix < turn; ++prefix) {
+        append_unique(
+          candidate_path, astar_path.poses[prefix].pose.position,
+          start.pose.position.z);
+      }
+      geometry_msgs::msg::Point pivot_point;
+      pivot_point.x = pivot_x;
+      pivot_point.y = pivot_y;
+      pivot_point.z = start.pose.position.z;
+      append_unique(candidate_path, pivot_point, start.pose.position.z);
+      geometry_msgs::msg::Point exit_point;
+      exit_point.x = exit_x;
+      exit_point.y = exit_y;
+      exit_point.z = start.pose.position.z;
+      append_unique(candidate_path, exit_point, start.pose.position.z);
+      for (std::size_t anchor = 1u; anchor < replan_anchors.size(); ++anchor) {
+        double anchor_x = 0.0;
+        double anchor_y = 0.0;
+        costmap_->mapToWorld(
+          replan_anchors[anchor].x, replan_anchors[anchor].y,
+          anchor_x, anchor_y);
+        geometry_msgs::msg::Point anchor_point;
+        anchor_point.x = anchor_x;
+        anchor_point.y = anchor_y;
+        anchor_point.z = start.pose.position.z;
+        append_unique(candidate_path, anchor_point, start.pose.position.z);
+      }
+      if (candidate_path.poses.size() < 3u) {
+        continue;
+      }
+      candidate_path.poses.front().pose.position = start.pose.position;
+      candidate_path.poses.back().pose.position = goal.pose.position;
+
+      nav_msgs::msg::Path candidate_segmented_path;
+      std::size_t candidate_pivot_count = 0u;
+      double candidate_max_curvature = 0.0;
+      std::size_t candidate_rejected_index = 0u;
+      AStarPathValidationFailure candidate_failure =
+        AStarPathValidationFailure::NONE;
+      if (!buildAStarSegmentedFallbackPath(
+          candidate_path, start, goal, candidate_segmented_path,
+          candidate_pivot_count, candidate_max_curvature,
+          candidate_rejected_index, candidate_failure))
+      {
+        failure = candidate_failure;
+        rejected_index = candidate_rejected_index;
+        continue;
+      }
+
+      relocated_path = candidate_segmented_path;
+      relocation_distance = actual_lookback;
+      pivot_count = candidate_pivot_count;
+      max_curvature = candidate_max_curvature;
+      rejected_index = 0u;
+      failure = AStarPathValidationFailure::NONE;
+      RCLCPP_INFO(
+        logger_,
+        "A* internal pivot candidate accepted: corner=%zu "
+        "pivot_pose=(%.3f, %.3f) exit_pose=(%.3f, %.3f) "
+        "lookback=%.3f m",
+        turn, pivot_x, pivot_y, exit_x, exit_y, actual_lookback);
+      return true;
+    }
+  }
+  return false;
+}
+
 bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
   const Cell & start_cell, double start_yaw, const Cell & goal_cell,
   const geometry_msgs::msg::PoseStamped & start,
@@ -2150,6 +3532,7 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
   std::size_t & rejected_index,
   AStarPathValidationFailure & failure) const
 {
+  (void)start_cell;
   departure_path = nav_msgs::msg::Path();
   departure_distance = 0.0;
   pivot_count = 0u;
@@ -2160,12 +3543,67 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
     return false;
   }
 
-  Cell previous_candidate = start_cell;
-  bool have_previous_candidate = true;
-  for (double requested_distance = astar_departure_min_distance_;
-    requested_distance <= astar_departure_max_distance_ + 1e-9;
-    requested_distance += astar_departure_step_distance_)
-  {
+  const auto occupied_footprint_cells = [this](
+      double wx, double wy, double yaw, bool & valid) {
+      std::set<unsigned int> occupied;
+      valid = false;
+      if (footprintIntersectsActivePalletKeepout(wx, wy, yaw) ||
+        footprint_.size() < 3u)
+      {
+        return occupied;
+      }
+      nav2_costmap_2d::Footprint oriented;
+      nav2_costmap_2d::transformFootprint(wx, wy, yaw, footprint_, oriented);
+      std::vector<nav2_costmap_2d::MapLocation> polygon;
+      for (const auto & point : oriented) {
+        unsigned int mx = 0u;
+        unsigned int my = 0u;
+        if (!costmap_->worldToMap(point.x, point.y, mx, my)) {
+          return occupied;
+        }
+        polygon.push_back({mx, my});
+      }
+      std::vector<nav2_costmap_2d::MapLocation> cells;
+      costmap_->convexFillCells(polygon, cells);
+      for (const auto & cell : cells) {
+        const auto cost = costmap_->getCost(cell.x, cell.y);
+        if ((cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
+          (cost != nav2_costmap_2d::NO_INFORMATION &&
+          cost >= static_cast<unsigned char>(astar_shortcut_cost_threshold_)))
+        {
+          occupied.insert(toIndex(cell.x, cell.y));
+        }
+      }
+      valid = true;
+      return occupied;
+    };
+  bool initial_footprint_valid = false;
+  const auto initial_occupied = occupied_footprint_cells(
+    start.pose.position.x, start.pose.position.y, start_yaw,
+    initial_footprint_valid);
+  if (!initial_footprint_valid) {
+    return false;
+  }
+
+  const double goal_projection =
+    (goal.pose.position.x - start.pose.position.x) * std::cos(start_yaw) +
+    (goal.pose.position.y - start.pose.position.y) * std::sin(start_yaw);
+  const double preferred_sign = goal_projection >= 0.0 ? 1.0 : -1.0;
+  const double middle_distance =
+    0.5 * (astar_departure_min_distance_ + astar_departure_max_distance_);
+  // Keep departure bounded to three global searches: try the direction that
+  // increases progress first, a shorter move in that direction, then the
+  // opposite direction as the reverse-escape fallback.
+  const std::array<double, 3> requested_distances{{
+      preferred_sign * astar_departure_max_distance_,
+      preferred_sign * middle_distance,
+      -preferred_sign * astar_departure_max_distance_}};
+  std::set<std::pair<unsigned int, unsigned int>> attempted_candidates;
+  for (const double requested_distance : requested_distances) {
+    if (planningTimedOut()) {
+      RCLCPP_WARN(logger_, "A* departure fallback reached shared planner deadline");
+      return false;
+    }
     const double requested_x = start.pose.position.x +
       requested_distance * std::cos(start_yaw);
     const double requested_y = start.pose.position.y +
@@ -2176,15 +3614,7 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
     {
       break;
     }
-    if (have_previous_candidate &&
-      candidate_cell.x == previous_candidate.x &&
-      candidate_cell.y == previous_candidate.y)
-    {
-      continue;
-    }
-    previous_candidate = candidate_cell;
-    have_previous_candidate = true;
-    if (!isAStarShortcutTraversable(start_cell, candidate_cell)) {
+    if (!attempted_candidates.emplace(candidate_cell.x, candidate_cell.y).second) {
       continue;
     }
 
@@ -2201,7 +3631,55 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
     const double departure_yaw = std::atan2(
       candidate_y - start.pose.position.y,
       candidate_x - start.pose.position.x);
-    if (std::abs(normalizeAngle(departure_yaw - start_yaw)) > 0.10) {
+    const bool reverse_departure =
+      std::cos(normalizeAngle(departure_yaw - start_yaw)) < 0.0;
+    const double expected_motion_yaw = normalizeAngle(
+      start_yaw + (reverse_departure ? M_PI : 0.0));
+    if (std::abs(normalizeAngle(departure_yaw - expected_motion_yaw)) > 0.10) {
+      continue;
+    }
+
+    // Validate translation with the body orientation fixed. This matters for
+    // reverse motion because the MIMA footprint is not symmetric along X.
+    bool departure_clear = true;
+    bool departure_cleared_initial_overlap = initial_occupied.empty();
+    std::size_t previous_overlap_count = initial_occupied.size();
+    const auto collision_samples = std::max(
+      1u, static_cast<unsigned int>(std::ceil(
+        actual_distance / astar_bspline_sample_spacing_)));
+    for (unsigned int sample = 0u; sample <= collision_samples; ++sample) {
+      const double ratio =
+        static_cast<double>(sample) / static_cast<double>(collision_samples);
+      const double sample_x = start.pose.position.x +
+        ratio * (candidate_x - start.pose.position.x);
+      const double sample_y = start.pose.position.y +
+        ratio * (candidate_y - start.pose.position.y);
+      bool footprint_valid = false;
+      const auto occupied = occupied_footprint_cells(
+        sample_x, sample_y, start_yaw, footprint_valid);
+      if (!footprint_valid) {
+        departure_clear = false;
+        break;
+      }
+      if (initial_occupied.empty()) {
+        if (!occupied.empty()) {
+          departure_clear = false;
+          break;
+        }
+      } else {
+        if (occupied.size() > previous_overlap_count ||
+          !std::includes(
+            initial_occupied.begin(), initial_occupied.end(),
+            occupied.begin(), occupied.end()))
+        {
+          departure_clear = false;
+          break;
+        }
+        previous_overlap_count = occupied.size();
+        departure_cleared_initial_overlap = occupied.empty();
+      }
+    }
+    if (!departure_clear || !departure_cleared_initial_overlap) {
       continue;
     }
 
@@ -2214,7 +3692,7 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
     candidate_start.pose.position.x = candidate_x;
     candidate_start.pose.position.y = candidate_y;
     candidate_start.pose.orientation =
-      nav2_util::geometry_utils::orientationAroundZAxis(departure_yaw);
+      nav2_util::geometry_utils::orientationAroundZAxis(start_yaw);
     const auto candidate_astar_path = buildPath(
       candidate_anchors, candidate_start, goal);
 
@@ -2283,15 +3761,35 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
       pose.pose.position.y = start.pose.position.y +
         ratio * (candidate_y - start.pose.position.y);
       pose.pose.orientation =
-        nav2_util::geometry_utils::orientationAroundZAxis(departure_yaw);
+        nav2_util::geometry_utils::orientationAroundZAxis(start_yaw);
       append_pose(pose);
     }
     for (const auto & pose : candidate_segmented_path.poses) {
       append_pose(pose);
     }
 
+    nav_msgs::msg::Path validation_path = departure_path;
+    if (!initial_occupied.empty()) {
+      std::size_t first_clear = 0u;
+      for (; first_clear < departure_path.poses.size(); ++first_clear) {
+        const auto & pose = departure_path.poses[first_clear].pose;
+        bool valid = false;
+        if (occupied_footprint_cells(
+            pose.position.x, pose.position.y,
+            tf2::getYaw(pose.orientation), valid).empty() && valid)
+        {
+          break;
+        }
+      }
+      if (first_clear >= departure_path.poses.size()) {
+        departure_path = nav_msgs::msg::Path();
+        continue;
+      }
+      validation_path.poses.assign(
+        departure_path.poses.begin() + first_clear, departure_path.poses.end());
+    }
     if (!validateAStarSmoothedPath(
-        departure_path, max_curvature, rejected_index, failure))
+        validation_path, max_curvature, rejected_index, failure))
     {
       departure_path = nav_msgs::msg::Path();
       continue;
@@ -2301,9 +3799,10 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
     pivot_count = candidate_pivot_count;
     RCLCPP_INFO(
       logger_,
-      "A* departure candidate accepted: distance=%.3f m "
+      "A* departure candidate accepted: distance=%.3f m direction=%s "
       "pivot_pose=(%.3f, %.3f) samples=%zu pivots=%zu",
-      departure_distance, candidate_x, candidate_y,
+      departure_distance, reverse_departure ? "reverse" : "forward",
+      candidate_x, candidate_y,
       departure_path.poses.size(), pivot_count);
     return true;
   }
@@ -2403,7 +3902,9 @@ forklift_oru_planner::PlannerOptions OruGlobalPlanner::makeCoreOptions() const
   options.reverse_cost_multiplier = lattice_reverse_cost_multiplier_;
   options.gear_switch_cost = lattice_gear_switch_cost_;
   options.unknown_cost_penalty = unknown_cost_penalty_;
-  options.use_holonomic_obstacle_heuristic = true;
+  // The lattice is a bounded fallback. Avoid allocating a full-map dense
+  // obstacle heuristic; Euclidean/non-holonomic guidance remains admissible.
+  options.use_holonomic_obstacle_heuristic = false;
   options.pivot_terminal_radius = lattice_pivot_terminal_radius_;
   options.pivot_terminal_heading = lattice_pivot_terminal_heading_;
   options.analytic_expansion_enabled = lattice_analytic_expansion_enabled_;
@@ -2415,6 +3916,7 @@ forklift_oru_planner::PlannerOptions OruGlobalPlanner::makeCoreOptions() const
   options.shortcut_smoothing_enabled = lattice_shortcut_smoothing_enabled_;
   options.shortcut_max_lookahead = lattice_shortcut_max_lookahead_;
   options.max_iterations = lattice_max_iterations_;
+  options.max_planning_time_sec = lattice_max_planning_time_sec_;
   return options;
 }
 
@@ -2595,8 +4097,25 @@ bool OruGlobalPlanner::resolveGoalCell(
   double goal_yaw,
   Cell & resolved_goal) const
 {
-  if (isTraversable(requested_goal.x, requested_goal.y) &&
-    isFootprintTraversable(requested_goal.x, requested_goal.y, goal_yaw))
+  const auto goal_pose_traversable = [this, goal_yaw](const Cell & cell) {
+      if (!isTraversable(cell.x, cell.y)) {
+        return false;
+      }
+      if (use_final_approach_orientation_) {
+        return isFootprintTraversable(cell.x, cell.y, goal_yaw);
+      }
+      // A normal RViz navigation target is a position goal. Its arrow must not
+      // reject a usable doorway endpoint before A* selects the arrival heading.
+      for (unsigned int heading = 0u; heading < 16u; ++heading) {
+        if (isFootprintTraversable(
+            cell.x, cell.y, static_cast<double>(heading) * M_PI / 8.0))
+        {
+          return true;
+        }
+      }
+      return false;
+    };
+  if (goal_pose_traversable(requested_goal))
   {
     resolved_goal = requested_goal;
     return true;
@@ -2627,8 +4146,7 @@ bool OruGlobalPlanner::resolveGoalCell(
 
       const auto cell = Cell{static_cast<unsigned int>(candidate_x),
         static_cast<unsigned int>(candidate_y)};
-      if (!isTraversable(cell.x, cell.y) ||
-        !isFootprintTraversable(cell.x, cell.y, goal_yaw))
+      if (!goal_pose_traversable(cell))
       {
         continue;
       }
@@ -2725,6 +4243,12 @@ bool OruGlobalPlanner::isInBounds(int x, int y) const
 
 bool OruGlobalPlanner::isTraversable(unsigned int x, unsigned int y) const
 {
+  double wx = 0.0;
+  double wy = 0.0;
+  costmap_->mapToWorld(x, y, wx, wy);
+  if (pointInsideActivePalletKeepout(wx, wy)) {
+    return false;
+  }
   const auto cost = costmap_->getCost(x, y);
   if (cost == nav2_costmap_2d::NO_INFORMATION) {
     return allow_unknown_;
@@ -2936,8 +4460,123 @@ double OruGlobalPlanner::traversalCost(
         kMaxNonObstacleCost;
     }
   }
+  double wx = 0.0;
+  double wy = 0.0;
+  costmap_->mapToWorld(x, y, wx, wy);
+  const double route_guidance_penalty = routeGuidancePenalty(wx, wy);
   return distance_cost * (
-    1.0 + cost_travel_multiplier_ * normalized_cost + footprint_penalty);
+    1.0 + cost_travel_multiplier_ * normalized_cost + footprint_penalty +
+    route_guidance_penalty);
+}
+
+bool OruGlobalPlanner::loadRouteGuidanceFile()
+{
+  route_guidance_segments_.clear();
+  if (!route_guidance_enabled_) {
+    return true;
+  }
+  if (route_guidance_file_.empty()) {
+    RCLCPP_WARN(logger_, "Route guidance is enabled but route_guidance_file is empty");
+    return false;
+  }
+
+  std::ifstream input(route_guidance_file_);
+  if (!input.is_open()) {
+    RCLCPP_WARN(
+      logger_, "Route guidance file could not be opened: %s",
+      route_guidance_file_.c_str());
+    return false;
+  }
+
+  struct LastPoint
+  {
+    double x;
+    double y;
+  };
+  std::unordered_map<std::string, LastPoint> previous_points;
+  const auto trim = [](std::string value) {
+      const auto first = value.find_first_not_of(" \t\r\n");
+      if (first == std::string::npos) {
+        return std::string();
+      }
+      const auto last = value.find_last_not_of(" \t\r\n");
+      return value.substr(first, last - first + 1u);
+    };
+  std::string line;
+  std::size_t line_number = 0u;
+  while (std::getline(input, line)) {
+    ++line_number;
+    const auto comment = line.find('#');
+    if (comment != std::string::npos) {
+      line.erase(comment);
+    }
+    std::stringstream row(line);
+    std::string id;
+    std::string x_text;
+    std::string y_text;
+    if (!std::getline(row, id, ',') || !std::getline(row, x_text, ',') ||
+      !std::getline(row, y_text, ','))
+    {
+      continue;
+    }
+    id = trim(id);
+    x_text = trim(x_text);
+    y_text = trim(y_text);
+    if (id.empty()) {
+      continue;
+    }
+    try {
+      const double x = std::stod(x_text);
+      const double y = std::stod(y_text);
+      const auto previous = previous_points.find(id);
+      if (previous != previous_points.end() &&
+        std::hypot(x - previous->second.x, y - previous->second.y) > 1e-4)
+      {
+        route_guidance_segments_.push_back(
+          {previous->second.x, previous->second.y, x, y});
+      }
+      previous_points[id] = {x, y};
+    } catch (const std::exception &) {
+      RCLCPP_WARN(
+        logger_, "Ignoring malformed route guidance row %zu in %s",
+        line_number, route_guidance_file_.c_str());
+    }
+  }
+
+  if (route_guidance_segments_.empty()) {
+    RCLCPP_WARN(
+      logger_, "Route guidance file contains no usable segments: %s",
+      route_guidance_file_.c_str());
+    return false;
+  }
+  RCLCPP_INFO(
+    logger_, "Loaded route guidance: segments=%zu influence_width=%.2f m "
+    "off_route_cost=%.2f file=%s",
+    route_guidance_segments_.size(), route_guidance_influence_width_m_,
+    route_guidance_off_route_cost_multiplier_, route_guidance_file_.c_str());
+  return true;
+}
+
+double OruGlobalPlanner::routeGuidancePenalty(double wx, double wy) const
+{
+  if (!route_guidance_enabled_ || route_guidance_segments_.empty()) {
+    return 0.0;
+  }
+  double nearest_distance = std::numeric_limits<double>::infinity();
+  for (const auto & segment : route_guidance_segments_) {
+    const double dx = segment.end_x - segment.start_x;
+    const double dy = segment.end_y - segment.start_y;
+    const double length_squared = dx * dx + dy * dy;
+    const double projection = length_squared > 1e-9 ? std::clamp(
+      ((wx - segment.start_x) * dx + (wy - segment.start_y) * dy) /
+      length_squared, 0.0, 1.0) : 0.0;
+    const double closest_x = segment.start_x + projection * dx;
+    const double closest_y = segment.start_y + projection * dy;
+    nearest_distance = std::min(
+      nearest_distance, std::hypot(wx - closest_x, wy - closest_y));
+  }
+  return route_guidance_off_route_cost_multiplier_ * std::clamp(
+    nearest_distance / route_guidance_influence_width_m_, 0.0, 1.0);
 }
 
 double OruGlobalPlanner::heuristic(const Cell & a, const Cell & b) const

@@ -33,6 +33,11 @@ MpcPreviewWindow makeMpcPreviewWindowFromIndex(
   std::size_t start_index,
   const MpcPreviewWindowOptions & options = {});
 
+MpcPreviewWindow makeMpcPreviewWindowFromIndexByDistance(
+  const MpcTrajectory & trajectory,
+  std::size_t start_index,
+  double target_length);
+
 bool isMpcPreviewConsumed(
   const MpcPreviewWindow & window,
   std::size_t trajectory_size);

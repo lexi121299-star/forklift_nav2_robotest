@@ -41,6 +41,7 @@ topics=(
   /forklift/fork/joint_state
   /forklift/control_cmd_raw
   /forklift/control_cmd
+  /forklift/controller_debug
   /forklift/safety_gate/status
   /forklift/task_status
   /global_costmap/costmap_raw

@@ -15,4 +15,12 @@
       Predictive forklift controller scaffold using sampled velocity and steering commands.
     </description>
   </class>
+  <class
+    name="forklift_nav2_plugins/DoorwayStaticMapExemptionLayer"
+    type="forklift_nav2_plugins::DoorwayStaticMapExemptionLayer"
+    base_class_type="nav2_costmap_2d::Layer">
+    <description>
+      Clears only surveyed static-map noise in a doorway before live scan layers add obstacles.
+    </description>
+  </class>
 </library>

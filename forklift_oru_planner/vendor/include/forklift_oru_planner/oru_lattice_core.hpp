@@ -4,6 +4,7 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace forklift_oru_planner
@@ -101,6 +102,7 @@ struct PlannerOptions
   bool shortcut_smoothing_enabled{false};
   unsigned int shortcut_max_lookahead{12};
   unsigned int max_iterations{250000};
+  double max_planning_time_sec{1.5};
 };
 
 struct GridAdapter
@@ -205,8 +207,8 @@ private:
     const Cell & goal) const;
   PlanResult reconstruct(
     const GridAdapter & grid,
-    const std::vector<unsigned int> & parent,
-    const std::vector<Primitive> & arrival_transition,
+    const std::unordered_map<unsigned int, unsigned int> & parent,
+    const std::unordered_map<unsigned int, Primitive> & arrival_transition,
     unsigned int start_index,
     unsigned int goal_index,
     SearchStats stats) const;

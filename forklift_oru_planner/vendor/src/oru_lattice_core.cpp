@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -10,6 +11,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace forklift_oru_planner
@@ -88,6 +91,7 @@ PlannerOptions sanitize(PlannerOptions options)
   options.pivot_terminal_heading = std::max(0.0, std::min(kPi, options.pivot_terminal_heading));
   options.analytic_expansion_radius = clampMin(options.analytic_expansion_radius, 0.0);
   options.analytic_expansion_interval = std::max(1u, options.analytic_expansion_interval);
+  options.max_planning_time_sec = clampMin(options.max_planning_time_sec, 0.0);
   options.analytic_expansion_sample_distance =
     std::max(0.01, std::min(0.5, options.analytic_expansion_sample_distance));
   options.goal_heading_tolerance =
@@ -245,11 +249,8 @@ PlanResult LatticeCore::plan(
     throw std::runtime_error("LatticeCore received an empty grid");
   }
 
-  const auto state_count = grid.width * grid.height * options_.heading_bins * kDirectionCount;
   const State start_state{start.x, start.y, headingIndex(start_yaw)};
   const auto start_index = toStateIndex(grid, start_state, PrimitiveDirection::NONE);
-  const bool reverse_allowed_for_search =
-    reverseAllowedTowardGoal(grid, start_state, goal, goal_yaw);
 
   std::vector<double> holonomic;
   if (options_.use_holonomic_obstacle_heuristic) {
@@ -266,10 +267,12 @@ PlanResult LatticeCore::plan(
     }
   }
 
-  std::vector<double> g_score(state_count, std::numeric_limits<double>::infinity());
-  std::vector<unsigned int> parent(state_count, kNoParent);
-  std::vector<Primitive> arrival_transition(state_count);
-  std::vector<bool> closed(state_count, false);
+  // A factory map can contain hundreds of millions of heading/direction
+  // states. Allocate only states reached by this local search.
+  std::unordered_map<unsigned int, double> g_score;
+  std::unordered_map<unsigned int, unsigned int> parent;
+  std::unordered_map<unsigned int, Primitive> arrival_transition;
+  std::unordered_set<unsigned int> closed;
   std::priority_queue<QueueNode, std::vector<QueueNode>, QueueGreater> open_set;
 
   g_score[start_index] = 0.0;
@@ -279,15 +282,16 @@ PlanResult LatticeCore::plan(
     heuristic(grid, start_state, goal, goal_yaw, holonomic.empty() ? nullptr : &holonomic)});
 
   unsigned int iterations = 0;
+  const auto started = std::chrono::steady_clock::now();
   while (!open_set.empty()) {
     const auto current = open_set.top();
     open_set.pop();
 
-    if (closed[current.index]) {
+    if (closed.count(current.index) != 0u) {
       continue;
     }
 
-    closed[current.index] = true;
+    closed.insert(current.index);
     ++stats.expanded;
     const auto current_state = fromStateIndex(grid, current.index);
     const double current_goal_distance = goalDistance(current_state, goal);
@@ -301,6 +305,14 @@ PlanResult LatticeCore::plan(
 
     ++iterations;
     if (options_.max_iterations > 0 && iterations > options_.max_iterations) {
+      PlanResult result;
+      result.stats = stats;
+      return result;
+    }
+    if (options_.max_planning_time_sec > 0.0 &&
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >=
+      options_.max_planning_time_sec)
+    {
       PlanResult result;
       result.stats = stats;
       return result;
@@ -331,7 +343,9 @@ PlanResult LatticeCore::plan(
 
     for (const auto & primitive : generatePrimitives(grid, current_state)) {
       ++stats.generated;
-      if (primitive.direction == PrimitiveDirection::REVERSE && !reverse_allowed_for_search) {
+      if (primitive.direction == PrimitiveDirection::REVERSE &&
+        !reverseAllowedTowardGoal(grid, current_state, goal, goal_yaw))
+      {
         continue;
       }
 
@@ -349,13 +363,18 @@ PlanResult LatticeCore::plan(
       ++stats.accepted;
 
       const auto next_index = toStateIndex(grid, primitive.state, primitive.direction);
-      if (closed[next_index]) {
+      if (closed.count(next_index) != 0u) {
         continue;
       }
 
+      const auto current_g = g_score.find(current.index);
+      if (current_g == g_score.end()) {
+        continue;
+      }
       const double tentative_g =
-        g_score[current.index] + transitionCost(grid, primitive, previous_direction);
-      if (tentative_g >= g_score[next_index]) {
+        current_g->second + transitionCost(grid, primitive, previous_direction);
+      const auto known = g_score.find(next_index);
+      if (known != g_score.end() && tentative_g >= known->second) {
         continue;
       }
 
@@ -854,8 +873,8 @@ std::vector<double> LatticeCore::buildHolonomicObstacleHeuristic(
 
 PlanResult LatticeCore::reconstruct(
   const GridAdapter & grid,
-  const std::vector<unsigned int> & parent,
-  const std::vector<Primitive> & arrival_transition,
+  const std::unordered_map<unsigned int, unsigned int> & parent,
+  const std::unordered_map<unsigned int, Primitive> & arrival_transition,
   unsigned int start_index,
   unsigned int goal_index,
   SearchStats stats) const
@@ -866,7 +885,11 @@ PlanResult LatticeCore::reconstruct(
 
   unsigned int current = goal_index;
   while (current != start_index) {
-    if (current == kNoParent || parent[current] == kNoParent) {
+    const auto parent_it = parent.find(current);
+    const auto transition_it = arrival_transition.find(current);
+    if (current == kNoParent || parent_it == parent.end() ||
+      transition_it == arrival_transition.end())
+    {
       result.succeeded = false;
       result.states.clear();
       result.transitions.clear();
@@ -874,8 +897,8 @@ PlanResult LatticeCore::reconstruct(
     }
 
     result.states.push_back(fromStateIndex(grid, current));
-    result.transitions.push_back(arrival_transition[current]);
-    current = parent[current];
+    result.transitions.push_back(transition_it->second);
+    current = parent_it->second;
   }
 
   result.states.push_back(fromStateIndex(grid, start_index));

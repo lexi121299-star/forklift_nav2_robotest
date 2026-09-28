@@ -1,0 +1,12 @@
+# route_id,map_x_m,map_y_m
+# Soft route guidance only. The planner still rejects map, footprint, and scan
+# collisions; these points merely make the clear route near this centerline
+# cheaper than an equally clear detour elsewhere.
+door_main,-16.388931,42.661091
+door_main,-16.077576,40.974266
+door_main,-15.498215,39.214745
+door_main,-15.243319,37.667259
+door_main,-14.834798,35.552250
+door_main,-14.242127,32.653072
+door_main,-15.284392,29.597151
+door_main,-17.917467,27.900452

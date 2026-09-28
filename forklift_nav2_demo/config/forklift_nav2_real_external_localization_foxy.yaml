@@ -95,7 +95,7 @@ bt_navigator_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 10.0
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -134,16 +134,22 @@ controller_server:
       # The latest straight-line run tracked 0.45 m/s cleanly. Raise the
       # cruise limit slightly while keeping the existing curve/obstacle limits.
       max_velocity: 0.47
-      min_velocity: 0.06
+      # Deprecated compatibility parameter. Runtime max_velocity is the direct
+      # low-curvature reference; all other profiles only reduce that value.
+      straight_cruise_speed_mps: 2.00
+      min_velocity: 0.09
       max_reverse_velocity: 0.15
       max_steering_angle: 1.5707963267948966
-      # computeVelocityCommands runs at 10 Hz while the prediction step is
+      # computeVelocityCommands runs at 20 Hz while the prediction step is
       # 0.2 s. The model rate limit bounds successive steering targets and
       # reduces delayed left/right over-correction.
       # Keep the predicted steering slew below the measured actuator response.
       # This prevents rapid left/right reversals after a high-speed corner.
       max_steering_angle_velocity: 0.12
       max_acceleration: 0.5
+      # Bounded command lead allows actuator lag/deadband without resetting
+      # the command ramp to measured feedback on every controller tick.
+      command_feedback_allowance_sec: 0.5
       max_angular_velocity: 0.8
       allow_pivot_turn: true
       pivot_steering_angle: 1.5707963267948966
@@ -158,42 +164,98 @@ controller_server:
       # a tighter final yaw threshold than the previous 2.86 degree tolerance.
       pivot_velocity: 0.10
       pivot_yaw_tolerance: 0.025
+      # Do not leave pivot on a single in-tolerance localization sample. Hold
+      # zero traction until odom yaw and yaw rate are stable, then permit one
+      # low-speed corrective turn before handing a small residual to MPC.
+      pivot_yaw_rate_tolerance: 0.03
+      pivot_yaw_settle_duration_sec: 0.30
+      # Legacy parameter retained for config compatibility; predictive braking
+      # now determines when a correction may start.
+      pivot_reacquire_yaw_tolerance: 0.05
+      pivot_max_corrections: 1
+      # Effective stop model from the 908 bags; calibrate against measured yaw.
+      # The 100 RPM floor means lowering pivot_velocity alone may not slow it.
+      pivot_brake_reaction_time_sec: 0.30
+      pivot_brake_deceleration_radps2: 0.20
+      pivot_brake_margin_rad: 0.01
+      primitive_brake_reaction_time_sec: 0.50
+      primitive_brake_deceleration_mps2: 0.50
+      pivot_entry_lateral_tolerance_m: 0.15
       pivot_stop_velocity_threshold: 0.02
       # Capture the planned pivot despite normal real-vehicle lateral tracking
       # error. In the 2026-08-28 14:29 run the closest approach was 0.315 m, so
       # the old 0.20 m threshold was missed and the vehicle drove past it.
       pivot_activation_distance: 0.35
-      # Keep the pivot continuous. Final-speed reduction and the post-pivot
-      # steering-return hold still protect against yaw overshoot.
+      # Keep the pivot continuous; predictive braking stops the final rotation.
       pivot_step_enabled: false
       pivot_step_angle: 0.3490658503988659
       pivot_step_hold_duration_sec: 0.2
       pivot_step_yaw_tolerance: 0.035
       pivot_wrong_direction_tolerance: 0.08
-      # Reduce drive speed for the final segment to limit yaw overshoot.
-      # Enter the final low-speed portion at 30 degrees so localization and
-      # drivetrain lag cannot carry the vehicle past the pivot target yaw.
+      # Request lower speed inside 30 degrees. The motor RPM floor may clip
+      # this request; predictive braking uses measured rate regardless.
       pivot_final_slowdown_angle: 0.5235987755982988
       pivot_final_velocity: 0.05
-      post_pivot_capture_enabled: true
+      post_pivot_capture_enabled: false
       post_pivot_capture_distance_m: 0.30
-      post_pivot_capture_speed_mps: 0.15
+      post_pivot_capture_speed_mps: 0.20
+      post_pivot_capture_heading_tolerance: 0.04
+      # Pivot translation may leave a small path offset. Capture it first;
+      # recovery completion below keeps the stricter 0.05 m tolerance.
+      post_pivot_capture_lateral_tolerance_m: 0.50
+      post_pivot_steering_settle_duration_sec: 0.20
+      # If the pivot used its corrective-turn budget, continue the existing
+      # route at a bounded speed while MPC restores heading and lateral alignment.
+      post_pivot_recovery_enabled: false
+      post_pivot_recovery_speed_mps: 0.30
+      post_pivot_recovery_max_speed_mps: 0.50
+      # After this measured-motion budget, return control to normal Frenet MPC;
+      # safety waits do not consume the budget and the route is not aborted.
+      post_pivot_recovery_timeout_sec: 20.0
+      post_pivot_recovery_steering_limit_rad: 0.35
+      post_pivot_recovery_heading_tolerance: 0.05
+      post_pivot_recovery_max_heading_error: 0.15
+      post_pivot_recovery_lateral_tolerance_m: 0.25
+      post_pivot_recovery_settle_duration_sec: 0.15
       # Pivot completion is latched before steering return, so yaw jitter cannot
       # command another +/-90 degree turn. Keep the extra stop short; steering
       # return already provides the main settling time.
       post_pivot_hold_duration_sec: 0.3
-      # This is a continuous ramp, not a stop. Give the steering feedback a
-      # little longer to settle before restoring the requested cruise speed.
-      post_pivot_slowdown_duration_sec: 3.0
+      # Hard output acceleration limiting replaces the additional timed ramp.
+      post_pivot_slowdown_duration_sec: 0.0
       post_pivot_initial_max_speed: 0.12
       # A new goal can arrive with steering left over from a failed route.
       # Recenter while stopped before allowing the MPC to drive.
       new_goal_steering_settle_enabled: true
       new_goal_steering_tolerance: 0.08
       new_goal_steering_hold_duration_sec: 0.2
+      # A continuous B-spline can pass through a small steering reference
+      # between consecutive bends. Do not stop and recenter there: ordinary
+      # Frenet MPC keeps following the route reference through a doorway/S bend.
+      curve_exit_steering_settle_enabled: false
+      curve_exit_reference_max_angle_rad: 0.12
+      curve_exit_steering_enter_error_rad: 0.20
+      curve_exit_steering_reference_drop_rad: 0.10
+      curve_exit_steering_tolerance_rad: 0.05
+      curve_exit_steering_settle_duration_sec: 0.20
+      curve_exit_recovery_distance_m: 0.50
+      curve_exit_recovery_max_speed_mps: 0.20
+      curve_exit_recovery_timeout_sec: 8.0
+      curve_exit_recovery_settle_duration_sec: 0.30
+      curve_exit_recovery_heading_tolerance_rad: 0.08726646259971647
+      curve_exit_recovery_lateral_tolerance_m: 0.12
       horizon_time: 1.8
       time_step: 0.2
-      lookahead_distance: 1.8
+      # Maximum dynamic preview distance. The controller chooses an arc-length
+      # window from current speed, acceleration and horizon instead of using a
+      # fixed number of 0.05 m samples.
+      lookahead_distance: 2.0
+      preview_min_distance: 0.75
+      tracking_preview_min_distance_m: 3.80
+      profile_preview_design_speed_mps: 1.90
+      preview_distance_margin: 0.30
+      preview_max_distance_m: 6.0
+      preview_time_sec: 2.0
       xy_goal_tolerance: 0.30
       yaw_goal_tolerance: 3.141592653589793
       transform_tolerance: 0.2
@@ -221,15 +283,36 @@ controller_server:
       use_collision_check: true
       allow_unknown: true
       preprocess_path: true
+      # The bounded Reeds-Shepp/lattice fallback may emit a swept-footprint-
+      # validated stop-pivot-go boundary when no continuous curve exists.
+      # Execute it with the controller's existing pivot state machine instead
+      # of rejecting an otherwise feasible route before the vehicle moves.
+      reject_pivot_paths: false
       respect_reverse_path_orientation: true
-      trajectory_resample_spacing: 0.10
-      trajectory_smoothing_iterations: 1
+      trajectory_resample_spacing: 0.05
+      # The planner already returns a validated continuous trajectory. The
+      # controller only performs arc-length resampling and must not reshape it.
+      trajectory_smoothing_iterations: 0
       trajectory_smoothing_corner_cut_ratio: 0.25
       sharp_turn_warning_angle: 0.7853981633974483
       minimum_turning_radius: 0.60
       curvature_slowdown_enabled: true
-      curvature_slowdown_lateral_accel: 0.12
-      min_curvature_speed: 0.08
+      curvature_slowdown_lateral_accel: 0.60
+      max_lateral_jerk_mps3: 0.80
+      max_longitudinal_acceleration_mps2: 0.50
+      planned_deceleration_mps2: 0.50
+      minimum_controllable_speed_mps: 0.09
+      steering_profile_window_m: 0.30
+      drive_track_width_m: 0.937
+      drive_wheel_radius_m: 0.2285
+      drive_gear_ratio: 26.75
+      max_drive_rpm: 2485.0
+      min_curvature_speed: 0.09
+      # Convert steering-reference change per meter into a feasible speed using
+      # the measured steering actuator rate, and anticipate the return by 0.75 m.
+      steering_rate_slowdown_enabled: true
+      steering_rate_speed_margin: 0.60
+      steering_rate_lookahead_distance_m: 0.75
       # Reduce speed continuously through large turns. The old binary heading
       # threshold could jump directly from 0.06 to 0.47 m/s while the steering
       # wheel was still near its limit, causing the post-turn oscillation seen
@@ -244,11 +327,42 @@ controller_server:
       # residual steering range that caused post-turn weaving on the vehicle.
       steering_slowdown_start_angle: 0.08
       steering_slowdown_full_angle: 0.30
-      steering_slowdown_max_speed: 0.25
+      # Curved motion is still capped by curvature and steering-rate profiles.
+      # Do not additionally force every >=0.30 rad turn down to 0.25 m/s;
+      # that made a feasible curve crawl despite a higher trajectory reference.
+      steering_slowdown_max_speed: 0.45
+      # Do not outrun the physical steering actuator when curve curvature falls
+      # quickly. Large measured-vs-reference steering lag is held to crawl speed
+      # until the wheel catches the local Frenet reference.
+      steering_reference_tracking_tolerance: 0.05
+      steering_reference_tracking_full_error: 0.20
+      steering_reference_tracking_max_speed: 0.20
+      # Do not accelerate while Frenet cross-track error is still growing.
+      # The 15:13 bag reached 0.40 m/s after error had already exceeded 0.5 m.
+      cross_track_slowdown_threshold_m: 0.60
+      cross_track_slowdown_full_error_m: 0.75
+      cross_track_recovery_max_speed_mps: 0.15
+      # The 920 replay showed this emergency recovery staying active while
+      # cross-track error kept increasing. Keep its implementation available
+      # for diagnostics, but use the unified MPC cost as the default controller.
+      cross_track_steering_recovery_enabled: false
+      cross_track_steering_recovery_threshold_m: 0.20
+      cross_track_steering_recovery_lateral_gain: 0.65
+      cross_track_steering_recovery_heading_gain: 1.00
+      cross_track_steering_recovery_max_angle_rad: 0.40
+      cross_track_steering_recovery_max_speed_mps: 0.35
+      cross_track_steering_recovery_max_rate_radps: 0.18
       max_path_deviation: 0.75
+      # A sampled command is executed for one controller cycle, not held for
+      # the complete 1.8 s scoring horizon. Near-term collisions remain hard
+      # rejects; later constant-steering collisions receive maximum cost.
+      hard_collision_prediction_horizon_sec: 0.60
       candidate_score_abort_ratio: 4.0
       candidate_score_abort_margin: 100.0
-      candidate_score_abort_cycles: 5
+      # Candidate score varies with curvature and preview geometry. It is a
+      # diagnostic metric, not a route-wide failure criterion. Collision,
+      # path-deviation and Safety Gate protection stay enabled.
+      candidate_score_abort_cycles: 0
       safety_gate_enabled: true
       safety_emergency_stop_active: false
       # The controller caps speed from obstacle clearance with
@@ -277,21 +391,45 @@ controller_server:
       pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
       pallet_exemption_timeout_sec: 0.5
       pallet_exemption_cost_threshold: 254
-      path_distance_weight: 6.0
+      # Q-like Frenet state weights. Favor recovering lateral and heading
+      # error over holding the nominal steering reference when the vehicle is
+      # already off a curve. path_distance_weight is the legacy alias.
+      path_distance_weight: 36.0
+      lateral_error_weight: 36.0
+      longitudinal_error_weight: 0.2
+      # At high speed, prefer returning to the road-going steering reference
+      # instead of keeping a residual steering correction after a pivot/curve.
+      steering_reference_weight: 4.0
+      # Keep the first executable steering command near the curvature at the
+      # current Frenet projection. This prevents early steering unwind at the
+      # start of a tight but continuously changing curve.
+      immediate_steering_reference_weight: 10.0
       local_goal_weight: 14.0
       global_goal_weight: 2.0
-      heading_weight: 5.0
+      heading_weight: 12.0
       obstacle_weight: 12.0
       smoothness_weight: 4.0
       # Penalize rapid absolute steering target changes. The controller also
       # uses measured steering feedback below, so this damps corrections based
       # on what the steering actuator has actually reached.
-      steering_change_weight: 120.0
+      steering_change_weight: 100.0
       velocity_reward_weight: 1.2
+      # Track the time-parameterized curve speed. Existing curvature, heading,
+      # cross-track and steering gates still lower this reference before turns.
+      velocity_reference_weight: 10.0
+      acceleration_weight: 2.0
+      # Keep the drive-axle Frenet error primary. This low-weight preview term
+      # discourages the +X steering axle from cutting outside the next curve.
+      steering_axle_preview_enabled: true
+      steering_axle_offset_m: 1.40
+      steering_axle_lateral_weight: 3.0
       publish_control_cmd: true
       control_cmd_topic: "/forklift/control_cmd_raw"
-      control_cmd_accel_time: 0.3
-      control_cmd_decel_time: 0.3
+      # Anchor-mode goals still stop at an independent Nav2 endpoint. A modest
+      # command ramp removes the harsh restart without changing the planned
+      # trajectory, cruise-speed limit, or safety-stop behavior.
+      control_cmd_accel_time: 0.45
+      control_cmd_decel_time: 0.45
       # Real-vehicle steering is position-controlled and has visible lag. Use
       # the measured angle instead of treating the previous command as reached.
       use_steering_feedback: true
@@ -322,36 +460,20 @@ local_costmap:
       # 2MKC20M30LV205 envelope in base_link: drive axle at x=0, forks toward
       # -X. Axle-to-fork-tip=0.370+1.220=1.590 m; rear extent=1.709 m.
       footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
-      footprint_padding: 0.05
-      plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
+      # The physical footprint already matches the measured vehicle envelope.
+      # Do not add a second geometric expansion in Nav2; raw scan protection
+      # and lethal full-footprint checks remain enabled.
+      footprint_padding: 0.00
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.5
-        cost_scaling_factor: 5.0
+        # Keep enough local gradient for smooth steering while allowing the
+        # verified vehicle envelope to use a narrow doorway.
+        inflation_radius: 0.30
+        cost_scaling_factor: 7.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan
-        scan:
-          topic: /scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          inf_is_valid: True
-          raytrace_max_range: 8.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 8.0
-          obstacle_min_range: 0.0
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: True
-        publish_voxel_map: True
-        origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 16
-        max_obstacle_height: 2.0
-        mark_threshold: 0
         observation_sources: scan
         scan:
           topic: /scan
@@ -386,7 +508,7 @@ global_costmap:
       # Match the local costmap and safety gate footprint. Do not use the old
       # small global footprint, otherwise the planner may route too close to racks.
       footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
-      footprint_padding: 0.05
+      footprint_padding: 0.00
       resolution: 0.05
       track_unknown_space: true
       # Do not mark /scan observations into the global costmap. A global grid
@@ -400,8 +522,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 2.5
-        inflation_radius: 1.0
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.50
       always_send_full_costmap: True
   global_costmap_client:
     ros__parameters:
@@ -413,7 +535,7 @@ global_costmap:
 map_server:
   ros__parameters:
     use_sim_time: false
-    yaml_filename: "/workspace/map3.yaml"
+    yaml_filename: "/workspace/map.yaml"
 
 map_saver:
   ros__parameters:
@@ -425,11 +547,15 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 20.0
+    # Planning is request driven. The topology search for a factory-scale map
+    # takes about 1-2 seconds, so 20 Hz only produces a misleading warning and
+    # has no relationship to the 20 Hz controller loop.
+    expected_planner_frequency: 0.5
     use_sim_time: false
-    planner_plugins: ["GridBased"]
+    planner_plugins: ["GridBased", "TopologyOnly", "TopologyContinuous"]
     GridBased:
       plugin: "forklift_nav2_plugins/OruGlobalPlanner"
+      topology_only: false
       allow_unknown: true
       use_diagonal: true
       prevent_corner_cutting: true
@@ -440,11 +566,28 @@ planner_server:
       # lethal cell, matching the controller and independent Safety Gate.
       footprint_collision_cost_threshold: 254
       lethal_cost_threshold: 254
+      # Hand-drawn warehouse road centerlines are a soft preference only.
+      # Static-map and complete-footprint checks remain authoritative.
+      route_guidance_enabled: true
+      route_guidance_file: "/workspace/src/forklift_nav2_demo/config/warehouse_route_guidance.csv"
+      route_guidance_influence_width_m: 2.0
+      route_guidance_off_route_cost_multiplier: 0.60
+      # While a pallet task navigates to staging, the clicked pallet pose is a
+      # temporary obstacle even though the global costmap intentionally remains
+      # static. The same heartbeat switches from keepout to exemption only for
+      # the final low-speed reverse approach.
+      pallet_keepout_enabled: true
+      pallet_keepout_pose_topic: "/forklift/pallet_approach/exemption_pose"
+      pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
+      pallet_keepout_timeout_sec: 0.5
+      pallet_keepout_length_m: 1.80
+      pallet_keepout_width_m: 1.60
+      pallet_keepout_padding_m: 0.10
       cost_travel_multiplier: 2.0
       # Penalize the highest inflation cost touched by the complete footprint,
       # not only the base_link center cell. This moves A* away from racks while
       # keeping cost 253 traversable when no wider route exists.
-      footprint_cost_travel_multiplier: 10.0
+      footprint_cost_travel_multiplier: 30.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
       goal_tolerance: 1.5
@@ -456,9 +599,10 @@ planner_server:
       # The complete padded footprint is checked at every sample, so cost 253
       # may be used as clearance while lethal cost 254 remains forbidden.
       astar_shortcut_cost_threshold: 254
-      # Once the vehicle has left a constrained start, do not let line-of-sight
-      # simplification pull the route back through the inscribed inflation band.
-      astar_preferred_footprint_cost_threshold: 253
+      # Prefer roughly another 0.1 m of inflation clearance after leaving a
+      # constrained start. This is a soft requirement: if no wider B-spline is
+      # available the planner still returns its best collision-free candidate.
+      astar_preferred_footprint_cost_threshold: 180
       astar_start_clearance_relax_distance: 1.25
       # Convert the sparse A* anchors into a continuous-curvature path. The
       # first tangent follows the measured vehicle yaw, so an A* corner cannot
@@ -467,13 +611,18 @@ planner_server:
       astar_bspline_sample_spacing: 0.05
       astar_bspline_min_turning_radius: 0.60
       astar_bspline_start_tangent_distance: 1.20
-      # If a sparse shortcut's B-spline cuts into a rack, progressively retain
-      # more collision-free A* anchors before declaring the route impossible.
+      astar_bspline_anchor_spacing: 1.25
+      # If a sparse shortcut's B-spline cuts into a rack, add original A* anchors
+      # only around the failed sample. Curvature failure advances to fallback.
       astar_bspline_retry_count: 8
+      astar_reeds_shepp_fallback_enabled: true
       # A large start-heading mismatch is an explicit stop-pivot-go maneuver,
       # not a high-curvature road corner. The complete rotating footprint is
       # checked before the two same-position yaw poses are emitted.
       astar_start_pivot_enabled: true
+      # Prefer the continuous curve. Pivot is only a reachability fallback if
+      # the start curve cannot satisfy the vehicle's minimum turning radius.
+      astar_start_pivot_preferred: false
       astar_start_pivot_threshold: 0.7853981634
       astar_pivot_collision_sample_angle: 0.0872664626
       # A valid grid route must not be discarded only because one global
@@ -483,8 +632,11 @@ planner_server:
       # Prefer validated straight motion blocks joined by explicit pivots on
       # the real vehicle. This avoids spending seconds on global B-spline and
       # departure retries for routes that are naturally segmented.
-      astar_prefer_segmented_path: true
+      astar_prefer_segmented_path: false
       astar_segmented_pivot_threshold: 0.15
+      # A multi-pivot route is hard to execute reliably at a doorway. Reject
+      # it here so Task Manager can follow sparse TopologyOnly anchors.
+      astar_max_automatic_pivots: 1
       # Remove only a sharp terminal dogleg after the path is already inside
       # the 0.30 m controller goal tolerance. Straight final approaches still
       # run to the selected goal, while tiny endpoint pivots are avoided.
@@ -495,7 +647,24 @@ planner_server:
       astar_departure_fallback_enabled: true
       astar_departure_min_distance: 0.50
       astar_departure_max_distance: 5.00
+      # Kept for backward-compatible parameter files. Runtime fallback now
+      # checks exactly max, midpoint and min distance under one total deadline.
       astar_departure_step_distance: 0.25
+      # 1.0 m is adequate for a global connectivity check but too coarse to
+      # feed B-spline trajectory generation at doors. 0.50 m remains bounded
+      # on this map and preserves the turn geometry needed by GridBased.
+      planner_total_timeout_sec: 8.0
+      astar_coarse_topology_search_enabled: true
+      topology_search_resolution_m: 0.50
+      # If an A* corner cannot pivot because the rotating full body would hit
+      # a rack or pallet, move the pivot backward into the inbound aisle,
+      # reserve a straight exit, then re-plan from that exit. Candidates are
+      # searched far-to-near so a clear corridor position wins over a corner.
+      astar_internal_pivot_relocation_enabled: false
+      astar_internal_pivot_min_distance: 0.75
+      astar_internal_pivot_max_distance: 4.00
+      astar_internal_pivot_step_distance: 0.25
+      astar_internal_pivot_exit_distance: 0.75
       # Keep the final path heading aligned with the approach segment. RViz goal
       # yaw is intentionally ignored so reaching the point cannot trigger a
       # large terminal steering/pivot maneuver.
@@ -516,7 +685,7 @@ planner_server:
       # Multi-curvature catalog. The tight/default/wide radii all terminate on
       # the configured heading bins; the smallest radius is also used by the
       # Reeds-Shepp analytic expansion.
-      lattice_arc_radii: [0.45, 0.60, 0.90]
+      lattice_arc_radii: [0.60, 0.90, 1.20]
       lattice_arc_angle: 0.3926990817
       lattice_primitive_samples: 5
       lattice_reverse_enabled: true
@@ -524,11 +693,11 @@ planner_server:
       lattice_turn_cost_multiplier: 0.25
       lattice_obstacle_cost_multiplier: 1.0
       lattice_goal_heading_cost_multiplier: 0.25
-      lattice_reverse_cost_multiplier: 3.0
-      lattice_gear_switch_cost: 4.0
+      lattice_reverse_cost_multiplier: 1.5
+      lattice_gear_switch_cost: 2.0
       lattice_reverse_requires_goal_behind: true
       lattice_reverse_goal_behind_margin: 0.05
-      lattice_pivot_enabled: true
+      lattice_pivot_enabled: false
       lattice_pivot_angle: 0.3926990817
       lattice_pivot_turn_cost: 2.0
       lattice_rear_axle_x_offset: 0.0
@@ -547,7 +716,93 @@ planner_server:
       # original lattice segment chain untouched.
       lattice_shortcut_smoothing_enabled: true
       lattice_shortcut_max_lookahead: 12
-      lattice_max_iterations: 250000
+      lattice_max_iterations: 30000
+      lattice_max_planning_time_sec: 1.5
+
+    # This instance only exposes the footprint-validated A* corridor to the
+    # Task Manager. Its path is used to choose safe intermediate goals and is
+    # never sent directly to FollowPath.
+    TopologyOnly:
+      plugin: "forklift_nav2_plugins/OruGlobalPlanner"
+      topology_only: true
+      allow_unknown: true
+      use_diagonal: true
+      prevent_corner_cutting: true
+      use_footprint_collision_check: true
+      footprint_collision_cost_threshold: 254
+      lethal_cost_threshold: 254
+      route_guidance_enabled: true
+      route_guidance_file: "/workspace/src/forklift_nav2_demo/config/warehouse_route_guidance.csv"
+      route_guidance_influence_width_m: 2.0
+      route_guidance_off_route_cost_multiplier: 0.60
+      pallet_keepout_enabled: true
+      pallet_keepout_pose_topic: "/forklift/pallet_approach/exemption_pose"
+      pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
+      pallet_keepout_timeout_sec: 0.5
+      pallet_keepout_length_m: 1.80
+      pallet_keepout_width_m: 1.60
+      pallet_keepout_padding_m: 0.10
+      cost_travel_multiplier: 2.0
+      # Topology-only is never executed directly. A lower soft inflation cost
+      # lets it discover the only narrow-but-nonlethal doorway corridor.
+      footprint_cost_travel_multiplier: 10.0
+      unknown_cost_penalty: 5.0
+      start_tolerance: 1.2
+      goal_tolerance: 1.5
+      max_iterations: 0
+      astar_path_smoothing_enabled: true
+      astar_shortcut_max_lookahead: 400
+      astar_shortcut_cost_threshold: 254
+      astar_goal_endpoint_tolerance: 0.28
+      topology_search_resolution_m: 0.50
+      # The coarse topology planner normally completes in about two seconds;
+      # do not allow an unavailable corridor to hold the task indefinitely.
+      planner_total_timeout_sec: 5.0
+      use_final_approach_orientation: false
+      use_lattice_planner: false
+
+    # This planner retains TopologyOnly's fast 0.50 m connectivity search but
+    # turns its result into one fully footprint-validated FollowPath. It emits
+    # explicit pivot samples only at non-driveable corners, so ordinary anchor
+    # points are no longer physical stop-and-restart points.
+    TopologyContinuous:
+      plugin: "forklift_nav2_plugins/OruGlobalPlanner"
+      topology_only: true
+      topology_emit_segmented_path: true
+      allow_unknown: true
+      use_diagonal: true
+      prevent_corner_cutting: true
+      use_footprint_collision_check: true
+      footprint_collision_cost_threshold: 254
+      lethal_cost_threshold: 254
+      route_guidance_enabled: true
+      route_guidance_file: "/workspace/src/forklift_nav2_demo/config/warehouse_route_guidance.csv"
+      route_guidance_influence_width_m: 2.0
+      route_guidance_off_route_cost_multiplier: 0.60
+      pallet_keepout_enabled: true
+      pallet_keepout_pose_topic: "/forklift/pallet_approach/exemption_pose"
+      pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
+      pallet_keepout_timeout_sec: 0.5
+      pallet_keepout_length_m: 1.80
+      pallet_keepout_width_m: 1.60
+      pallet_keepout_padding_m: 0.10
+      cost_travel_multiplier: 2.0
+      footprint_cost_travel_multiplier: 10.0
+      unknown_cost_penalty: 5.0
+      start_tolerance: 1.2
+      goal_tolerance: 1.5
+      max_iterations: 0
+      astar_path_smoothing_enabled: true
+      astar_shortcut_max_lookahead: 400
+      astar_shortcut_cost_threshold: 254
+      astar_bspline_sample_spacing: 0.05
+      astar_segmented_pivot_threshold: 0.15
+      astar_pivot_collision_sample_angle: 0.0872664626
+      astar_goal_endpoint_tolerance: 0.28
+      topology_search_resolution_m: 0.50
+      planner_total_timeout_sec: 5.0
+      use_final_approach_orientation: false
+      use_lattice_planner: false
 
 planner_server_rclcpp_node:
   ros__parameters:

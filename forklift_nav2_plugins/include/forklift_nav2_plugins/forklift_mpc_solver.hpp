@@ -20,12 +20,20 @@ struct MpcSolverParameters
   int velocity_samples{6};
   int steering_rate_samples{9};
   bool allow_reverse{false};
-  double path_distance_weight{8.0};
-  double heading_weight{2.0};
-  double steering_weight{1.0};
+  double path_distance_weight{12.0};
+  double heading_weight{6.0};
+  double longitudinal_weight{0.2};
+  double steering_weight{3.0};
   double terminal_weight{14.0};
   double smoothness_weight{1.0};
   double velocity_reward_weight{0.6};
+  double velocity_reference_weight{0.0};
+  double acceleration_weight{2.0};
+  bool steering_axle_preview_enabled{false};
+  double steering_axle_offset{1.4};
+  double steering_axle_lateral_weight{0.0};
+  // 0 preserves unrestricted legacy callers; navigation supplies its active block.
+  int motion_direction{0};
 };
 
 struct MpcSolverResult
