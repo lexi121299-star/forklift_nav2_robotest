@@ -281,6 +281,10 @@ controller_server:
       allow_reverse: true
       use_mpc_solver: true
       use_collision_check: true
+      # The independent C++ Safety Gate performs the authoritative raw-scan
+      # pivot sweep. The local costmap contains this vehicle's fixed body echo,
+      # so do not let the controller duplicate that false pivot collision.
+      pivot_costmap_collision_check_enabled: false
       allow_unknown: true
       preprocess_path: true
       # The bounded Reeds-Shepp/lattice fallback may emit a swept-footprint-
@@ -599,10 +603,10 @@ planner_server:
       # The complete padded footprint is checked at every sample, so cost 253
       # may be used as clearance while lethal cost 254 remains forbidden.
       astar_shortcut_cost_threshold: 254
-      # Prefer roughly another 0.1 m of inflation clearance after leaving a
-      # constrained start. This is a soft requirement: if no wider B-spline is
-      # available the planner still returns its best collision-free candidate.
-      astar_preferred_footprint_cost_threshold: 180
+      # Prefer clearance during A*, but permit full-footprint shortcuts through
+      # the 253 warning band. Lethal cost 254 and unknown space remain hard
+      # rejections, avoiding unnecessary anchor splits in open diagonal aisles.
+      astar_preferred_footprint_cost_threshold: 254
       astar_start_clearance_relax_distance: 1.25
       # Convert the sparse A* anchors into a continuous-curvature path. The
       # first tangent follows the measured vehicle yaw, so an A* corner cannot

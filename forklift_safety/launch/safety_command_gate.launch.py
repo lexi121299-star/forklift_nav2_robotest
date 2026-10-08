@@ -45,6 +45,7 @@ def generate_launch_description():
     scan_collision_sample_spacing_m = LaunchConfiguration(
         'scan_collision_sample_spacing_m')
     scan_collision_padding_m = LaunchConfiguration('scan_collision_padding_m')
+    scan_self_filter_rectangles = LaunchConfiguration('scan_self_filter_rectangles')
     scan_require_motion_fov_coverage = LaunchConfiguration(
         'scan_require_motion_fov_coverage')
     allow_reverse_collision_escape = LaunchConfiguration(
@@ -125,6 +126,8 @@ def generate_launch_description():
         DeclareLaunchArgument('scan_required_range_m', default_value='8.0'),
         DeclareLaunchArgument('scan_collision_sample_spacing_m', default_value='0.05'),
         DeclareLaunchArgument('scan_collision_padding_m', default_value='0.05'),
+        DeclareLaunchArgument('scan_self_filter_rectangles', default_value='[]'),
+        DeclareLaunchArgument('pivot_costmap_collision_check_enabled', default_value='true'),
         DeclareLaunchArgument('scan_require_motion_fov_coverage', default_value='true'),
         DeclareLaunchArgument('allow_reverse_collision_escape', default_value='true'),
         DeclareLaunchArgument(
@@ -210,6 +213,10 @@ def generate_launch_description():
                 'scan_required_range_m': scan_required_range_m,
                 'scan_collision_sample_spacing_m': scan_collision_sample_spacing_m,
                 'scan_collision_padding_m': scan_collision_padding_m,
+                'scan_self_filter_rectangles': ParameterValue(
+                    scan_self_filter_rectangles, value_type=str),
+                'pivot_costmap_collision_check_enabled': LaunchConfiguration(
+                    'pivot_costmap_collision_check_enabled'),
                 'scan_require_motion_fov_coverage': scan_require_motion_fov_coverage,
                 'allow_reverse_collision_escape': allow_reverse_collision_escape,
                 'reverse_collision_escape_max_speed_mps': (

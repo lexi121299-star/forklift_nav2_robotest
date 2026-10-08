@@ -318,6 +318,9 @@ void ForkliftMpcController::configure(
     node, name_ + ".use_collision_check",
     rclcpp::ParameterValue(use_collision_check_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_costmap_collision_check_enabled",
+    rclcpp::ParameterValue(pivot_costmap_collision_check_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".allow_unknown", rclcpp::ParameterValue(allow_unknown_));
   nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".preprocess_path",
@@ -770,6 +773,9 @@ void ForkliftMpcController::configure(
   node->get_parameter(name_ + ".allow_reverse", allow_reverse_);
   node->get_parameter(name_ + ".use_mpc_solver", use_mpc_solver_);
   node->get_parameter(name_ + ".use_collision_check", use_collision_check_);
+  node->get_parameter(
+    name_ + ".pivot_costmap_collision_check_enabled",
+    pivot_costmap_collision_check_enabled_);
   node->get_parameter(name_ + ".allow_unknown", allow_unknown_);
   node->get_parameter(name_ + ".preprocess_path", preprocess_path_);
   node->get_parameter(name_ + ".reject_pivot_paths", reject_pivot_paths_);
@@ -3964,7 +3970,8 @@ bool ForkliftMpcController::pivotCommandCollisionFree(
     predicted = predictMpcState(predicted, control, time_step_, vehicle_model_);
 
     double normalized_obstacle_cost = 0.0;
-    if (!isCollisionFree(predicted, normalized_obstacle_cost)) {
+    if (pivot_costmap_collision_check_enabled_ &&
+      !isCollisionFree(predicted, normalized_obstacle_cost)) {
       return false;
     }
 

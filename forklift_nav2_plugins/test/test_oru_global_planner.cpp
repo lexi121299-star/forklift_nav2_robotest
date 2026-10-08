@@ -341,7 +341,8 @@ public:
     double start_yaw,
     bool & valid,
     std::size_t & pivot_count,
-    bool use_final_approach_orientation = false)
+    bool use_final_approach_orientation = false,
+    bool * initial_pivot_blocked = nullptr)
   {
     planner.use_final_approach_orientation_ =
       use_final_approach_orientation;
@@ -371,9 +372,13 @@ public:
     std::size_t rejected_index = 0u;
     OruGlobalPlanner::AStarPathValidationFailure failure =
       OruGlobalPlanner::AStarPathValidationFailure::NONE;
+    bool initial_pivot_rejected = false;
     valid = planner.buildAStarSegmentedFallbackPath(
       astar_path, start, goal, segmented_path, pivot_count,
-      max_curvature, rejected_index, failure);
+      max_curvature, rejected_index, failure, &initial_pivot_rejected);
+    if (initial_pivot_blocked != nullptr) {
+      *initial_pivot_blocked = initial_pivot_rejected;
+    }
     return segmented_path;
   }
 
@@ -486,6 +491,27 @@ public:
     planner.footprint_[2].y = -half_extent;
     planner.footprint_[3].x = -half_extent;
     planner.footprint_[3].y = half_extent;
+    planner.use_footprint_collision_check_ = true;
+    planner.footprint_collision_cost_threshold_ =
+      nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
+    planner.footprint_collision_checker_ =
+      std::make_unique<nav2_costmap_2d::FootprintCollisionChecker<
+          nav2_costmap_2d::Costmap2D *>>(planner.costmap_);
+  }
+
+  static void enableRectangularFootprintCollisionCheck(
+    OruGlobalPlanner & planner,
+    double min_x, double max_x, double min_y, double max_y)
+  {
+    planner.footprint_.resize(4u);
+    planner.footprint_[0].x = max_x;
+    planner.footprint_[0].y = max_y;
+    planner.footprint_[1].x = max_x;
+    planner.footprint_[1].y = min_y;
+    planner.footprint_[2].x = min_x;
+    planner.footprint_[2].y = min_y;
+    planner.footprint_[3].x = min_x;
+    planner.footprint_[3].y = max_y;
     planner.use_footprint_collision_check_ = true;
     planner.footprint_collision_cost_threshold_ =
       nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
@@ -1242,6 +1268,34 @@ TEST(OruGlobalPlanner, AStarSegmentedFallbackChecksCompletePivotSweep) {
 
   EXPECT_FALSE(valid);
   EXPECT_TRUE(path.poses.empty() || pivot_count == 0u);
+}
+
+TEST(OruGlobalPlanner, AStarSegmentedFallbackReportsBlockedInitialPivot) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableRectangularFootprintCollisionCheck(
+    planner, -0.50, 0.50, -0.20, 0.20);
+
+  // This obstacle is clear of the initial and final footprint orientations,
+  // but lies inside the swept rectangle while the vehicle pivots 90 degrees.
+  unsigned int obstacle_x = 0u;
+  unsigned int obstacle_y = 0u;
+  ASSERT_TRUE(costmap.worldToMap(2.30, 2.30, obstacle_x, obstacle_y));
+  costmap.setCost(
+    obstacle_x, obstacle_y, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  bool valid = true;
+  bool initial_pivot_blocked = false;
+  std::size_t pivot_count = 0u;
+  const auto path =
+    OruGlobalPlannerTestAccess::buildAStarSegmentedFallbackPath(
+    planner, {{2.0, 2.0}, {2.0, 5.0}}, 0.0, valid, pivot_count,
+    false, &initial_pivot_blocked);
+
+  EXPECT_FALSE(valid);
+  EXPECT_TRUE(path.poses.empty());
+  EXPECT_TRUE(initial_pivot_blocked);
 }
 
 TEST(OruGlobalPlanner, AStarRelocatesBlockedInternalPivotIntoAisle) {

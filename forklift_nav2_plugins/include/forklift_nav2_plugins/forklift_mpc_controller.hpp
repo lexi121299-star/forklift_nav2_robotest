@@ -350,6 +350,7 @@ private:
   bool allow_reverse_{false};
   bool use_mpc_solver_{true};
   bool use_collision_check_{true};
+  bool pivot_costmap_collision_check_enabled_{true};
   bool allow_unknown_{false};
   bool preprocess_path_{true};
   bool reject_pivot_paths_{true};

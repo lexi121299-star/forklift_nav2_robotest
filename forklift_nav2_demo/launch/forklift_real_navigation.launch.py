@@ -159,6 +159,8 @@ def generate_launch_description():
             'collision_check_enabled': 'true',
             'costmap_monitor_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'costmap_collision_check_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
+            'pivot_costmap_collision_check_enabled': LaunchConfiguration(
+                'safety_pivot_costmap_enabled').perform(context),
             'raw_command_topic': '/forklift/control_cmd_raw',
             'gated_command_topic': '/forklift/control_cmd',
             'recovery_twist_topic': '/cmd_vel',
@@ -191,6 +193,10 @@ def generate_launch_description():
             'scan_required_range_m': '8.0',
             'scan_collision_sample_spacing_m': '0.05',
             'scan_collision_padding_m': '0.05',
+            # The co-located base_scan sees a calibrated right-front body
+            # reflection. Keep the raw scan gate active while excluding only
+            # this narrow fixed body region during footprint sweeps.
+            'scan_self_filter_rectangles': '[ [1.55, 1.75, -0.95, -0.65] ]',
             'scan_require_motion_fov_coverage': 'true',
             # Permit only a straight, low-speed reverse that the raw scan
             # predicts will leave an existing front-side footprint overlap.
@@ -298,6 +304,8 @@ def generate_launch_description():
         DeclareLaunchArgument('collision_compute_budget_sec', default_value='0.15'),
         DeclareLaunchArgument('safety_costmap_enabled', default_value='true',
                              description='Enable costmap collision and freshness checks in Safety Gate; raw scan protection remains enabled'),
+        DeclareLaunchArgument('safety_pivot_costmap_enabled', default_value='false',
+                             description='Use local-costmap pivot sweep checks in Safety Gate. Raw scan pivot protection remains enabled.'),
         DeclareLaunchArgument(
             'scan_timeout_sec', default_value='0.7',
             description='Hard scan freshness stop timeout in seconds.'),

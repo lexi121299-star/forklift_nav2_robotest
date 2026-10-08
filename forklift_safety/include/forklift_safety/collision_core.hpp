@@ -18,6 +18,7 @@ struct Point {double x{}, y{};};
 struct Pose {double x{}, y{}, yaw{};};
 using Polygon = std::vector<Point>;
 struct Zone {Pose pose; double half_length{}, half_width{};};
+struct Rectangle {double min_x{}, max_x{}, min_y{}, max_y{};};
 struct Grid
 {
   size_t width{}, height{};
@@ -38,6 +39,9 @@ struct Geometry
   int threshold{253};
   bool unknown_collision{true}, reverse_escape{true};
   double escape_speed{.15}, escape_steering{.05}, escape_min_x{};
+  // Static returns from the forklift body are fixed in base_link and must not
+  // be treated as external obstacles while predicting a pivot sweep.
+  std::vector<Rectangle> scan_self_filter_rectangles;
 };
 struct Result
 {
@@ -69,6 +73,17 @@ inline bool exempt(Point p, const std::optional<Zone> & z)
   const double dx = p.x-z->pose.x, dy = p.y-z->pose.y;
   const double c = std::cos(z->pose.yaw), s = std::sin(z->pose.yaw);
   return std::abs(dx*c+dy*s) <= z->half_length && std::abs(-dx*s+dy*c) <= z->half_width;
+}
+inline bool selfReturn(Point p, const Geometry & g)
+{
+  for (const auto & rectangle : g.scan_self_filter_rectangles) {
+    if (p.x >= rectangle.min_x && p.x <= rectangle.max_x &&
+      p.y >= rectangle.min_y && p.y <= rectangle.max_y)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 inline Polygon atPose(const Polygon & f, Pose p)
 {
@@ -139,7 +154,13 @@ inline Result scanSweep(const std::vector<Point> & input, const Command & cmd,
   for (auto p : poses) {distance=std::max(distance,std::hypot(p.x,p.y));}
   const double bound=radius+g.padding+distance;
   std::vector<Point> points;
-  for (auto p : input) {if (p.x*p.x+p.y*p.y<=bound*bound && !exempt(p,zone)) {points.push_back(p);}}
+  const bool pivot_motion = std::abs(cmd.steering_angle_rad) >= g.pivot_angle - 1e-3;
+  for (auto p : input) {
+    if (p.x*p.x+p.y*p.y<=bound*bound && !exempt(p,zone) &&
+      (!pivot_motion || !selfReturn(p,g))) {
+      points.push_back(p);
+    }
+  }
   auto hits=[&](Pose pose) {
       const auto polygon=atPose(g.footprint,pose);
       std::set<size_t> result;

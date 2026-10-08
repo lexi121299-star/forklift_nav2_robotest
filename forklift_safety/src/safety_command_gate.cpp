@@ -101,6 +101,22 @@ public:
     geometry_.escape_speed=d("reverse_collision_escape_max_speed_mps");
     geometry_.escape_steering=d("reverse_collision_escape_max_steering_angle_rad");
     geometry_.escape_min_x=d("reverse_collision_escape_obstacle_min_x_m");
+    const auto self_filter=YAML::Load(s("scan_self_filter_rectangles"));
+    if (!self_filter.IsSequence()) {throw std::runtime_error("invalid scan self-filter rectangles");}
+    for (const auto & rectangle : self_filter) {
+      if (!rectangle.IsSequence() || rectangle.size()!=4) {
+        throw std::runtime_error("scan self-filter rectangle must be [min_x,max_x,min_y,max_y]");
+      }
+      Rectangle filter{rectangle[0].as<double>(), rectangle[1].as<double>(),
+        rectangle[2].as<double>(), rectangle[3].as<double>()};
+      if (!std::isfinite(filter.min_x) || !std::isfinite(filter.max_x) ||
+        !std::isfinite(filter.min_y) || !std::isfinite(filter.max_y) ||
+        filter.min_x >= filter.max_x || filter.min_y >= filter.max_y)
+      {
+        throw std::runtime_error("invalid scan self-filter rectangle");
+      }
+      geometry_.scan_self_filter_rectangles.push_back(filter);
+    }
     inputs_.emergency=b("emergency_stop_active");
     started_=now().seconds();
     pub_=create_publisher<Command>(s("gated_command_topic"),1);
@@ -187,6 +203,7 @@ private:
       {"require_localization",false},{"costmap_monitor_enabled",true},{"collision_check_enabled",true},
       {"costmap_collision_check_enabled",true},
       {"unknown_is_collision",true},{"scan_protection_enabled",true},{"scan_require_motion_fov_coverage",true},
+      {"pivot_costmap_collision_check_enabled",true},
       {"allow_reverse_collision_escape",true},{"pallet_exemption_enabled",true},{"pallet_exemption_reverse_only",true},
       {"emergency_stop_active",false},{"allow_recovery_twist",true},{"allow_recovery_backoff",true},{"allow_recovery_pivot",true}}) {
       bools_[entry.first]=declare_parameter<bool>(entry.first,entry.second);
@@ -222,6 +239,7 @@ private:
       {"localization_message_type","odometry"},{"base_frame_id","base_link"},
       {"costmap_topic","/local_costmap/costmap_raw"},{"costmap_message_type","costmap_raw"},
       {"status_topic","/forklift/safety_gate/status"},{"scan_topic","/scan"},
+      {"scan_self_filter_rectangles","[]"},
       {"pallet_exemption_pose_topic","/forklift/pallet_approach/exemption_pose"},
       {"pallet_exemption_active_topic","/forklift/pallet_approach/exemption_active"},
       {"footprint","[[1.709,0.610],[1.709,-0.610],[-1.590,-0.610],[-1.590,0.610]]"}}) {
@@ -417,7 +435,8 @@ private:
       escape=result.reason=="scan reverse escape clear";
     }
     const auto map_reason=mapHealth(in.grid,now().seconds()); if (!map_reason.empty()) {return map_reason;}
-    if (in.grid && b("costmap_collision_check_enabled")) {
+    if (in.grid && b("costmap_collision_check_enabled") &&
+      (!pivot || b("pivot_costmap_collision_check_enabled"))) {
       const auto pose_begin=Steady::now();
       const auto pose=poseInGrid(in);
       pose_elapsed_=std::chrono::duration<double>(Steady::now()-pose_begin).count();
