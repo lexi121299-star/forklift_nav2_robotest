@@ -205,8 +205,7 @@ private:
     std::size_t & pivot_count,
     double & max_curvature,
     std::size_t & rejected_index,
-    AStarPathValidationFailure & failure,
-    bool * initial_pivot_blocked = nullptr) const;
+    AStarPathValidationFailure & failure) const;
   bool buildAStarDepartureFallbackPath(
     const Cell & start_cell, double start_yaw, const Cell & goal_cell,
     const geometry_msgs::msg::PoseStamped & start,
@@ -216,8 +215,7 @@ private:
     std::size_t & pivot_count,
     double & max_curvature,
     std::size_t & rejected_index,
-    AStarPathValidationFailure & failure,
-    bool pivot_clearance_departure = false) const;
+    AStarPathValidationFailure & failure) const;
   bool buildAStarInternalPivotRelocationPath(
     const nav_msgs::msg::Path & astar_path, const Cell & goal_cell,
     const geometry_msgs::msg::PoseStamped & start,

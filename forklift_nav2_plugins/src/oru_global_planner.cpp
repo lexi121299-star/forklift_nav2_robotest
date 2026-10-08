@@ -1183,42 +1183,6 @@ OruGlobalPlanner::createPlan(
     return astar_path;
   }
 
-  // A clear start footprint can still be unable to rotate in place because
-  // the body sweep reaches a nearby obstacle. Keep that specific signal for
-  // the departure fallback below; unrelated curve failures must not trigger
-  // extra departure searches.
-  bool initial_pivot_blocked = false;
-
-  // Do this inexpensive sweep check before the bounded Reeds-Shepp search.
-  // If the first route direction cannot be reached in place, the useful next
-  // action is a short, footprint-safe departure rather than spending several
-  // seconds searching curves that start from the same blocked rotation pose.
-  if (astar_segmented_fallback_enabled_) {
-    const auto & first_route_point = astar_path.poses[1u].pose.position;
-    const double first_route_yaw = std::atan2(
-      first_route_point.y - planning_start.pose.position.y,
-      first_route_point.x - planning_start.pose.position.x);
-    if (std::abs(normalizeAngle(first_route_yaw - start_yaw)) >=
-      astar_segmented_pivot_threshold_)
-    {
-      std::size_t pivot_rejected_index = 0u;
-      AStarPathValidationFailure pivot_failure =
-        AStarPathValidationFailure::NONE;
-      if (!validateAStarPivotSweep(
-          planning_start.pose.position.x, planning_start.pose.position.y,
-          start_yaw, first_route_yaw, pivot_rejected_index, pivot_failure) &&
-        pivot_failure == AStarPathValidationFailure::FOOTPRINT)
-      {
-        initial_pivot_blocked = true;
-        RCLCPP_INFO(
-          logger_,
-          "A* initial pivot sweep preflight blocked: sample=%zu "
-          "yaw=%.3f->%.3f; prioritizing pivot-clearance departure",
-          pivot_rejected_index, start_yaw, first_route_yaw);
-      }
-    }
-  }
-
   if (astar_prefer_segmented_path_ && astar_segmented_fallback_enabled_) {
     nav_msgs::msg::Path segmented_path;
     std::size_t pivot_count = 0u;
@@ -1229,7 +1193,7 @@ OruGlobalPlanner::createPlan(
     if (buildAStarSegmentedFallbackPath(
         astar_path, planning_start, goal, segmented_path, pivot_count,
         segmented_max_curvature, segmented_rejected_index,
-        segmented_failure, &initial_pivot_blocked))
+        segmented_failure))
     {
       RCLCPP_INFO(
         logger_,
@@ -1632,7 +1596,7 @@ OruGlobalPlanner::createPlan(
   // Reeds-Shepp is attempted by the sparse kinodynamic core before it expands
   // bounded lattice states. It supplies reverse curves when a forward-only
   // B-spline cannot satisfy footprint or minimum-radius constraints.
-  if (astar_reeds_shepp_fallback_enabled_ && !initial_pivot_blocked) {
+  if (astar_reeds_shepp_fallback_enabled_) {
     throw_if_timed_out("reeds_shepp");
     const auto reversible_path = buildReedsSheppAnchorFallback(
       astar_path, planning_start, goal);
@@ -1661,11 +1625,6 @@ OruGlobalPlanner::createPlan(
     RCLCPP_WARN(
       logger_,
       "Sparse Reeds-Shepp/lattice fallback exhausted its bounded search budget");
-  } else if (astar_reeds_shepp_fallback_enabled_) {
-    RCLCPP_INFO(
-      logger_,
-      "Skipping Reeds-Shepp/lattice fallback: initial pivot sweep is blocked; "
-      "trying short pivot-clearance departure first");
   }
 
   if (astar_segmented_fallback_enabled_ && !astar_prefer_segmented_path_) {
@@ -1679,7 +1638,7 @@ OruGlobalPlanner::createPlan(
     if (buildAStarSegmentedFallbackPath(
         astar_path, planning_start, goal, segmented_path, pivot_count,
         segmented_max_curvature, segmented_rejected_index,
-        segmented_failure, &initial_pivot_blocked))
+        segmented_failure))
     {
       if (pivot_count <= astar_max_automatic_pivots_) {
         RCLCPP_WARN(
@@ -1708,11 +1667,7 @@ OruGlobalPlanner::createPlan(
     }
   }
 
-  const bool pivot_clearance_departure =
-    requested_start_footprint_clear && initial_pivot_blocked;
-  if (astar_departure_fallback_enabled_ &&
-    (!requested_start_footprint_clear || pivot_clearance_departure))
-  {
+  if (astar_departure_fallback_enabled_ && !requested_start_footprint_clear) {
     throw_if_timed_out("departure_fallback");
     nav_msgs::msg::Path departure_path;
     double departure_distance = 0.0;
@@ -1725,14 +1680,13 @@ OruGlobalPlanner::createPlan(
         astar_start_cell, start_yaw, goal_cell, planning_start, goal,
         departure_path, departure_distance, departure_pivots,
         departure_curvature, departure_rejected_index,
-        departure_failure, pivot_clearance_departure))
+        departure_failure))
     {
       if (departure_pivots <= astar_max_automatic_pivots_) {
         RCLCPP_WARN(
           logger_,
-          "A* smoothing/direct segmentation failed; accepted %s departure "
+          "A* smoothing and direct segmentation failed; accepted departure "
           "fallback: distance=%.2f m samples=%zu pivots=%zu",
-          pivot_clearance_departure ? "pivot-clearance" : "occupied-start",
           departure_distance, departure_path.poses.size(), departure_pivots);
         return departure_path;
       }
@@ -1751,12 +1705,13 @@ OruGlobalPlanner::createPlan(
       aStarValidationFailureName(departure_failure),
       departure_rejected_index);
   } else if (astar_departure_fallback_enabled_) {
-    // A clear start footprint only needs a departure move when its initial
-    // pivot sweep is blocked. Other curve/goal failures are left to anchors.
+    // Departure moves only solve a constrained start footprint. Once the
+    // requested start is clear, repeating full-map departure A* cannot repair
+    // a distant curve/goal failure and delays hierarchical anchor routing.
     RCLCPP_WARN(
       logger_,
-      "A* skipping departure fallback: start footprint and initial pivot "
-      "sweep are clear; deferring to hierarchical anchor routing");
+      "A* skipping departure fallback: requested start footprint is clear; "
+      "deferring to hierarchical anchor routing");
   }
 
   const double elapsed_sec = std::chrono::duration<double>(
@@ -3189,8 +3144,7 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
   std::size_t & pivot_count,
   double & max_curvature,
   std::size_t & rejected_index,
-  AStarPathValidationFailure & failure,
-  bool * initial_pivot_blocked) const
+  AStarPathValidationFailure & failure) const
 {
   segmented_path = nav_msgs::msg::Path();
   segmented_path.header = astar_path.header;
@@ -3260,9 +3214,6 @@ bool OruGlobalPlanner::buildAStarSegmentedFallbackPath(
         start.pose.position.x, start.pose.position.y,
         start_yaw, first_route_yaw, rejected_index, failure))
     {
-      if (initial_pivot_blocked != nullptr) {
-        *initial_pivot_blocked = true;
-      }
       RCLCPP_WARN(
         logger_,
         "A* segmented initial pivot rejected: reason=%s sample=%zu "
@@ -3579,8 +3530,7 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
   std::size_t & pivot_count,
   double & max_curvature,
   std::size_t & rejected_index,
-  AStarPathValidationFailure & failure,
-  bool pivot_clearance_departure) const
+  AStarPathValidationFailure & failure) const
 {
   (void)start_cell;
   departure_path = nav_msgs::msg::Path();
@@ -3641,16 +3591,10 @@ bool OruGlobalPlanner::buildAStarDepartureFallbackPath(
   const double preferred_sign = goal_projection >= 0.0 ? 1.0 : -1.0;
   const double middle_distance =
     0.5 * (astar_departure_min_distance_ + astar_departure_max_distance_);
-  // A blocked pivot sweep normally needs only enough translation to clear a
-  // nearby obstacle. Start with short forward/reverse moves in that case;
-  // an already occupied start keeps the established larger escape search.
-  // Both modes remain bounded to three global A* attempts.
-  const std::array<double, 3> requested_distances = pivot_clearance_departure ?
-    std::array<double, 3>{{
-      preferred_sign * astar_departure_min_distance_,
-      -preferred_sign * astar_departure_min_distance_,
-      -preferred_sign * middle_distance}} :
-    std::array<double, 3>{{
+  // Keep departure bounded to three global searches: try the direction that
+  // increases progress first, a shorter move in that direction, then the
+  // opposite direction as the reverse-escape fallback.
+  const std::array<double, 3> requested_distances{{
       preferred_sign * astar_departure_max_distance_,
       preferred_sign * middle_distance,
       -preferred_sign * astar_departure_max_distance_}};

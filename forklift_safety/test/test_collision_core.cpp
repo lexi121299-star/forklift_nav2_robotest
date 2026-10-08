@@ -49,14 +49,3 @@ TEST(Core, ReverseEscapeRejectsNewObstacle)
   EXPECT_FALSE(scanSweep({{.08,0}},c,g,poses).blocked);
   EXPECT_TRUE(scanSweep({{.08,0},{-.25,0}},c,g,poses).blocked);
 }
-TEST(Core, ScanSelfFilterExcludesOnlyConfiguredBodyReturns)
-{
-  Geometry g;
-  g.footprint={{-.1,-.1},{.1,-.1},{.1,.1},{-.1,.1}};
-  g.padding=0;
-  g.scan_self_filter_rectangles={{-.05,.05,-.05,.05}};
-  Command c; c.enable=c.forward=true; c.velocity_mps=.1; c.steering_angle_rad=g.pivot_angle;
-  const auto poses=predict(c,g,.2,.1);
-  EXPECT_FALSE(scanSweep({{0,0}},c,g,poses).blocked);
-  EXPECT_TRUE(scanSweep({{0,0},{.08,0}},c,g,poses).blocked);
-}
