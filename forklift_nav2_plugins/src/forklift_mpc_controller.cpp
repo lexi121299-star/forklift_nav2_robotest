@@ -124,6 +124,14 @@ void ForkliftMpcController::configure(
     }
   }
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".primitive_brake_clearance_m",
+    rclcpp::ParameterValue(primitive_brake_clearance_m_));
+  node->get_parameter(
+    name_ + ".primitive_brake_clearance_m", primitive_brake_clearance_m_);
+  if (!std::isfinite(primitive_brake_clearance_m_) || primitive_brake_clearance_m_ < 0.0) {
+    throw std::runtime_error("Invalid non-negative controller parameter: primitive_brake_clearance_m");
+  }
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".pivot_stop_velocity_threshold",
     rclcpp::ParameterValue(pivot_stop_velocity_threshold_));
   nav2_util::declare_parameter_if_not_declared(
@@ -2806,14 +2814,16 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       throw std::runtime_error("MPC pending pivot entry corridor missed; stop before crossing boundary");
     }
     const double terminal_limit = stoppingSpeedLimit(
-      std::max(0.0, remaining - 0.05), primitive_brake_reaction_time_sec_,
+      std::max(0.0, remaining - primitive_brake_clearance_m_), primitive_brake_reaction_time_sec_,
       primitive_brake_deceleration_mps2_);
     active_max_velocity = std::min(active_max_velocity, terminal_limit);
     active_max_reverse_velocity = std::min(active_max_reverse_velocity, terminal_limit);
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000,
-      "P6.6 pending pivot approach: remaining=%.3f lateral=%.3f max_v=%.3f",
-      remaining, segment_projection.cross_track, terminal_limit);
+      "P6.6 pending pivot approach: remaining=%.3f lateral=%.3f max_v=%.3f "
+      "reaction=%.2f clearance=%.2f",
+      remaining, segment_projection.cross_track, terminal_limit,
+      primitive_brake_reaction_time_sec_, primitive_brake_clearance_m_);
   }
   const double output_dt = last_navigation_output_ns_ > 0 ?
     (clock_->now().nanoseconds() - last_navigation_output_ns_) * 1e-9 : 0.1;

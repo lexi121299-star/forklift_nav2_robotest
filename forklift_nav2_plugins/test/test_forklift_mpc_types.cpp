@@ -298,6 +298,20 @@ TEST(ForkliftMpcTypes, ApproachSpeedCanStopBeforePrimitiveBoundary)
   EXPECT_DOUBLE_EQ(stoppingSpeedLimit(-.1, .5, .5), 0.0);
 }
 
+TEST(ForkliftMpcTypes, PrimitiveClearanceReservesDistanceBeforePivot)
+{
+  constexpr double remaining = 1.0;
+  constexpr double clearance = 0.5;
+  constexpr double reaction = 0.9;
+  constexpr double deceleration = 0.5;
+  const double velocity = stoppingSpeedLimit(remaining - clearance, reaction, deceleration);
+
+  EXPECT_LE(
+    velocity * reaction + velocity * velocity / (2.0 * deceleration) + clearance,
+    remaining + 1e-9);
+  EXPECT_LT(velocity, stoppingSpeedLimit(remaining - 0.05, 0.5, deceleration));
+}
+
 TEST(ForkliftMpcTypes, DelayedMinimumSpeedPlantStopsWithBoundedCorrection)
 {
   // Nonzero commands share one speed floor, with transport and motor lag.

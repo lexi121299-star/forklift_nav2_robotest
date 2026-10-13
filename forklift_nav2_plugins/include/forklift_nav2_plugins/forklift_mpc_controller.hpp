@@ -221,6 +221,7 @@ private:
   PivotBrakeState pivot_brake_state_;
   double primitive_brake_reaction_time_sec_{0.5};
   double primitive_brake_deceleration_mps2_{0.5};
+  double primitive_brake_clearance_m_{0.0};
   double pivot_entry_lateral_tolerance_m_{0.15};
   double pivot_stop_velocity_threshold_{0.02};
   double pivot_activation_distance_{0.20};
