@@ -633,6 +633,10 @@ planner_server:
       astar_start_pivot_preferred: false
       astar_start_pivot_threshold: 0.7853981634
       astar_pivot_collision_sample_angle: 0.0872664626
+      # If the shortest rotation clips a rack/pillar, verify the complete
+      # longer rotation before giving up or moving away from the current pose.
+      astar_alternate_pivot_enabled: true
+      astar_alternate_pivot_max_angle: 4.50
       # A valid grid route must not be discarded only because one global
       # B-spline leaves its free-space corridor. Fall back to validated straight
       # motion blocks joined by explicit, swept-footprint-checked pivots.
@@ -658,6 +662,18 @@ planner_server:
       # Kept for backward-compatible parameter files. Runtime fallback now
       # checks exactly max, midpoint and min distance under one total deadline.
       astar_departure_step_distance: 0.25
+      # A global 2D A* can choose a short route behind the vehicle even when
+      # the initial pivot is blocked by a rack. Before generic departure
+      # fallback, use a bounded forward-only Hybrid A* connector. The
+      # connector may hand off to a footprint-checked pivot after it reaches
+      # open space, so a valid forward escape is not rejected merely because
+      # the remaining global topology initially points behind the vehicle.
+      astar_forward_hybrid_connector_enabled: true
+      astar_forward_hybrid_connector_min_distance: 3.00
+      astar_forward_hybrid_connector_max_distance: 8.00
+      astar_forward_hybrid_connector_step_distance: 1.00
+      astar_forward_hybrid_connector_window_size: 12.00
+      astar_forward_hybrid_connector_max_planning_time_sec: 1.00
       # 1.0 m is adequate for a global connectivity check but too coarse to
       # feed B-spline trajectory generation at doors. 0.50 m remains bounded
       # on this map and preserves the turn geometry needed by GridBased.
@@ -806,6 +822,8 @@ planner_server:
       astar_bspline_sample_spacing: 0.05
       astar_segmented_pivot_threshold: 0.15
       astar_pivot_collision_sample_angle: 0.0872664626
+      astar_alternate_pivot_enabled: true
+      astar_alternate_pivot_max_angle: 4.50
       astar_goal_endpoint_tolerance: 0.28
       topology_search_resolution_m: 0.50
       planner_total_timeout_sec: 5.0

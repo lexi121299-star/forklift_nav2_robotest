@@ -218,6 +218,18 @@ private:
     std::size_t & rejected_index,
     AStarPathValidationFailure & failure,
     bool pivot_clearance_departure = false) const;
+  // A position-only A* route can begin behind a forklift whose immediate
+  // pivot is blocked. Use a bounded, forward-only Hybrid A* connector to
+  // reach a pose that joins a forward-going global route before trying the
+  // generic departure fallback.
+  bool buildAStarForwardHybridConnectorPath(
+    const Cell & goal_cell,
+    double start_yaw,
+    const geometry_msgs::msg::PoseStamped & start,
+    const geometry_msgs::msg::PoseStamped & goal,
+    nav_msgs::msg::Path & connector_path,
+    double & connector_distance,
+    AStarPathValidationFailure & failure) const;
   bool buildAStarInternalPivotRelocationPath(
     const nav_msgs::msg::Path & astar_path, const Cell & goal_cell,
     const geometry_msgs::msg::PoseStamped & start,
@@ -231,10 +243,22 @@ private:
   bool departurePathInitiallyBacktracks(
     const nav_msgs::msg::Path & path, double departure_x,
     double departure_y, double departure_yaw) const;
+  double aStarPivotHeadingChange(
+    double start_yaw, double target_yaw,
+    bool alternate_direction) const;
   bool validateAStarPivotSweep(
     double wx, double wy, double start_yaw, double target_yaw,
     std::size_t & rejected_index,
+    AStarPathValidationFailure & failure,
+    bool alternate_direction = false) const;
+  bool selectAStarPivotSweep(
+    double wx, double wy, double start_yaw, double target_yaw,
+    bool & alternate_direction, std::size_t & rejected_index,
     AStarPathValidationFailure & failure) const;
+  void appendAStarPivotSweepPoses(
+    nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & point,
+    double start_yaw, double target_yaw, bool alternate_direction,
+    bool append_start) const;
   const char * aStarValidationFailureName(
     AStarPathValidationFailure failure) const;
   bool planningTimedOut() const;
@@ -374,6 +398,10 @@ private:
   bool astar_start_pivot_preferred_{true};
   double astar_start_pivot_threshold_{0.7853981634};
   double astar_pivot_collision_sample_angle_{0.0872664626};
+  // When the shortest in-place sweep clips an obstacle, allow the longer
+  // direction only after validating every footprint sample along it.
+  bool astar_alternate_pivot_enabled_{true};
+  double astar_alternate_pivot_max_angle_{4.50};
   bool astar_segmented_fallback_enabled_{true};
   bool astar_prefer_segmented_path_{false};
   double astar_segmented_pivot_threshold_{0.20};
@@ -386,6 +414,12 @@ private:
   double astar_departure_min_distance_{0.50};
   double astar_departure_max_distance_{2.50};
   double astar_departure_step_distance_{0.25};
+  bool astar_forward_hybrid_connector_enabled_{true};
+  double astar_forward_hybrid_connector_min_distance_{3.0};
+  double astar_forward_hybrid_connector_max_distance_{8.0};
+  double astar_forward_hybrid_connector_step_distance_{1.0};
+  double astar_forward_hybrid_connector_window_size_{12.0};
+  double astar_forward_hybrid_connector_max_planning_time_sec_{1.0};
   double planner_total_timeout_sec_{10.0};
   // Full-resolution footprint A* is prohibitively expensive on the factory
   // map. The coarse search still tests every candidate pose with the complete

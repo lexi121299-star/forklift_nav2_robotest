@@ -519,6 +519,40 @@ TEST(ForkliftMpcTrajectory, ResamplingPreservesExplicitSamePositionPivot)
   EXPECT_FALSE(result.trajectory.back().pivot_motion);
 }
 
+TEST(ForkliftMpcTrajectory, LongPivotKeepsSignedYawProgression)
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  // 0 -> +90 degrees through the opposite, -270 degree direction. Quaternion
+  // yaws wrap at +/-pi, so the stored point-to-point deltas must retain the
+  // intended negative progression.
+  for (double yaw : {0.0, -0.25 * kPi, -0.5 * kPi, -0.75 * kPi,
+      -kPi, 0.75 * kPi, 0.5 * kPi})
+  {
+    path.poses.push_back(makePose(0.0, 0.0, yaw));
+  }
+  path.poses.push_back(makePose(0.0, 1.0, 0.5 * kPi));
+
+  MpcTrajectoryOptions options;
+  options.detect_pivot_turns = true;
+  options.enable_smoothing = true;
+  options.enable_resampling = true;
+  options.resample_spacing = 0.10;
+
+  const auto trajectory = pathToMpcTrajectory(
+    path, pivotVehicleModel(), options);
+  ASSERT_GE(trajectory.size(), 8u);
+
+  double accumulated_delta = 0.0;
+  for (std::size_t i = 1u; i < trajectory.size(); ++i) {
+    if (!trajectory[i].pivot_motion) {
+      break;
+    }
+    accumulated_delta += trajectory[i].pivot_yaw_delta;
+  }
+  EXPECT_NEAR(accumulated_delta, -1.5 * kPi, 1e-6);
+}
+
 TEST(ForkliftMpcTrajectory, TrajectoryToPathUsesEstimatedYaw)
 {
   nav_msgs::msg::Path path;

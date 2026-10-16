@@ -82,6 +82,10 @@ struct MpcTrajectoryPoint
   double acceleration_reference{0.0};
   bool reverse_motion{false};
   bool pivot_motion{false};
+  // Signed same-position yaw increment from the preceding path pose. Keeping
+  // this lets the controller preserve an explicitly planned long pivot instead
+  // of normalizing it back to the shortest angular direction.
+  double pivot_yaw_delta{0.0};
   double tangent_yaw{0.0};
   double body_heading_ref{0.0};
   double curvature_derivative{0.0};
