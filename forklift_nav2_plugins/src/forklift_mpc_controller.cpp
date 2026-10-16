@@ -2854,17 +2854,25 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
       throw std::runtime_error("MPC pending pivot entry corridor missed; stop before crossing boundary");
     }
+    // The pivot state machine takes ownership once the body is inside
+    // pivot_activation_distance_.  Stopping at primitive_brake_clearance_m_
+    // instead is incorrect when that clearance is larger than the activation
+    // radius: the vehicle reaches a zero-speed dead zone outside the pivot
+    // boundary and can never enter the maneuver.  Brake toward the activation
+    // boundary; the pivot controller then commands zero drive before it turns.
+    const double braking_distance = std::max(
+      0.0, remaining - pivot_activation_distance_);
     const double terminal_limit = stoppingSpeedLimit(
-      std::max(0.0, remaining - primitive_brake_clearance_m_), primitive_brake_reaction_time_sec_,
+      braking_distance, primitive_brake_reaction_time_sec_,
       primitive_brake_deceleration_mps2_);
     active_max_velocity = std::min(active_max_velocity, terminal_limit);
     active_max_reverse_velocity = std::min(active_max_reverse_velocity, terminal_limit);
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000,
       "P6.6 pending pivot approach: remaining=%.3f lateral=%.3f max_v=%.3f "
-      "reaction=%.2f clearance=%.2f",
+      "reaction=%.2f activation=%.2f braking_distance=%.3f",
       remaining, segment_projection.cross_track, terminal_limit,
-      primitive_brake_reaction_time_sec_, primitive_brake_clearance_m_);
+      primitive_brake_reaction_time_sec_, pivot_activation_distance_, braking_distance);
   }
   const double output_dt = last_navigation_output_ns_ > 0 ?
     (clock_->now().nanoseconds() - last_navigation_output_ns_) * 1e-9 : 0.1;

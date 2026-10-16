@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "forklift_oru_planner/oru_lattice_core.hpp"
+#include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_core/global_planner.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
@@ -19,6 +20,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "tf2_ros/buffer.h"
 
@@ -164,7 +166,8 @@ private:
   nav_msgs::msg::Path buildReedsSheppAnchorFallback(
     const nav_msgs::msg::Path & anchor_path,
     const geometry_msgs::msg::PoseStamped & start,
-    const geometry_msgs::msg::PoseStamped & goal) const;
+    const geometry_msgs::msg::PoseStamped & goal,
+    bool pivot_blocked_escape = false) const;
   bool validateAStarSmoothedPath(
     const nav_msgs::msg::Path & path,
     double & max_curvature,
@@ -184,6 +187,9 @@ private:
     const geometry_msgs::msg::PoseStamped::SharedPtr message);
   void palletExemptionActiveCallback(
     const std_msgs::msg::Bool::SharedPtr message);
+  void dynamicScanCallback(const sensor_msgs::msg::LaserScan::SharedPtr message);
+  bool dynamicScanFootprintTraversable(
+    double wx, double wy, double yaw) const;
   double sampledFootprintCostAtPose(double wx, double wy, double yaw) const;
   double fullFootprintCostAtPose(double wx, double wy, double yaw) const;
   double cachedAStarFootprintCost(
@@ -341,7 +347,8 @@ private:
   buildLatticePath(
     const LatticePath & lattice_path,
     const geometry_msgs::msg::PoseStamped & start,
-    const geometry_msgs::msg::PoseStamped & goal) const;
+    const geometry_msgs::msg::PoseStamped & goal,
+    bool stitch_primitive_geometry = false) const;
 
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   rclcpp::Logger logger_{rclcpp::get_logger("forklift_nav2_plugins")};
@@ -356,6 +363,8 @@ private:
   pallet_keepout_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
   pallet_exemption_active_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr
+  dynamic_scan_sub_;
 
   std::string name_;
   std::string global_frame_;
@@ -450,6 +459,21 @@ private:
   bool pallet_exemption_active_{false};
   geometry_msgs::msg::PoseStamped pallet_keepout_pose_;
   std::chrono::steady_clock::time_point pallet_keepout_received_time_{};
+
+  // The global costmap intentionally remains static.  Keep a small, fresh
+  // scan snapshot for validating the final drive/pivot candidates so a map
+  // valid pivot cannot be handed to the controller when its live sweep is
+  // occupied.
+  bool dynamic_scan_footprint_check_enabled_{false};
+  bool dynamic_scan_required_{false};
+  std::string dynamic_scan_topic_{"/scan"};
+  double dynamic_scan_timeout_sec_{0.70};
+  double dynamic_scan_max_range_m_{8.0};
+  double dynamic_scan_padding_m_{0.05};
+  mutable std::mutex dynamic_scan_mutex_;
+  bool dynamic_scan_received_{false};
+  std::vector<geometry_msgs::msg::Point> dynamic_scan_points_;
+  std::chrono::steady_clock::time_point dynamic_scan_received_time_{};
 
   bool use_lattice_planner_{false};
   bool lattice_fallback_to_astar_{false};
