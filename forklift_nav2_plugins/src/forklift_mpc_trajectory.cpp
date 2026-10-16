@@ -614,6 +614,7 @@ MpcTrajectory buildTrajectory(
     point.velocity_reference = default_speed;
     point.reverse_motion = reverse_motion;
     point.pivot_motion = pivot_motion;
+    point.pivot_yaw_delta = pivot_motion ? pivot_heading_delta : 0.0;
     point.tangent_yaw = tangent_yaw;
     point.body_heading_ref = theta;
     if (pivot_motion) {

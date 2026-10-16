@@ -1383,6 +1383,9 @@ void ForkliftMpcController::cleanup()
   pivot_settled_ = false;
   pivot_maneuver_active_ = false;
   active_pivot_index_ = std::numeric_limits<std::size_t>::max();
+  active_pivot_target_delta_ = 0.0;
+  active_pivot_progress_yaw_ = 0.0;
+  active_pivot_last_yaw_ = 0.0;
   pivot_step_target_active_ = false;
   pivot_step_direction_ = 0.0;
   pivot_step_hold_start_ns_ = 0;
@@ -1410,6 +1413,9 @@ void ForkliftMpcController::activate()
   pivot_settled_ = false;
   pivot_maneuver_active_ = false;
   active_pivot_index_ = std::numeric_limits<std::size_t>::max();
+  active_pivot_target_delta_ = 0.0;
+  active_pivot_progress_yaw_ = 0.0;
+  active_pivot_last_yaw_ = 0.0;
   pivot_step_target_active_ = false;
   pivot_step_direction_ = 0.0;
   pivot_step_hold_start_ns_ = 0;
@@ -1482,6 +1488,9 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
   pivot_settled_ = false;
   pivot_maneuver_active_ = false;
   active_pivot_index_ = std::numeric_limits<std::size_t>::max();
+  active_pivot_target_delta_ = 0.0;
+  active_pivot_progress_yaw_ = 0.0;
+  active_pivot_last_yaw_ = 0.0;
   pivot_step_target_active_ = false;
   pivot_step_direction_ = 0.0;
   pivot_step_hold_start_ns_ = 0;
@@ -1773,7 +1782,35 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     active_pivot_x_ = pivot_target_x;
     active_pivot_y_ = pivot_target_y;
     active_pivot_target_yaw_ = pivot_target_yaw;
-    active_pivot_remaining_yaw_ = normalizeAngle(pivot_target_yaw - current_state.theta);
+    // A same-position yaw chain can intentionally encode the long direction
+    // around an obstacle. Sum the signed per-pose yaw increments instead of
+    // deriving a fresh shortest angular error from the last quaternion.
+    std::size_t pivot_block_start = pivot_target_index;
+    while (pivot_block_start > 0u &&
+      transformed_trajectory[pivot_block_start].pivot_motion &&
+      std::hypot(
+        transformed_trajectory[pivot_block_start].state.x -
+        transformed_trajectory[pivot_block_start - 1u].state.x,
+        transformed_trajectory[pivot_block_start].state.y -
+        transformed_trajectory[pivot_block_start - 1u].state.y) <= 1e-4)
+    {
+      --pivot_block_start;
+    }
+    double planned_pivot_delta = 0.0;
+    for (std::size_t i = pivot_block_start + 1u;
+      i <= pivot_target_index; ++i)
+    {
+      planned_pivot_delta += transformed_trajectory[i].pivot_yaw_delta;
+    }
+    if (std::abs(planned_pivot_delta) <= 1e-6) {
+      planned_pivot_delta = normalizeAngle(
+        pivot_target_yaw - transformed_trajectory[pivot_block_start].state.theta);
+    }
+    active_pivot_target_delta_ = planned_pivot_delta + normalizeAngle(
+      transformed_trajectory[pivot_block_start].state.theta - current_state.theta);
+    active_pivot_progress_yaw_ = 0.0;
+    active_pivot_last_yaw_ = current_state.theta;
+    active_pivot_remaining_yaw_ = active_pivot_target_delta_;
     active_pivot_departure_steering_ = preview_departure_steering;
     post_pivot_capture_available_ = post_pivot_capture_enabled_ &&
       hasStraightPostPivotCapture(
@@ -1788,8 +1825,10 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     RCLCPP_INFO(
       logger_,
       "P6.5a pivot maneuver latched: index=%zu target_yaw=%.3f "
-      "departure_steering=%.3f capture=%s activation_error=%.3f",
+      "planned_delta=%.3f departure_steering=%.3f capture=%s "
+      "activation_error=%.3f",
       active_pivot_index_, active_pivot_target_yaw_,
+      active_pivot_target_delta_,
       active_pivot_departure_steering_,
       post_pivot_capture_available_ ? "enabled" : "fallback_to_mpc",
       pivot_activation_error);
@@ -2248,9 +2287,11 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       return zeroCommand(pose);
     }
 
-    active_pivot_remaining_yaw_ = continuousPivotError(
-      normalizeAngle(active_pivot_target_yaw_ - current_state.theta),
-      active_pivot_remaining_yaw_);
+    active_pivot_progress_yaw_ += normalizeAngle(
+      current_state.theta - active_pivot_last_yaw_);
+    active_pivot_last_yaw_ = current_state.theta;
+    active_pivot_remaining_yaw_ =
+      active_pivot_target_delta_ - active_pivot_progress_yaw_;
     const double heading_error = active_pivot_remaining_yaw_;
     const int64_t now_ns = clock_->now().nanoseconds();
     const int previous_corrections = pivot_brake_state_.corrections;
@@ -2813,17 +2854,25 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
       throw std::runtime_error("MPC pending pivot entry corridor missed; stop before crossing boundary");
     }
+    // The pivot state machine takes ownership once the body is inside
+    // pivot_activation_distance_.  Stopping at primitive_brake_clearance_m_
+    // instead is incorrect when that clearance is larger than the activation
+    // radius: the vehicle reaches a zero-speed dead zone outside the pivot
+    // boundary and can never enter the maneuver.  Brake toward the activation
+    // boundary; the pivot controller then commands zero drive before it turns.
+    const double braking_distance = std::max(
+      0.0, remaining - pivot_activation_distance_);
     const double terminal_limit = stoppingSpeedLimit(
-      std::max(0.0, remaining - primitive_brake_clearance_m_), primitive_brake_reaction_time_sec_,
+      braking_distance, primitive_brake_reaction_time_sec_,
       primitive_brake_deceleration_mps2_);
     active_max_velocity = std::min(active_max_velocity, terminal_limit);
     active_max_reverse_velocity = std::min(active_max_reverse_velocity, terminal_limit);
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000,
       "P6.6 pending pivot approach: remaining=%.3f lateral=%.3f max_v=%.3f "
-      "reaction=%.2f clearance=%.2f",
+      "reaction=%.2f activation=%.2f braking_distance=%.3f",
       remaining, segment_projection.cross_track, terminal_limit,
-      primitive_brake_reaction_time_sec_, primitive_brake_clearance_m_);
+      primitive_brake_reaction_time_sec_, pivot_activation_distance_, braking_distance);
   }
   const double output_dt = last_navigation_output_ns_ > 0 ?
     (clock_->now().nanoseconds() - last_navigation_output_ns_) * 1e-9 : 0.1;

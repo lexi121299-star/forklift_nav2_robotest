@@ -267,6 +267,9 @@ private:
   double active_pivot_y_{0.0};
   double active_pivot_target_yaw_{0.0};
   double active_pivot_remaining_yaw_{0.0};
+  double active_pivot_target_delta_{0.0};
+  double active_pivot_progress_yaw_{0.0};
+  double active_pivot_last_yaw_{0.0};
   double active_pivot_departure_steering_{0.0};
   bool pivot_step_target_active_{false};
   bool pivot_step_drive_started_{false};

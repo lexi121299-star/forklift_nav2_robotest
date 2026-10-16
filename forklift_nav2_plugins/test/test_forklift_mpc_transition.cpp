@@ -83,6 +83,14 @@ public:
   static bool recovering(const ForkliftMpcController & c) {return c.post_pivot_recovery_active_;}
   static bool pivoting(const ForkliftMpcController & c) {return c.pivot_maneuver_active_;}
   static void adjacentPivots(ForkliftMpcController & c) {c.completed_pivot_left_preview_ = false;}
+  static void pendingPivotBrakeParameters(
+    ForkliftMpcController & c, double activation_distance, double clearance)
+  {
+    c.pivot_activation_distance_ = activation_distance;
+    c.primitive_brake_clearance_m_ = clearance;
+    c.primitive_brake_reaction_time_sec_ = .5;
+    c.primitive_brake_deceleration_mps2_ = .5;
+  }
   static void expiredWallClock(ForkliftMpcController & c)
   {
     c.post_pivot_recovery_timeout_sec_ = .1;
@@ -417,6 +425,20 @@ TEST(ForkliftMpcTransition, OutsidePivotEntryCorridorStopsBeforeBoundary)
     EXPECT_NE(std::string(error.what()).find("entry corridor missed"), std::string::npos);
   }
   EXPECT_FALSE(ForkliftMpcControllerTestAccess::pivoting(c));
+}
+
+TEST(ForkliftMpcTransition, PendingPivotBrakeReachesActivationBoundary)
+{
+  ForkliftMpcController c;
+  ForkliftMpcControllerTestAccess::setup(c);
+  ForkliftMpcControllerTestAccess::pendingPivotBrakeParameters(c, .35, .50);
+
+  // The old clearance-based limit was zero at 0.50 m remaining and parked the
+  // vehicle outside the 0.35 m pivot activation radius. The approach must
+  // retain a positive speed until the pivot state machine can take over.
+  const auto cmd = ForkliftMpcControllerTestAccess::run(c, 4.50, .03);
+  EXPECT_FALSE(ForkliftMpcControllerTestAccess::pivoting(c));
+  EXPECT_GT(cmd.twist.linear.x, 0.0);
 }
 
 TEST(ForkliftMpcTransition, SteeringReturnCannotReleaseWhileBodyRotates)

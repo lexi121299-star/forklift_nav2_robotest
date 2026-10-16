@@ -178,11 +178,14 @@ controller_server:
       pivot_brake_reaction_time_sec: 0.30
       pivot_brake_deceleration_radps2: 0.20
       pivot_brake_margin_rad: 0.01
-      # Brake before a pending pivot using the same reaction time and clearance
-      # model as Safety Gate. Keep the lower controller deceleration estimate so
-      # the controller begins slowing before Safety Gate must intervene.
+      # Brake before a pending pivot using the controller's conservative reaction
+      # and deceleration estimate. The actual stop boundary is the pivot
+      # activation radius, so the controller can hand control to the pivot state
+      # machine instead of stopping outside it.
       primitive_brake_reaction_time_sec: 0.90
       primitive_brake_deceleration_mps2: 0.50
+      # Retained for launch-file compatibility. Pivot approach braking now ends
+      # at pivot_activation_distance rather than this generic clearance.
       primitive_brake_clearance_m: 0.50
       pivot_entry_lateral_tolerance_m: 0.15
       pivot_stop_velocity_threshold: 0.02
@@ -591,6 +594,16 @@ planner_server:
       pallet_keepout_length_m: 1.80
       pallet_keepout_width_m: 1.60
       pallet_keepout_padding_m: 0.10
+      # Keep global topology on the static map, but reject final drive and
+      # pivot candidates when the fresh live scan intersects the complete
+      # forklift footprint. This prevents a map-valid pivot from reaching the
+      # controller when its real sweep is occupied.
+      dynamic_scan_footprint_check_enabled: true
+      dynamic_scan_required: true
+      dynamic_scan_topic: /scan
+      dynamic_scan_timeout_sec: 0.70
+      dynamic_scan_max_range_m: 8.0
+      dynamic_scan_padding_m: 0.05
       cost_travel_multiplier: 2.0
       # Penalize the highest inflation cost touched by the complete footprint,
       # not only the base_link center cell. This moves A* away from racks while
@@ -633,6 +646,10 @@ planner_server:
       astar_start_pivot_preferred: false
       astar_start_pivot_threshold: 0.7853981634
       astar_pivot_collision_sample_angle: 0.0872664626
+      # If the shortest rotation clips a rack/pillar, verify the complete
+      # longer rotation before giving up or moving away from the current pose.
+      astar_alternate_pivot_enabled: true
+      astar_alternate_pivot_max_angle: 4.50
       # A valid grid route must not be discarded only because one global
       # B-spline leaves its free-space corridor. Fall back to validated straight
       # motion blocks joined by explicit, swept-footprint-checked pivots.
@@ -642,9 +659,9 @@ planner_server:
       # departure retries for routes that are naturally segmented.
       astar_prefer_segmented_path: false
       astar_segmented_pivot_threshold: 0.15
-      # A multi-pivot route is hard to execute reliably at a doorway. Reject
-      # it here so Task Manager can follow sparse TopologyOnly anchors.
-      astar_max_automatic_pivots: 1
+      # Allow a compact route with two fully swept-footprint-validated pivots.
+      # More complex routes still fall back to sparse TopologyOnly anchors.
+      astar_max_automatic_pivots: 2
       # Remove only a sharp terminal dogleg after the path is already inside
       # the 0.30 m controller goal tolerance. Straight final approaches still
       # run to the selected goal, while tiny endpoint pivots are avoided.
@@ -658,6 +675,15 @@ planner_server:
       # Kept for backward-compatible parameter files. Runtime fallback now
       # checks exactly max, midpoint and min distance under one total deadline.
       astar_departure_step_distance: 0.25
+      # A scan-blocked pivot first tries bounded forward arc escapes, then
+      # reverse arc escapes. Every candidate is scan + complete-footprint
+      # checked before it is allowed to reconnect to the global route.
+      astar_forward_hybrid_connector_enabled: true
+      astar_forward_hybrid_connector_min_distance: 0.75
+      astar_forward_hybrid_connector_max_distance: 8.00
+      astar_forward_hybrid_connector_step_distance: 1.00
+      astar_forward_hybrid_connector_window_size: 12.00
+      astar_forward_hybrid_connector_max_planning_time_sec: 1.00
       # 1.0 m is adequate for a global connectivity check but too coarse to
       # feed B-spline trajectory generation at doors. 0.50 m remains bounded
       # on this map and preserves the turn geometry needed by GridBased.
@@ -806,6 +832,8 @@ planner_server:
       astar_bspline_sample_spacing: 0.05
       astar_segmented_pivot_threshold: 0.15
       astar_pivot_collision_sample_angle: 0.0872664626
+      astar_alternate_pivot_enabled: true
+      astar_alternate_pivot_max_angle: 4.50
       astar_goal_endpoint_tolerance: 0.28
       topology_search_resolution_m: 0.50
       planner_total_timeout_sec: 5.0

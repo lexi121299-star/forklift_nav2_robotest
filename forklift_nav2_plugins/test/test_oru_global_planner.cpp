@@ -215,10 +215,49 @@ public:
     planner.pallet_keepout_received_time_ = std::chrono::steady_clock::now();
   }
 
+  static void setAlternatePivotMaxAngle(
+    OruGlobalPlanner & planner, double max_angle)
+  {
+    planner.astar_alternate_pivot_enabled_ = true;
+    planner.astar_alternate_pivot_max_angle_ = max_angle;
+  }
+
   static bool pointInsidePalletKeepout(
     const OruGlobalPlanner & planner, double x, double y)
   {
     return planner.pointInsideActivePalletKeepout(x, y);
+  }
+
+  static void setDynamicScanPoints(
+    OruGlobalPlanner & planner,
+    const std::vector<geometry_msgs::msg::Point> & points)
+  {
+    std::lock_guard<std::mutex> lock(planner.dynamic_scan_mutex_);
+    planner.topology_only_ = false;
+    planner.dynamic_scan_footprint_check_enabled_ = true;
+    planner.dynamic_scan_required_ = true;
+    planner.dynamic_scan_timeout_sec_ = 1.0;
+    planner.dynamic_scan_padding_m_ = 0.05;
+    planner.footprint_.clear();
+    const auto append_point = [&planner](double x, double y) {
+        geometry_msgs::msg::Point point;
+        point.x = x;
+        point.y = y;
+        planner.footprint_.push_back(point);
+      };
+    append_point(1.70, 0.60);
+    append_point(1.70, -0.60);
+    append_point(-1.59, -0.60);
+    append_point(-1.59, 0.60);
+    planner.dynamic_scan_points_ = points;
+    planner.dynamic_scan_received_ = true;
+    planner.dynamic_scan_received_time_ = std::chrono::steady_clock::now();
+  }
+
+  static bool dynamicScanFootprintTraversable(
+    const OruGlobalPlanner & planner, double x, double y, double yaw)
+  {
+    return planner.dynamicScanFootprintTraversable(x, y, yaw);
   }
 
   static std::vector<CellPoint> searchAStar(
@@ -1298,6 +1337,38 @@ TEST(OruGlobalPlanner, AStarSegmentedFallbackReportsBlockedInitialPivot) {
   EXPECT_TRUE(initial_pivot_blocked);
 }
 
+TEST(OruGlobalPlanner, AStarSegmentedFallbackUsesAlternatePivotDirection) {
+  nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableRectangularFootprintCollisionCheck(
+    planner, -0.20, 0.50, -0.20, 0.20);
+  // The obstacle lies only inside the clockwise 0 -> +90 degree footprint
+  // sweep. The counter-clockwise 270 degree sweep remains clear.
+  OruGlobalPlannerTestAccess::setAlternatePivotMaxAngle(
+    planner, 2.0 * kPlannerTestPi - 0.01);
+
+  unsigned int obstacle_x = 0u;
+  unsigned int obstacle_y = 0u;
+  ASSERT_TRUE(costmap.worldToMap(2.30, 2.30, obstacle_x, obstacle_y));
+  costmap.setCost(
+    obstacle_x, obstacle_y, nav2_costmap_2d::LETHAL_OBSTACLE);
+
+  bool valid = false;
+  std::size_t pivot_count = 0u;
+  const auto path =
+    OruGlobalPlannerTestAccess::buildAStarSegmentedFallbackPath(
+    planner, {{2.0, 2.0}, {2.0, 5.0}}, 0.0, valid, pivot_count);
+
+  ASSERT_TRUE(valid);
+  EXPECT_EQ(pivot_count, 1u);
+  ASSERT_GT(path.poses.size(), 4u);
+  const double first_step =
+    tf2::getYaw(path.poses[1].pose.orientation) -
+    tf2::getYaw(path.poses[0].pose.orientation);
+  EXPECT_LT(first_step, 0.0);
+}
+
 TEST(OruGlobalPlanner, AStarRelocatesBlockedInternalPivotIntoAisle) {
   nav2_costmap_2d::Costmap2D costmap(240, 240, 0.05, 0.0, 0.0);
   OruGlobalPlanner planner;
@@ -1688,6 +1759,28 @@ TEST(OruGlobalPlanner, LatticeHeuristicPenalizesGoalHeadingError) {
   EXPECT_GT(
     OruGlobalPlannerTestAccess::latticeHeuristic(planner, 4, 0.0),
     OruGlobalPlannerTestAccess::latticeHeuristic(planner, 0, 0.0));
+}
+
+TEST(OruGlobalPlanner, DynamicScanRejectsFootprintAndPaddingHits) {
+  nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+
+  geometry_msgs::msg::Point front_hit;
+  front_hit.x = 1.73;
+  front_hit.y = 0.0;
+  OruGlobalPlannerTestAccess::setDynamicScanPoints(planner, {front_hit});
+  EXPECT_FALSE(
+    OruGlobalPlannerTestAccess::dynamicScanFootprintTraversable(
+      planner, 0.0, 0.0, 0.0));
+
+  geometry_msgs::msg::Point clear_point;
+  clear_point.x = 1.80;
+  clear_point.y = 0.0;
+  OruGlobalPlannerTestAccess::setDynamicScanPoints(planner, {clear_point});
+  EXPECT_TRUE(
+    OruGlobalPlannerTestAccess::dynamicScanFootprintTraversable(
+      planner, 0.0, 0.0, 0.0));
 }
 
 } // namespace
