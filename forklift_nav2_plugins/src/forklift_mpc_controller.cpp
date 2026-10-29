@@ -1896,7 +1896,12 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     if (std::abs(steering_error) > new_goal_steering_tolerance_) {
       new_goal_steering_ready_ns_ = 0;
       last_steering_angle_ = steering_target;
-      publishControlCommand(0.0, steering_target, pose.header.frame_id);
+      // The vehicle controller accepts a zero-RPM steering-only command, but
+      // does not move its steering actuator while the brake bit is asserted.
+      // Keep the drivetrain stationary without applying the brake bit while
+      // waiting for the steering feedback to reach the path reference.
+      publishControlCommand(
+        0.0, steering_target, pose.header.frame_id, false);
       RCLCPP_INFO_THROTTLE(
         logger_, *clock_, 1000,
         "P6.5b new-goal pre-steer: holding stop while steering "
@@ -1913,7 +1918,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       static_cast<double>(now_ns - new_goal_steering_ready_ns_) * 1e-9;
     if (ready_elapsed_sec < new_goal_steering_hold_duration_sec_) {
       last_steering_angle_ = steering_target;
-      publishControlCommand(0.0, steering_target, pose.header.frame_id);
+      publishControlCommand(
+        0.0, steering_target, pose.header.frame_id, false);
       return zeroCommand(pose);
     }
     new_goal_steering_settle_active_ = false;
@@ -3626,7 +3632,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::zeroCommand(
 }
 
 void ForkliftMpcController::publishControlCommand(
-  double velocity, double steering, const std::string & frame_id) const
+  double velocity, double steering, const std::string & frame_id,
+  bool brake_when_stopped) const
 {
   last_navigation_output_velocity_ = vehicle_model_.isPivotTurnCommand({velocity, steering}) ?
     0.0 : velocity;
@@ -3644,7 +3651,7 @@ void ForkliftMpcController::publishControlCommand(
   command.header.stamp = clock_->now();
   command.header.frame_id = frame_id;
   command.enable = true;
-  command.brake = speed < 1e-4;
+  command.brake = brake_when_stopped && speed < 1e-4;
   command.forward = clamped.velocity > 1e-4;
   command.reverse = clamped.velocity < -1e-4;
   command.velocity_mps = speed;

@@ -103,7 +103,8 @@ private:
   zeroCommand(const geometry_msgs::msg::PoseStamped & pose) const;
   void publishControlCommand(
     double velocity, double steering,
-    const std::string & frame_id) const;
+    const std::string & frame_id,
+    bool brake_when_stopped = true) const;
   void publishControllerDebug(
     const geometry_msgs::msg::PoseStamped & pose,
     const MpcSegmentProjection & projection,

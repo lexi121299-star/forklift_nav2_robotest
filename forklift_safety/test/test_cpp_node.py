@@ -34,18 +34,22 @@ def native(request):
         status_topic=prefix+'/status', scan_topic=prefix+'/scan', costmap_topic=prefix+'/grid',
         localization_topic=prefix+'/odom', vehicle_state_topic=prefix+'/vehicle',
         recovery_twist_topic=prefix+'/twist', fault_state_topic=prefix+'/fault',
-        pallet_exemption_pose_topic=prefix+'/target', pallet_exemption_active_topic=prefix+'/active').items():
+        pallet_exemption_pose_topic=prefix+'/target', pallet_exemption_active_topic=prefix+'/active',
+        pallet_egress_active_topic=prefix+'/egress').items():
         args += ['-p', key+':='+value]
     output = tempfile.TemporaryFile(mode='w+')
     process = subprocess.Popen(args, stdout=output, stderr=output)
     publishers = {name: node.create_publisher(kind, prefix+'/'+name, 1) for name,kind in
         [('raw',ForkliftControlCommand),('scan',LaserScan),('grid',Costmap),
-         ('odom',Odometry),('vehicle',ForkliftVehicleState),('target',PoseStamped),('active',Bool)]}
+         ('odom',Odometry),('vehicle',ForkliftVehicleState),('target',PoseStamped),
+         ('active',Bool),('egress',Bool)]}
     commands, reasons = [], []
     subscriptions = [node.create_subscription(ForkliftControlCommand,prefix+'/out',commands.append,100),
                      node.create_subscription(String,prefix+'/status',lambda m: reasons.append(m.data),100)]
 
-    def cycle(duration, obstacle=False, stale=False, stop=False, pallet=False, rear_range=1.8):
+    def cycle(duration, obstacle=False, stale=False, stop=False, pallet=False, egress=False,
+              forward_pallet=False, rear_range=1.8, target_x=-1.8,
+              command_speed=None, vehicle_speed=0.):
         end = time.monotonic()+duration
         while time.monotonic()<end:
             stamp=node.get_clock().now().to_msg()
@@ -62,9 +66,10 @@ def native(request):
             if pallet:
                 scan.ranges[0]=rear_range
                 target=PoseStamped(); target.header.stamp=stamp; target.header.frame_id='base_link'
-                target.pose.position.x=-1.8; target.pose.orientation.w=1.
+                target.pose.position.x=target_x; target.pose.orientation.w=1.
                 publishers['target'].publish(target)
                 active=Bool(); active.data=True; publishers['active'].publish(active)
+                egress_msg=Bool(); egress_msg.data=egress; publishers['egress'].publish(egress_msg)
             publishers['scan'].publish(scan)
             grid=Costmap(); grid.header.frame_id='odom'; grid.header.stamp=stamp
             grid.metadata.size_x=grid.metadata.size_y=360; grid.metadata.resolution=.05
@@ -73,11 +78,14 @@ def native(request):
             if not scan_only:
                 publishers['grid'].publish(grid)
             state=ForkliftVehicleState(); state.enabled=state.auto_mode=state.interlock=True
+            state.velocity_mps=vehicle_speed
             state.header.stamp=stamp; publishers['vehicle'].publish(state)
             cmd=ForkliftControlCommand(); cmd.header.stamp=stamp
-            cmd.enable=not stop; cmd.brake=stop; cmd.forward=not stop and not pallet
-            cmd.reverse=not stop and pallet
-            cmd.velocity_mps=0. if stop else (.1 if pallet else .3); cmd.drive_rpm=0. if stop else 100.
+            cmd.enable=not stop; cmd.brake=stop; cmd.forward=not stop and (not pallet or egress or forward_pallet)
+            cmd.reverse=not stop and pallet and not egress and not forward_pallet
+            default_speed=.3 if egress else (.1 if pallet else .3)
+            cmd.velocity_mps=0. if stop else (default_speed if command_speed is None else command_speed)
+            cmd.drive_rpm=0. if stop else 100.
             publishers['raw'].publish(cmd)
             rclpy.spin_once(node,timeout_sec=.01)
             time.sleep(.02)
@@ -114,6 +122,7 @@ def test_raw_stop_cannot_be_overwritten_and_emergency_is_immediate(native):
     node,cycle,commands,reasons,_=native
     commands.clear(); cycle(.5,stop=True)
     assert all(c.brake and c.drive_rpm==0 for c in commands[-5:])
+
     client=node.create_client(SetEmergencyStop,'/forklift_safety/set_emergency_stop')
     assert client.wait_for_service(timeout_sec=2.)
     request=SetEmergencyStop.Request(); request.emergency_stop=True
@@ -123,6 +132,25 @@ def test_raw_stop_cannot_be_overwritten_and_emergency_is_immediate(native):
     commands.clear(); cycle(.6)
     assert 'emergency stop' in reasons
     assert all(c.brake and c.drive_rpm==0 for c in commands[-5:])
+
+
+@pytest.mark.parametrize('native', ['scan_only'], indirect=True)
+def test_stopped_release_rechecks_at_crawl_speed_across_controller_raw_stops(native):
+    _,cycle,commands,reasons,_=native
+    commands.clear(); reasons.clear()
+    # Latch an obstacle at travel speed, then prove the vehicle stopped.
+    cycle(.5,obstacle=True,command_speed=1.2,vehicle_speed=1.2)
+    assert 'scan footprint sweep collision' in reasons
+
+    # A pivot/pre-steer controller alternates a low crawl request with a raw
+    # stop. Release progress must survive those stops, while every low-speed
+    # request is still freshly sweep-checked before it can pass.
+    for _ in range(3):
+        cycle(.22,command_speed=.10,vehicle_speed=0.)
+        cycle(.22,stop=True,vehicle_speed=0.)
+    cycle(.30,command_speed=.10,vehicle_speed=0.)
+    moving=[c for c in commands if c.enable and not c.brake and c.forward and abs(c.velocity_mps-.10)<1e-6]
+    assert moving, reasons[-20:]
 
 
 def test_stale_odom_is_not_accepted_as_fresh(native):
@@ -178,3 +206,22 @@ def test_pallet_rectangle_does_not_exempt_other_obstacles(native):
     cycle(.8,pallet=True,rear_range=2.2)
     assert 'scan footprint sweep collision' in reasons
     assert commands[-1].brake
+
+
+@pytest.mark.parametrize('native', ['scan_only'], indirect=True)
+def test_pallet_egress_only_exempts_selected_target_at_crawl_speed(native):
+    _,cycle,commands,reasons,_=native
+    commands.clear(); reasons.clear()
+    # The selected pallet remains an obstacle during ordinary forward travel.
+    cycle(.6,pallet=True,egress=False,forward_pallet=True,rear_range=1.4,target_x=-1.4)
+    assert 'scan footprint sweep collision' in reasons
+    assert commands[-1].brake
+
+    commands.clear(); reasons.clear()
+    # The obstacle-release latch requires 0.5 s of distinct fresh scans after
+    # the prior stop before it re-enables motion.
+    cycle(1.4,pallet=True,egress=True,rear_range=1.4,target_x=-1.4)
+    moving=[c for c in commands if c.enable and not c.brake and c.forward]
+    assert moving, reasons[-10:]
+    assert max(c.velocity_mps for c in moving)<=.150001
+    assert 'scan footprint sweep collision' not in reasons[-5:]

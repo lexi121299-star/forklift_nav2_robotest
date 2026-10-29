@@ -1756,7 +1756,7 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('anchor_max_count', 20)
         self.declare_parameter('anchor_split_max_depth', 4)
         self.declare_parameter('anchor_segment_retry_count', 2)
-        self.declare_parameter('anchor_arrival_tolerance_m', 0.35)
+        self.declare_parameter('anchor_arrival_tolerance_m', 0.40)
         self.declare_parameter('anchor_arrival_speed_mps', 0.03)
         self.declare_parameter('anchor_arrival_settle_sec', 0.30)
         self.declare_parameter('anchor_arrival_transition_delay_sec', 0.25)
@@ -1791,7 +1791,7 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('pallet_turn_keepout_radius_m', 1.50)
         self.declare_parameter('pallet_turn_collision_cost_threshold', 254)
         self.declare_parameter('pallet_turn_blocked_wait_sec', 5.0)
-        self.declare_parameter('pallet_nav_arrival_tolerance_m', 0.35)
+        self.declare_parameter('pallet_nav_arrival_tolerance_m', 0.40)
         self.declare_parameter('pallet_nav_arrival_speed_mps', 0.03)
         self.declare_parameter('pallet_nav_arrival_settle_sec', 0.30)
         self.declare_parameter('pallet_pivot_verify_timeout_sec', 3.0)
@@ -1814,6 +1814,12 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('pallet_exemption_deactivation_distance_m', 4.5)
         self.declare_parameter('pallet_exemption_length_m', 1.80)
         self.declare_parameter('pallet_exemption_width_m', 1.60)
+        # Manual egress is intentionally independent from the final approach.
+        # It is only armed after a successful RViz pallet approach and always
+        # uses the selected pallet rectangle as its narrow exemption zone.
+        self.declare_parameter('pallet_egress_distance_m', 1.00)
+        self.declare_parameter('pallet_egress_speed_mps', 0.10)
+        self.declare_parameter('pallet_egress_timeout_sec', 20.0)
         self.declare_parameter('pallet_reachability_max_candidates', 32)
         self.declare_parameter('pallet_keepout_publish_settle_sec', 0.15)
 
@@ -1910,6 +1916,22 @@ class ForkliftTaskManager(Node):
             or self._pallet_exemption_width_m <= 0.0
         ):
             raise ValueError('pallet exemption dimensions must be positive')
+        self._pallet_egress_distance_m = float(
+            self.get_parameter('pallet_egress_distance_m').value
+        )
+        self._pallet_egress_speed_mps = float(
+            self.get_parameter('pallet_egress_speed_mps').value
+        )
+        self._pallet_egress_timeout_sec = float(
+            self.get_parameter('pallet_egress_timeout_sec').value
+        )
+        for name, value in (
+            ('pallet_egress_distance_m', self._pallet_egress_distance_m),
+            ('pallet_egress_speed_mps', self._pallet_egress_speed_mps),
+            ('pallet_egress_timeout_sec', self._pallet_egress_timeout_sec),
+        ):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError('{} must be finite and positive'.format(name))
         self._pallet_reachability_max_candidates = int(
             self.get_parameter('pallet_reachability_max_candidates').value
         )
@@ -2124,6 +2146,11 @@ class ForkliftTaskManager(Node):
             '/forklift/pallet_approach/exemption_active',
             status_qos,
         )
+        self._pallet_egress_active_pub = self.create_publisher(
+            Bool,
+            '/forklift/pallet_approach/egress_active',
+            status_qos,
+        )
         self._navigation_anchor_index_pub = self.create_publisher(
             Int32,
             '/forklift/navigation_anchor_index',
@@ -2132,6 +2159,9 @@ class ForkliftTaskManager(Node):
         self._pallet_exemption_target: Optional[PoseTarget] = None
         self._pallet_exemption_active = False
         self._pallet_exemption_phase_enabled = False
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_active = False
+        self._pallet_egress_token = 0
         self._pallet_selection_token = 0
         self._pallet_selection_active = False
         self._pallet_selection_deadline = 0.0
@@ -2221,6 +2251,9 @@ class ForkliftTaskManager(Node):
         self.create_service(Trigger, 'pause', self._pause)
         self.create_service(Trigger, 'resume', self._resume)
         self.create_service(Trigger, 'cancel', self._cancel)
+        self.create_service(
+            Trigger, '/forklift/pallet_approach/egress', self._pallet_egress
+        )
         self.create_subscription(
             PoseStamped,
             str(self.get_parameter('navigation_goal_topic').value),
@@ -2479,6 +2512,13 @@ class ForkliftTaskManager(Node):
             response.success = True
             response.message = 'pallet candidate selection canceled'
             return response
+        if self._pallet_egress_active:
+            self._finish_pallet_egress(
+                'pallet egress canceled by operator', cancel_motion=True
+            )
+            response.success = True
+            response.message = 'pallet egress canceled'
+            return response
         if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
             response.success, response.message = self._machine.cancel()
             return response
@@ -2516,6 +2556,75 @@ class ForkliftTaskManager(Node):
             and self._machine.active_route == 'rviz_pallet_approach'
         )
 
+    def _pallet_egress(self, _request, response):
+        """Retreat from a completed pallet approach at a bounded safe speed."""
+        if self._pallet_egress_active:
+            response.success = False
+            response.message = 'pallet egress is already active'
+            return response
+        if not self._pallet_egress_session_ready:
+            response.success = False
+            response.message = (
+                'no completed pallet approach session; approach a pallet first'
+            )
+            return response
+        if self._pallet_exemption_target is None:
+            response.success = False
+            response.message = 'selected pallet target is unavailable'
+            return response
+        if (
+            self._machine.state in {RUNNING, PAUSED, RECOVERING}
+            or self._pickup_machine.state in {RUNNING, PAUSED}
+        ):
+            response.success = False
+            response.message = 'pallet motion is busy'
+            return response
+
+        self._pallet_egress_token += 1
+        token = self._pallet_egress_token
+        self._pallet_egress_active = True
+        self._pallet_exemption_phase_enabled = True
+        # The target is intentionally close at this point. Do not wait for the
+        # ordinary approach-distance hysteresis before publishing the heartbeat.
+        self._pallet_exemption_active = True
+        self._publish_pallet_exemption()
+
+        def completed(success, message, _result) -> None:
+            if token != self._pallet_egress_token:
+                return
+            self._finish_pallet_egress(message, success=success)
+
+        self._pickup_devices.move_relative(
+            distance_m=self._pallet_egress_distance_m,
+            max_speed_mps=self._pallet_egress_speed_mps,
+            timeout_sec=self._pallet_egress_timeout_sec,
+            done_callback=completed,
+        )
+        response.success = True
+        response.message = (
+            'pallet egress started: {:.2f} m at {:.2f} m/s'.format(
+                self._pallet_egress_distance_m, self._pallet_egress_speed_mps
+            )
+        )
+        self.get_logger().info(response.message)
+        return response
+
+    def _finish_pallet_egress(
+        self,
+        message: str,
+        *,
+        success: bool = False,
+        cancel_motion: bool = False,
+    ) -> None:
+        self._pallet_egress_token += 1
+        if cancel_motion:
+            self._pickup_devices.cancel_all()
+        self._pallet_egress_active = False
+        self._pallet_egress_session_ready = False
+        self._clear_pallet_exemption()
+        level = self.get_logger().info if success else self.get_logger().warning
+        level('Pallet egress {}: {}.'.format('completed' if success else 'stopped', message))
+
     def _fail_pallet_selection(self, reason: str) -> None:
         self._pallet_selection_active = False
         self._nav2_navigator.cancel_path_goal()
@@ -2534,6 +2643,10 @@ class ForkliftTaskManager(Node):
             return
         if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
             self._machine.cancel('replaced by a newer navigation goal')
+        # A normal navigation request ends the completed-pallet session; an
+        # egress action must never be started while Nav2 owns motion control.
+        if self._pallet_exemption_target is not None:
+            self._clear_pallet_exemption()
         yaw = self._pose_yaw(pose)
         target = PoseTarget(
             name='navigation_goal',
@@ -2872,6 +2985,8 @@ class ForkliftTaskManager(Node):
         target: Optional[PoseTarget],
     ) -> None:
         self._pallet_exemption_target = target
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_active = False
         self._pallet_exemption_phase_enabled = False
         self._pallet_exemption_active = False
         self._publish_pallet_exemption()
@@ -2888,6 +3003,8 @@ class ForkliftTaskManager(Node):
         self._pallet_exemption_target = None
         self._pallet_exemption_phase_enabled = False
         self._pallet_exemption_active = False
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_active = False
         self._publish_pallet_exemption()
 
     def _update_pallet_exemption(self) -> None:
@@ -2945,6 +3062,13 @@ class ForkliftTaskManager(Node):
         active = Bool()
         active.data = target is not None and self._pallet_exemption_active
         self._pallet_exemption_active_pub.publish(active)
+        egress = Bool()
+        egress.data = (
+            target is not None
+            and self._pallet_exemption_active
+            and self._pallet_egress_active
+        )
+        self._pallet_egress_active_pub.publish(egress)
 
     def _on_global_costmap(self, msg: Costmap) -> None:
         self._latest_global_costmap = msg
@@ -3009,11 +3133,23 @@ class ForkliftTaskManager(Node):
             self._last_completed_station = self._station_name_from_segment(
                 machine.current_segment
             )
-        if (
-            machine.state in {SUCCEEDED, FAILED, IDLE}
-            and self._pallet_exemption_target is not None
-        ):
-            self._clear_pallet_exemption()
+        if machine.state in {SUCCEEDED, FAILED, IDLE}:
+            if (
+                machine.state == SUCCEEDED
+                and machine.active_route == 'rviz_pallet_approach'
+                and self._pallet_exemption_target is not None
+            ):
+                # Preserve only the selected pallet pose for the explicit
+                # PALLET_EGRESS service. The normal exemption remains off.
+                self._pallet_egress_session_ready = True
+                self._pallet_exemption_phase_enabled = False
+                self._pallet_exemption_active = False
+                self._publish_pallet_exemption()
+                self.get_logger().info(
+                    'Pallet approach complete; PALLET_EGRESS is available.'
+                )
+            elif self._pallet_exemption_target is not None:
+                self._clear_pallet_exemption()
         status = TaskStatus()
         status.state = machine.state
         status.active_route = machine.active_route

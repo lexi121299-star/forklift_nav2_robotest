@@ -399,6 +399,33 @@ def test_scan_sweep_reverse_escape_rejects_rear_or_new_obstacle():
     assert reason == 'scan reverse escape would hit a new obstacle'
 
 
+def test_scan_sweep_allows_validated_straight_forward_escape():
+    command = ForkliftControlCommand()
+    command.enable = True
+    command.forward = True
+    command.velocity_mps = 0.1
+    footprint = parse_footprint(
+        '[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]]'
+    )
+
+    collision, reason = scan_sweep_collision(
+        [(-0.08, 0.0)],
+        footprint,
+        command,
+        wheel_base=1.2,
+        pivot_turn_radius=0.6,
+        rear_axle_x_offset=0.0,
+        stopping_distance_m=0.3,
+        sample_spacing_m=0.05,
+        pivot_steering_angle_rad=math.pi / 2.0,
+        collision_padding_m=0.0,
+        allow_forward_escape=True,
+    )
+
+    assert collision is False
+    assert reason == 'scan forward escape clear'
+
+
 def test_parse_footprint_matches_foxy_yaml_string():
     footprint = parse_footprint(
         '[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]'

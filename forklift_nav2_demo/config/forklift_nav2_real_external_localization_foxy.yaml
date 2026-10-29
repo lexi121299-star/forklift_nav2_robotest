@@ -834,7 +834,9 @@ planner_server:
       astar_pivot_collision_sample_angle: 0.0872664626
       astar_alternate_pivot_enabled: true
       astar_alternate_pivot_max_angle: 4.50
-      astar_goal_endpoint_tolerance: 0.28
+      # Staging is validated against this exact pose by Task Manager.  Do not
+      # remove its terminal approach just to avoid a short A* dogleg.
+      astar_goal_endpoint_tolerance: 0.0
       topology_search_resolution_m: 0.50
       planner_total_timeout_sec: 5.0
       use_final_approach_orientation: false

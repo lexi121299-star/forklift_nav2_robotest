@@ -8,10 +8,11 @@ from forklift_msgs.msg import ForkliftVehicleState
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.time import Time
+from std_srvs.srv import Trigger
 
 from forklift_task_manager.route_model import PivotTarget, RelativeMoveTarget, RouteDefinition
-from forklift_task_manager.state_machine import TaskStateMachine, SUCCEEDED
-from forklift_task_manager.task_manager_node import TaskMotionAdapter
+from forklift_task_manager.state_machine import IDLE, TaskStateMachine, SUCCEEDED
+from forklift_task_manager.task_manager_node import ForkliftTaskManager, TaskMotionAdapter
 
 
 YAW_FAILURE = 'pivot stopped outside yaw tolerance; reverse correction disabled'
@@ -114,6 +115,45 @@ def test_recorded_map_pose_recovers_odom_yaw_failure_and_runs_final_approach(rig
     rig.moves[0]['done_callback'](True, 'relative motion completed', None)
     assert machine.state == SUCCEEDED
     assert rig.exemptions[-1] is None
+
+
+def test_manual_pallet_egress_requires_completed_session_and_clears_after_move():
+    manager = ForkliftTaskManager.__new__(ForkliftTaskManager)
+    moves, publications, clears, logs = [], [], [], []
+    manager._pallet_egress_active = False
+    manager._pallet_egress_session_ready = False
+    manager._pallet_exemption_target = object()
+    manager._pallet_egress_token = 0
+    manager._pallet_egress_distance_m = 1.0
+    manager._pallet_egress_speed_mps = 0.10
+    manager._pallet_egress_timeout_sec = 20.0
+    manager._pallet_exemption_phase_enabled = False
+    manager._pallet_exemption_active = False
+    manager._pallet_work_active = lambda: False
+    manager._machine = SimpleNamespace(state=IDLE)
+    manager._pickup_machine = SimpleNamespace(state=IDLE)
+    manager._pickup_devices = SimpleNamespace(
+        move_relative=lambda **kwargs: moves.append(kwargs),
+        cancel_all=lambda: None,
+    )
+    manager._publish_pallet_exemption = lambda: publications.append(
+        (manager._pallet_exemption_active, manager._pallet_egress_active)
+    )
+    manager._clear_pallet_exemption = lambda: clears.append(True)
+    manager.get_logger = lambda: SimpleNamespace(info=logs.append, warning=logs.append)
+
+    rejected = Trigger.Response()
+    assert not manager._pallet_egress(None, rejected).success
+
+    manager._pallet_egress_session_ready = True
+    accepted = Trigger.Response()
+    assert manager._pallet_egress(None, accepted).success
+    assert moves[0]['distance_m'] == pytest.approx(1.0)
+    assert moves[0]['max_speed_mps'] == pytest.approx(0.10)
+    assert publications[-1] == (True, True)
+
+    moves[0]['done_callback'](True, 'relative motion completed', None)
+    assert clears
 
 
 @pytest.mark.parametrize('message', [

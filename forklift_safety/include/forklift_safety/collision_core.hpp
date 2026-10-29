@@ -37,8 +37,9 @@ struct Geometry
   double pivot_deceleration{.15}, pivot_margin{.05};
   double horizon{1.}, minimum_step{.1};
   int threshold{253};
-  bool unknown_collision{true}, reverse_escape{true};
+  bool unknown_collision{true}, reverse_escape{true}, forward_escape{};
   double escape_speed{.15}, escape_steering{.05}, escape_min_x{};
+  double forward_escape_max_x{};
   // Static returns from the forklift body are fixed in base_link and must not
   // be treated as external obstacles while predicting a pivot sweep.
   std::vector<Rectangle> scan_self_filter_rectangles;
@@ -145,6 +146,22 @@ inline std::vector<Pose> pivotPoses(double commanded, double measured, const Geo
   }
   return poses;
 }
+inline bool directionalEscapeEligible(const std::vector<Point> & points,
+  const Command & cmd, const Geometry & g, const std::optional<Zone> & zone={})
+{
+  const int motion=direction(cmd);
+  if ((!((motion<0 && g.reverse_escape) || (motion>0 && g.forward_escape))) ||
+    std::abs(cmd.steering_angle_rad)>g.escape_steering+1e-9) {return false;}
+  const auto polygon=atPose(g.footprint,{});
+  bool overlap=false;
+  for (const auto point : points) {
+    if (exempt(point,zone) || !inside(point,polygon,g.padding)) {continue;}
+    overlap=true;
+    if ((motion<0 && point.x<g.escape_min_x) ||
+      (motion>0 && point.x>g.forward_escape_max_x)) {return false;}
+  }
+  return overlap;
+}
 inline Result scanSweep(const std::vector<Point> & input, const Command & cmd,
   const Geometry & g, const std::vector<Pose> & poses, const std::optional<Zone> & zone={})
 {
@@ -168,21 +185,24 @@ inline Result scanSweep(const std::vector<Point> & input, const Command & cmd,
       return result;
     };
   const auto initial=hits(poses.front());
-  bool escape=g.reverse_escape && direction(cmd)<0 && cmd.velocity_mps<=g.escape_speed+1e-9 &&
-    std::abs(cmd.steering_angle_rad)<=g.escape_steering+1e-9 && !initial.empty();
-  for (auto i : initial) {if (points[i].x<g.escape_min_x) {escape=false;}}
+  const int motion=direction(cmd);
+  const bool escape=cmd.velocity_mps<=g.escape_speed+1e-9 &&
+    directionalEscapeEligible(points,cmd,g,zone);
+  const char * const escape_name=motion<0 ? "scan reverse escape" : "scan forward escape";
   if (escape) {
     size_t previous=initial.size();
     for (size_t i=1;i<poses.size();++i) {
       const auto current=hits(poses[i]);
       if (!std::includes(initial.begin(),initial.end(),current.begin(),current.end())) {
-        return {true,"scan reverse escape would hit a new obstacle"};
+        return {true,std::string(escape_name)+" would hit a new obstacle"};
       }
-      if (current.size()>previous) {return {true,"scan reverse escape overlap is increasing"};}
+      if (current.size()>previous) {
+        return {true,std::string(escape_name)+" overlap is increasing"};
+      }
       previous=current.size();
     }
-    return previous ? Result{true,"scan reverse escape does not clear current overlap"} :
-           Result{false,"scan reverse escape clear"};
+    return previous ? Result{true,std::string(escape_name)+" does not clear current overlap"} :
+           Result{false,std::string(escape_name)+" clear"};
   }
   if (!initial.empty()) {return {true,"scan footprint sweep collision"};}
   for (size_t i=1;i<poses.size();++i) {if (!hits(poses[i]).empty()) {return {true,"scan footprint sweep collision"};}}
@@ -237,16 +257,36 @@ inline bool obstacleReason(const std::string & r)
 struct ReleaseState
 {
   bool active{}, ready{}, signature_set{};
-  double floor{}, clear_since{-1}, first_scan{}, first_map{}, steering{};
+  double floor{}, clear_since{-1}, stopped_since{-1}, first_scan{}, first_map{}, steering{};
   int travel{};
   void interrupt() {ready=false; clear_since=-1;}
   void prepare(int d,double steer,double threshold)
   {
     if (!signature_set || d!=travel || std::abs(steer-steering)>threshold) {
-      signature_set=true; travel=d; steering=steer; floor=0; interrupt();
+      signature_set=true; travel=d; steering=steer; floor=0; stopped_since=-1; interrupt();
     }
   }
-  void blocked(double speed) {active=true; floor=std::max(floor,speed); interrupt();}
+  void blocked(double speed)
+  {
+    active=true; floor=std::max(floor,speed); stopped_since=-1; interrupt();
+  }
+  // A collision initially keeps the braking envelope that created it. After
+  // feedback has proved the vehicle stopped, a crawl request may be checked
+  // against its own shorter envelope.
+  bool settle(double now,double measured_speed,double requested_speed,
+    double stopped_speed,double duration)
+  {
+    if (!active || requested_speed>=floor-1e-9 || measured_speed>stopped_speed) {
+      stopped_since=-1;
+      return false;
+    }
+    if (stopped_since<0 || now<stopped_since) {stopped_since=now; return false;}
+    if (now-stopped_since<duration) {return false;}
+    const double reduced=std::max(measured_speed,requested_speed);
+    if (reduced>=floor-1e-9) {return false;}
+    floor=reduced;
+    return true;
+  }
   bool clear(double now,double scan,double map,double duration)
   {
     if (!active) {return true;}
@@ -254,6 +294,6 @@ struct ReleaseState
     ready=now-clear_since>=duration && (scan<0 || scan!=first_scan) && (map<0 || map!=first_map);
     return ready;
   }
-  void commit() {if (ready) {active=false; floor=0; interrupt();}}
+  void commit() {if (ready) {active=false; floor=0; stopped_since=-1; interrupt();}}
 };
 }  // namespace forklift_safety

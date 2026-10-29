@@ -44,7 +44,10 @@ forklift_task_manager:
     # A non-final anchor may be accepted only after TF says base_link is close
     # and vehicle feedback has been stationary for this duration. This avoids
     # an otherwise-active Nav2 action blocking the remaining anchor queue.
-    anchor_arrival_tolerance_m: 0.35
+    # Localisation and Nav2 can differ by a few centimetres at a completed
+    # stop. Keep the hierarchy acceptance aligned with pallet staging so a
+    # 0.35 m boundary cannot abort before the pivot/final approach begins.
+    anchor_arrival_tolerance_m: 0.40
     anchor_arrival_speed_mps: 0.03
     # The physical stop is still required for an independent Nav2 anchor
     # goal, but keep the guard-owned handoff brief. This changes no planning
@@ -82,7 +85,9 @@ forklift_task_manager:
     pallet_alignment_runup_distance_m: 0.60
     pallet_final_approach_speed_mps: 0.10
     pallet_final_approach_timeout_sec: 60.0
-    pallet_max_start_position_error_m: 0.35
+    # The pivot still verifies the absolute pose and the final relative move
+    # remains low-speed. This matches the staging acceptance tolerance.
+    pallet_max_start_position_error_m: 0.40
     pallet_max_start_heading_error_rad: 0.20
     pallet_base_frame_id: base_link
 
@@ -105,7 +110,7 @@ forklift_task_manager:
     pallet_turn_blocked_wait_sec: 5.0
     # Accept the staging navigation segment once the vehicle is close and
     # stationary, even if Nav2 leaves its action active near the path endpoint.
-    pallet_nav_arrival_tolerance_m: 0.35
+    pallet_nav_arrival_tolerance_m: 0.40
     pallet_nav_arrival_speed_mps: 0.03
     pallet_nav_arrival_settle_sec: 0.30
     pallet_pivot_speed_mps: 0.12
@@ -127,6 +132,13 @@ forklift_task_manager:
     pallet_exemption_deactivation_distance_m: 4.5
     pallet_exemption_length_m: 1.80
     pallet_exemption_width_m: 1.60
+
+    # Manual retreat after a completed approach. It is exposed by the
+    # /forklift/pallet_approach/egress Trigger service and remains deliberately
+    # slower than normal navigation.
+    pallet_egress_distance_m: 1.00
+    pallet_egress_speed_mps: 0.10
+    pallet_egress_timeout_sec: 20.0
 
     # Check several locally clear staging candidates with ComputePathToPose.
     # The first globally reachable candidate is used for the pallet task.

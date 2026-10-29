@@ -5554,6 +5554,20 @@ OruGlobalPlanner::buildPath(
   }
 
   path.poses.front().pose.position = start.pose.position;
+  // A* operates on cell centres, but an untrimmed route that reaches the
+  // requested goal cell must retain the caller's exact endpoint.  This is
+  // especially important for pallet staging: the task manager validates the
+  // vehicle pose against the staging pose after Nav2 reports success.
+  unsigned int goal_mx = 0u;
+  unsigned int goal_my = 0u;
+  const bool ends_at_goal_cell =
+    costmap_->worldToMap(
+      goal.pose.position.x, goal.pose.position.y, goal_mx, goal_my) &&
+    cells.back().x == goal_mx && cells.back().y == goal_my;
+  if (ends_at_goal_cell) {
+    path.poses.back().pose.position = goal.pose.position;
+  }
+
   if (path.poses.size() == 1) {
     path.poses.front().pose.orientation = goal.pose.orientation;
     return path;

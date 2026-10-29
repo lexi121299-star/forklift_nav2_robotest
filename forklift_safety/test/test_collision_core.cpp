@@ -41,6 +41,17 @@ TEST(Core, DifferentManeuverRetainsLatchButResetsEnvelope)
   EXPECT_FALSE(obstacleReason("costmap coverage insufficient"));
   EXPECT_TRUE(obstacleReason("scan footprint sweep collision"));
 }
+TEST(Core, ReleaseEnvelopeOnlyShrinksAfterStoppedSettle)
+{
+  ReleaseState r; r.prepare(1,0,.15); r.blocked(1.4);
+  EXPECT_FALSE(r.settle(10,0,.10,.03,.25));
+  EXPECT_FALSE(r.settle(10.20,0,.10,.03,.25));
+  EXPECT_TRUE(r.settle(10.25,0,.10,.03,.25));
+  EXPECT_DOUBLE_EQ(r.floor,.10);
+  r.blocked(1.4);
+  EXPECT_FALSE(r.settle(11,.04,.10,.03,.25));
+  EXPECT_DOUBLE_EQ(r.floor,1.4);
+}
 TEST(Core, ReverseEscapeRejectsNewObstacle)
 {
   Geometry g; g.footprint={{-.1,-.1},{.1,-.1},{.1,.1},{-.1,.1}}; g.padding=0;
@@ -48,6 +59,23 @@ TEST(Core, ReverseEscapeRejectsNewObstacle)
   auto poses=predict(c,g,3,.5);
   EXPECT_FALSE(scanSweep({{.08,0}},c,g,poses).blocked);
   EXPECT_TRUE(scanSweep({{.08,0},{-.25,0}},c,g,poses).blocked);
+}
+TEST(Core, ForwardEscapeClearsRearOverlap)
+{
+  Geometry g; g.footprint={{-.1,-.1},{.1,-.1},{.1,.1},{-.1,.1}}; g.padding=0;
+  g.forward_escape=true;
+  Command c; c.enable=c.forward=true; c.velocity_mps=.1;
+  auto poses=predict(c,g,3,.5);
+  EXPECT_FALSE(scanSweep({{-.08,0}},c,g,poses).blocked);
+  EXPECT_TRUE(scanSweep({{-.08,0},{.25,0}},c,g,poses).blocked);
+}
+TEST(Core, DirectionalEscapeEligibilityRejectsWrongSide)
+{
+  Geometry g; g.footprint={{-.1,-.1},{.1,-.1},{.1,.1},{-.1,.1}}; g.padding=0;
+  g.forward_escape=true;
+  Command c; c.enable=c.forward=true; c.velocity_mps=.3;
+  EXPECT_TRUE(directionalEscapeEligible({{-.08,0}},c,g));
+  EXPECT_FALSE(directionalEscapeEligible({{.08,0}},c,g));
 }
 TEST(Core, ScanSelfFilterExcludesOnlyConfiguredBodyReturns)
 {
