@@ -18,6 +18,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ForkliftVehicleState.msg"
   "msg/ForkliftFaultState.msg"
   "msg/ForkliftIoState.msg"
+  "msg/ForkPositionCommand.msg"
+  "msg/ForkState.msg"
   "msg/TaskStatus.msg"
   "srv/GoToStation.srv"
   "srv/SetControlMode.srv"
