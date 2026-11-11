@@ -1,4 +1,8 @@
 slots:
+  # Template only. Replace the station pose in stations.yaml and the height
+  # below with surveyed, calibrated values before enabling real pickup tasks.
+  # level_index is the physical rack level N; scan height is computed as
+  # pick_height_m + scan_level_offset * level_pitch_m.
   slot_001:
     approach_station: slot_001_approach
     level_index: 1
@@ -9,6 +13,8 @@ slots:
     pick_height_m: 1.10
 
 pickup_defaults:
+  # Shared values until a slot needs a separately calibrated pickup height.
+  # Units: metres, seconds, and radians for tilt_rad.
   level_pitch_m: 0.55
   scan_level_offset: 3
   fork_insert_depth_m: 0.80

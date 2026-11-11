@@ -11,7 +11,7 @@ import pytest
 import rclpy
 from forklift_msgs.msg import ForkliftControlCommand, ForkliftVehicleState
 from forklift_msgs.srv import SetEmergencyStop
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from nav2_msgs.msg import Costmap
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
@@ -27,9 +27,12 @@ def native(request):
     node = rclpy.create_node('gate_test_' + uuid.uuid4().hex[:8])
     prefix = '/gate_test_' + uuid.uuid4().hex[:8]
     args = [executable, '--ros-args', '-p', 'use_sim_time:=false']
-    scan_only = getattr(request, 'param', '') == 'scan_only'
+    mode=getattr(request, 'param', '')
+    scan_only = mode.startswith('scan_only')
     if scan_only:
         args += ['-p', 'costmap_monitor_enabled:=false', '-p', 'costmap_collision_check_enabled:=false']
+    if mode=='scan_only_no_trajectory':
+        args += ['-p', 'trajectory_sweep_enabled:=false']
     for key, value in dict(raw_command_topic=prefix+'/raw', gated_command_topic=prefix+'/out',
         status_topic=prefix+'/status', scan_topic=prefix+'/scan', costmap_topic=prefix+'/grid',
         localization_topic=prefix+'/odom', vehicle_state_topic=prefix+'/vehicle',
@@ -37,19 +40,21 @@ def native(request):
         pallet_exemption_pose_topic=prefix+'/target', pallet_exemption_active_topic=prefix+'/active',
         pallet_egress_active_topic=prefix+'/egress').items():
         args += ['-p', key+':='+value]
+    args += ['-p', 'controller_trajectory_topic:='+prefix+'/reference']
     output = tempfile.TemporaryFile(mode='w+')
     process = subprocess.Popen(args, stdout=output, stderr=output)
     publishers = {name: node.create_publisher(kind, prefix+'/'+name, 1) for name,kind in
         [('raw',ForkliftControlCommand),('scan',LaserScan),('grid',Costmap),
          ('odom',Odometry),('vehicle',ForkliftVehicleState),('target',PoseStamped),
-         ('active',Bool),('egress',Bool)]}
+         ('active',Bool),('egress',Bool),('reference',Path)]}
     commands, reasons = [], []
     subscriptions = [node.create_subscription(ForkliftControlCommand,prefix+'/out',commands.append,100),
                      node.create_subscription(String,prefix+'/status',lambda m: reasons.append(m.data),100)]
 
     def cycle(duration, obstacle=False, stale=False, stop=False, pallet=False, egress=False,
               forward_pallet=False, rear_range=1.8, target_x=-1.8,
-              command_speed=None, vehicle_speed=0.):
+              command_speed=None, vehicle_speed=0., steering=0., obstacle_point=None,
+              reference=False, reference_age=0., reference_mismatch=False):
         end = time.monotonic()+duration
         while time.monotonic()<end:
             stamp=node.get_clock().now().to_msg()
@@ -63,6 +68,10 @@ def native(request):
             scan.range_min=.01; scan.range_max=8.; scan.ranges=[float('inf')]*721
             if obstacle:
                 scan.ranges[360]=1.
+            if obstacle_point:
+                x,y=obstacle_point
+                index=round((math.atan2(y,x)-scan.angle_min)/scan.angle_increment)
+                scan.ranges[index]=math.hypot(x,y)
             if pallet:
                 scan.ranges[0]=rear_range
                 target=PoseStamped(); target.header.stamp=stamp; target.header.frame_id='base_link'
@@ -79,6 +88,7 @@ def native(request):
                 publishers['grid'].publish(grid)
             state=ForkliftVehicleState(); state.enabled=state.auto_mode=state.interlock=True
             state.velocity_mps=vehicle_speed
+            state.steering_angle_rad=steering
             state.header.stamp=stamp; publishers['vehicle'].publish(state)
             cmd=ForkliftControlCommand(); cmd.header.stamp=stamp
             cmd.enable=not stop; cmd.brake=stop; cmd.forward=not stop and (not pallet or egress or forward_pallet)
@@ -86,6 +96,16 @@ def native(request):
             default_speed=.3 if egress else (.1 if pallet else .3)
             cmd.velocity_mps=0. if stop else (default_speed if command_speed is None else command_speed)
             cmd.drive_rpm=0. if stop else 100.
+            cmd.steering_angle_rad=steering
+            if reference:
+                path=Path(); path.header.frame_id='odom'; path.header.stamp=copy.deepcopy(stamp)
+                path.header.stamp.sec-=int(reference_age)
+                if reference_mismatch:
+                    path.header.stamp.nanosec=max(0,path.header.stamp.nanosec-1)
+                for i in range(81):
+                    p=PoseStamped(); p.pose.position.x=i*.025; p.pose.orientation.w=1.
+                    path.poses.append(p)
+                publishers['reference'].publish(path)
             publishers['raw'].publish(cmd)
             rclpy.spin_once(node,timeout_sec=.01)
             time.sleep(.02)
@@ -133,6 +153,39 @@ def test_raw_stop_cannot_be_overwritten_and_emergency_is_immediate(native):
     assert 'emergency stop' in reasons
     assert all(c.brake and c.drive_rpm==0 for c in commands[-5:])
 
+
+@pytest.mark.parametrize('native', ['scan_only'], indirect=True)
+def test_matched_trajectory_releases_curve_exit_but_keeps_real_collision(native):
+    _,cycle,commands,reasons,_=native
+    settings=dict(steering=-1.1, command_speed=.066, obstacle_point=(1.3,-1.84))
+    commands.clear(); reasons.clear(); cycle(.5,**settings)
+    assert 'scan footprint sweep collision' in reasons
+    commands.clear(); reasons.clear(); cycle(1.2,reference=True,**settings)
+    assert 'raw command' in reasons
+    assert any(c.enable and not c.brake and c.velocity_mps>0 for c in commands[-10:])
+    commands.clear(); reasons.clear()
+    cycle(.6,reference=True,steering=-1.1,command_speed=.066,obstacle=True)
+    assert 'scan footprint sweep collision' in reasons
+    assert all(c.brake and c.velocity_mps==0 for c in commands[-5:])
+
+
+@pytest.mark.parametrize('native', ['scan_only'], indirect=True)
+def test_unmatched_and_stale_trajectory_cannot_release_collision(native):
+    _,cycle,commands,reasons,_=native
+    settings=dict(steering=-1.1,command_speed=.066,obstacle_point=(1.3,-1.84),reference=True)
+    for extra in [dict(reference_mismatch=True),dict(reference_age=2.)]:
+        commands.clear(); reasons.clear(); cycle(.7,**settings,**extra)
+        assert 'scan footprint sweep collision' in reasons
+        assert all(c.brake for c in commands[-5:])
+
+
+@pytest.mark.parametrize('native', ['scan_only_no_trajectory'], indirect=True)
+def test_trajectory_feature_switch_restores_conservative_arc(native):
+    _,cycle,commands,reasons,_=native
+    commands.clear(); reasons.clear()
+    cycle(.8,steering=-1.1,command_speed=.066,obstacle_point=(1.3,-1.84),reference=True)
+    assert 'scan footprint sweep collision' in reasons
+    assert all(c.brake for c in commands[-5:])
 
 @pytest.mark.parametrize('native', ['scan_only'], indirect=True)
 def test_stopped_release_rechecks_at_crawl_speed_across_controller_raw_stops(native):

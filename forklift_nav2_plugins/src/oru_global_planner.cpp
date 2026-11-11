@@ -2273,6 +2273,15 @@ OruGlobalPlanner::simplifyAStarPath(
 
   max_lookahead = std::max(2u, max_lookahead);
 
+  // A* paid for clearance and route guidance. A purely collision-checked
+  // shortcut can erase that detour and put the smoothed route beside a rack.
+  // Integrate the same costs in metres, including along coarse topology edges.
+  std::vector<double> route_cost(cells.size(), 0.0);
+  for (std::size_t i = 1u; i < cells.size(); ++i) {
+    route_cost[i] = route_cost[i - 1u] +
+      aStarSegmentTraversalCost(cells[i - 1u], cells[i]);
+  }
+
   std::vector<Cell> simplified;
   simplified.reserve(cells.size());
   simplified.push_back(cells.front());
@@ -2283,10 +2292,15 @@ OruGlobalPlanner::simplifyAStarPath(
       cells.size() - 1,
       anchor + static_cast<std::size_t>(max_lookahead));
     std::size_t candidate = farthest;
-    while (candidate > anchor + 1 &&
-      !isAStarShortcutTraversable(
-        cells[anchor], cells[candidate], &cells.front()))
-    {
+    while (candidate > anchor + 1) {
+      const double original_cost = route_cost[candidate] - route_cost[anchor];
+      if (isAStarShortcutTraversable(
+          cells[anchor], cells[candidate], &cells.front()) &&
+        aStarSegmentTraversalCost(cells[anchor], cells[candidate]) <=
+        original_cost * 1.05 + 1e-6)
+      {
+        break;
+      }
       --candidate;
     }
 
@@ -2300,6 +2314,49 @@ OruGlobalPlanner::simplifyAStarPath(
     "with lookahead=%u",
     cells.size(), simplified.size(), max_lookahead);
   return simplified;
+}
+
+double OruGlobalPlanner::aStarSegmentTraversalCost(
+  const Cell & start, const Cell & goal) const
+{
+  double start_x, start_y, goal_x, goal_y;
+  costmap_->mapToWorld(start.x, start.y, start_x, start_y);
+  costmap_->mapToWorld(goal.x, goal.y, goal_x, goal_y);
+  const double length = std::hypot(goal_x - start_x, goal_y - start_y);
+  if (length <= 1e-9) {
+    return 0.0;
+  }
+  const double heading = std::atan2(goal_y - start_y, goal_x - start_x);
+  const auto samples = std::max(
+    1u, static_cast<unsigned int>(std::ceil(length / costmap_->getResolution())));
+  double integrated_cost = 0.0;
+  for (unsigned int i = 0u; i < samples; ++i) {
+    const double ratio = (static_cast<double>(i) + 0.5) / samples;
+    const double wx = start_x + ratio * (goal_x - start_x);
+    const double wy = start_y + ratio * (goal_y - start_y);
+    unsigned int x, y;
+    if (!costmap_->worldToMap(wx, wy, x, y)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    const auto cell_cost = costmap_->getCost(x, y);
+    double cost = 1.0;
+    if (cell_cost == nav2_costmap_2d::NO_INFORMATION) {
+      cost += unknown_cost_penalty_;
+    } else {
+      cost += cost_travel_multiplier_ * cell_cost / kMaxNonObstacleCost;
+      if (use_footprint_collision_check_ && footprint_.size() >= 3u &&
+        footprint_collision_checker_)
+      {
+        const double body_cost = cachedAStarFootprintCost(x, y, heading);
+        cost += body_cost == nav2_costmap_2d::NO_INFORMATION ?
+          unknown_cost_penalty_ : footprint_cost_travel_multiplier_ *
+          std::clamp(body_cost, 0.0, kMaxNonObstacleCost) / kMaxNonObstacleCost;
+      }
+      cost += routeGuidancePenalty(wx, wy);
+    }
+    integrated_cost += cost;
+  }
+  return integrated_cost * length / samples;
 }
 
 std::vector<OruGlobalPlanner::Cell>

@@ -5,6 +5,23 @@ forklift_task_manager:
     legacy_goal_pose_enabled: false
     navigation_goal_topic: /forklift/navigation_goal
     pallet_goal_topic: /forklift/pallet_goal
+
+    # Default compatibility path. Set true only after the TC397 bridge
+    # publishes /forklift/fork/state with calibrated position feedback.
+    use_fork_position_topics: false
+    fork_command_topic: /forklift/fork/command
+    fork_state_topic: /forklift/fork/state
+    fork_state_timeout_sec: 0.5
+    fork_height_tolerance_m: 0.01
+    fork_side_shift_tolerance_m: 0.005
+    fork_tilt_tolerance_rad: 0.01
+    # Zero delegates the axis speed limit to TC397's safe internal default.
+    fork_height_max_speed_mps: 0.0
+    fork_side_shift_max_speed_mps: 0.0
+    fork_tilt_max_speed_radps: 0.0
+    fork_require_height_feedback: true
+    fork_require_side_shift_feedback: true
+    fork_require_tilt_feedback: true
     compute_path_timeout_sec: 12.0
     pallet_selection_total_timeout_sec: 20.0
 
@@ -119,6 +136,10 @@ forklift_task_manager:
     # Odom yaw disagreement alone must not reject a correctly aligned map pose.
     pallet_pivot_verify_timeout_sec: 3.0
     pallet_pivot_yaw_tolerance_rad: 0.05
+    # After a fresh stationary map check, allow one small continuation in the
+    # original rotation direction. Opposite-direction correction stays disabled.
+    pallet_pivot_map_resume_enabled: true
+    pallet_pivot_map_resume_max_angle_rad: 0.15
     pallet_pivot_yaw_rate_tolerance_radps: 0.03
     pallet_pivot_feedback_timeout_sec: 0.5
     pallet_pivot_odom_topic: /odom
@@ -131,14 +152,22 @@ forklift_task_manager:
     pallet_exemption_activation_distance_m: 4.0
     pallet_exemption_deactivation_distance_m: 4.5
     pallet_exemption_length_m: 1.80
-    pallet_exemption_width_m: 1.60
+    # Includes pallet-side scan returns and the current targeting uncertainty.
+    # Keep this synchronized with forklift_real_navigation.launch.py.
+    pallet_exemption_width_m: 2.20
 
-    # Manual retreat after a completed approach. It is exposed by the
-    # /forklift/pallet_approach/egress Trigger service and remains deliberately
-    # slower than normal navigation.
+    # Manual retreat after a completed approach, or after a failed final
+    # approach through /forklift/pallet_approach/egress_recovery. Both remain
+    # deliberately slower than normal navigation.
     pallet_egress_distance_m: 1.00
     pallet_egress_speed_mps: 0.10
     pallet_egress_timeout_sec: 20.0
+
+    # Explicit recovery only: an operator/dispatcher may call
+    # /forklift/navigation/recover_obstacle to replan the active PoseTarget.
+    # This also covers an MPC local-costmap/scan stop, which reaches the gate
+    # as a raw-stop command. Existing automatic resume is unchanged.
+    manual_obstacle_recovery_enabled: true
 
     # Check several locally clear staging candidates with ComputePathToPose.
     # The first globally reachable candidate is used for the pallet task.

@@ -99,6 +99,23 @@ TEST(ForkliftMpcTypes, PivotYawRequiresAngleAndRateToSettle)
   EXPECT_FALSE(pivotYawIsSettled(0.0, 0.04, 0.025, 0.03));
 }
 
+TEST(ForkliftMpcTypes, PivotBrakingKeepsApproachingOutsideActivationCircle)
+{
+  for (double lateral : {-0.12, -0.099, -0.052, 0.0, 0.052, 0.099, 0.12}) {
+    for (double remaining : {0.005, 0.02, 0.075, 0.097, 0.15, 0.35}) {
+      if (std::hypot(remaining, lateral) > 0.10) {
+        EXPECT_GT(pivotApproachBrakingDistance(remaining, lateral, 0.10), 0.0);
+      }
+      EXPECT_DOUBLE_EQ(
+        pivotApproachBrakingDistance(remaining, lateral, 0.10),
+        pivotApproachBrakingDistance(remaining, -lateral, 0.10));
+    }
+  }
+  EXPECT_NEAR(
+    pivotApproachBrakingDistance(0.075, 0.099, 0.10),
+    0.075 - std::sqrt(0.10 * 0.10 - 0.099 * 0.099) + 0.01, 1e-9);
+}
+
 TEST(ForkliftMpcTypes, CommandFromControlAdvancesSteeringByRate)
 {
   const auto vehicle_model = testVehicleModel();

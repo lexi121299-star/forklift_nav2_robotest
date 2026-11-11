@@ -32,6 +32,15 @@ fine_motion_adapter:
     # reverse-direction correction is intentionally disabled.
     pivot_yaw_rate_tolerance_radps: 0.03
     pivot_yaw_settle_sec: 0.30
+    # Predict rotation after zero RPM from measured yaw rate. The 2026-11-04
+    # run coasted about 0.157 rad after stop at 0.219 rad/s; validate on vehicle.
+    pivot_brake_reaction_time_sec: 0.20
+    pivot_brake_deceleration_radps2: 0.20
+    pivot_brake_margin_rad: 0.01
+    # At most one same-direction continuation after conservative early braking.
+    # Overshoot never commands a reverse correction.
+    pivot_brake_max_resumes: 1
+    pivot_stop_velocity_mps: 0.02
     pivot_progress_epsilon_rad: 0.01
     pivot_step_angle_rad: 0.3490658503988659
     pivot_step_hold_sec: 0.0

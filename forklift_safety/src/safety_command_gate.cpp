@@ -1,7 +1,9 @@
 #include "forklift_safety/collision_core.hpp"
+#include "forklift_safety/trajectory_sweep.hpp"
 
 #include <chrono>
 #include <map>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -13,6 +15,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav2_msgs/msg/costmap.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
@@ -67,6 +70,7 @@ struct Inputs
   Sample<Fault> fault;
   Sample<Odom> odom;
   Sample<Scan> scan;
+  std::deque<Sample<nav_msgs::msg::Path>> trajectories;
   std::shared_ptr<const Grid> grid;
   std::shared_ptr<const Target> target;
   bool exemption{}, egress{}, emergency{}, degraded{};
@@ -124,6 +128,12 @@ public:
     pub_=create_publisher<Command>(s("gated_command_topic"),1);
     status_=create_publisher<std_msgs::msg::String>(s("status_topic"),10);
     subscribe<Command>(s("raw_command_topic"),[this](Command::ConstSharedPtr m) {raw(m);});
+    subscribe<nav_msgs::msg::Path>(s("controller_trajectory_topic"),
+      [this](nav_msgs::msg::Path::ConstSharedPtr m) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        inputs_.trajectories.push_back({m,now().seconds()});
+        while (inputs_.trajectories.size()>10) {inputs_.trajectories.pop_front();}
+      });
     subscribe<Twist>(s("recovery_twist_topic"),[this](Twist::ConstSharedPtr m) {
       std::lock_guard<std::mutex> lock(mutex_); inputs_.recovery={m,now().seconds()};
     });
@@ -211,6 +221,7 @@ private:
       {"enabled",true},{"require_vehicle_state",false},{"require_fault_state",false},
       {"require_localization",false},{"costmap_monitor_enabled",true},{"collision_check_enabled",true},
       {"costmap_collision_check_enabled",true},
+      {"trajectory_sweep_enabled",true},
       {"unknown_is_collision",true},{"scan_protection_enabled",true},{"scan_require_motion_fov_coverage",true},
       {"pivot_costmap_collision_check_enabled",true},
       {"allow_reverse_collision_escape",true},{"allow_forward_collision_escape",false},
@@ -221,6 +232,7 @@ private:
     }
     for (auto entry : std::map<std::string,double>{
       {"command_timeout_sec",.5},{"recovery_timeout_sec",.5},{"vehicle_state_timeout_sec",.5},
+      {"trajectory_timeout_sec",.25},{"trajectory_steering_rate_radps",.12},
       {"fault_state_timeout_sec",.5},{"localization_timeout_sec",.5},{"costmap_timeout_sec",.5},
       {"footprint_sample_spacing",.05},{"collision_check_horizon_sec",1.},{"collision_check_time_step_sec",.1},
       {"dynamic_stop_reaction_time_sec",.9},{"dynamic_stop_brake_deceleration_mps2",1.5},{"dynamic_stop_clearance_m",.5},
@@ -255,6 +267,7 @@ private:
       {"localization_message_type","odometry"},{"base_frame_id","base_link"},
       {"costmap_topic","/local_costmap/costmap_raw"},{"costmap_message_type","costmap_raw"},
       {"status_topic","/forklift/safety_gate/status"},{"scan_topic","/scan"},
+      {"controller_trajectory_topic","/forklift/controller_safety_trajectory"},
       {"scan_self_filter_rectangles","[]"},
       {"pallet_exemption_pose_topic","/forklift/pallet_approach/exemption_pose"},
       {"pallet_exemption_active_topic","/forklift/pallet_approach/exemption_active"},
@@ -278,6 +291,45 @@ private:
   }
   Inputs snapshot() {std::lock_guard<std::mutex> lock(mutex_); return inputs_;}
   Command stop() {Command c; c.header.stamp=now(); c.brake=true; return c;}
+  std::optional<std::vector<Pose>> trajectory(const Inputs & in,const Command & command,double speed)
+  {
+    if (!b("trajectory_sweep_enabled") || !in.raw.msg || !in.odom.msg || !in.vehicle.msg ||
+      std::abs(command.steering_angle_rad)>=geometry_.pivot_angle-1e-3) {return {};}
+    const double t=now().seconds();
+    if (sourceAge(seconds(in.odom.msg->header.stamp),t)>d("localization_timeout_sec") ||
+      t-in.odom.received>d("localization_timeout_sec") ||
+      t-in.vehicle.received>d("vehicle_state_timeout_sec") ||
+      sourceAge(seconds(in.vehicle.msg->header.stamp),t)>d("vehicle_state_timeout_sec")) {return {};}
+    for (auto it=in.trajectories.rbegin();it!=in.trajectories.rend();++it) {
+      const auto & path=*it->msg;
+      // Exact command pairing prevents a previous route or a fine-motion
+      // action from inheriting a controller's unrelated reference path.
+      if (path.header.stamp.sec!=in.raw.msg->header.stamp.sec ||
+        path.header.stamp.nanosec!=in.raw.msg->header.stamp.nanosec) {continue;}
+      if (path.poses.size()<2 || path.poses.size()>512 ||
+        sourceAge(seconds(path.header.stamp),t)>d("trajectory_timeout_sec") ||
+        t-it->received>d("trajectory_timeout_sec")) {return {};}
+      try {
+        Pose base=planar(in.odom.msg->pose.pose);
+        if (!finite(base)) {return {};}
+        base=compose(base,lookup(in.odom.msg->child_frame_id,s("base_frame_id"),in.odom.msg->header.stamp));
+        base=compose(lookup(path.header.frame_id,in.odom.msg->header.frame_id,in.odom.msg->header.stamp),base);
+        const double c=std::cos(base.yaw),sn=std::sin(base.yaw);
+        std::vector<Pose> reference;
+        for (const auto & p : path.poses) {
+          const auto & qn=p.pose.orientation;
+          const double norm=qn.x*qn.x+qn.y*qn.y+qn.z*qn.z+qn.w*qn.w;
+          if (!std::isfinite(norm) || std::abs(norm-1.)>.01) {return {};}
+          auto q=planar(p.pose);
+          const double dx=q.x-base.x,dy=q.y-base.y;
+          reference.push_back({dx*c+dy*sn,-dx*sn+dy*c,angleDifference(q.yaw,base.yaw)});
+        }
+        return trajectorySweepPoses(reference,command,geometry_,speed,
+          in.vehicle.msg->steering_angle_rad,d("trajectory_steering_rate_radps"));
+      } catch (const std::exception &) {return {};}
+    }
+    return {};
+  }
   void priorityStop() {++inputs_.stop_generation; pub_->publish(stop());}
   void localization(Odom::ConstSharedPtr m)
   {
@@ -429,6 +481,7 @@ private:
     Command probe=command; probe.velocity_mps=protectedSpeed(in,command);
     const double speed=probe.velocity_mps;
     std::optional<std::vector<Pose>> pivot;
+    std::optional<std::vector<Pose>> track;
     if (std::abs(probe.steering_angle_rad)>=geometry_.pivot_angle-1e-3) {
       if (!in.odom.msg || sourceAge(seconds(in.odom.msg->header.stamp),now().seconds())>d("localization_timeout_sec")) {
         return "pivot angular feedback stale or unavailable";
@@ -466,7 +519,8 @@ private:
       // A controller may ask to accelerate before it has driven clear of an
       // existing rear/front overlap. Hold the validated escape at its safe
       // crawl speed instead of alternately releasing and emergency-stopping.
-      if (directionalEscapeEligible(points,probe,geometry_,exemption) &&
+      const bool directional_escape=directionalEscapeEligible(points,probe,geometry_,exemption);
+      if (directional_escape &&
         command.velocity_mps>geometry_.escape_speed+1e-9)
       {
         cap(command,geometry_.escape_speed);
@@ -479,6 +533,16 @@ private:
         geometry_.deceleration,geometry_.clearance)/std::max(checked_speed,1e-6);
       auto poses=pivot ? *pivot : predict(probe,geometry_,horizon,
         spatialStep(checked_speed,geometry_.scan_spacing,horizon));
+      if (!pivot && !exemption && !directional_escape) {
+        track=trajectory(in,probe,checked_speed);
+        if (track) {
+          // Never replace the physically unavoidable stopping envelope with
+          // a desired path. Check both current and commanded steering first.
+          poses=brakingSweepPoses(probe,geometry_,in.vehicle.msg->steering_angle_rad);
+          poses.insert(poses.end(),track->begin(),track->end());
+          trajectory_used_=true;
+        }
+      }
       const auto result=scanSweep(points,probe,geometry_,poses,exemption);
       scan_elapsed_=std::chrono::duration<double>(Steady::now()-scan_begin).count();
       if (result.blocked) {release_.blocked(speed); return result.reason;}
@@ -493,6 +557,7 @@ private:
       const double horizon=speed<=1e-6 ? d("collision_check_horizon_sec") :
         std::max(d("collision_check_time_step_sec"),stoppingDistance(speed,geometry_.reaction,geometry_.deceleration,0)/speed);
       auto poses=pivot ? *pivot : predict(probe,geometry_,horizon,spatialStep(speed,geometry_.scan_spacing,horizon));
+      if (track) {poses.insert(poses.end(),track->begin(),track->end());}
       for (auto & p : poses) {p=compose(pose,p);}
       auto config=geometry_;
       const auto exemption=zone(in,probe,in.grid->frame);
@@ -595,7 +660,7 @@ private:
   {
     const auto begin=Steady::now();
     const auto in=snapshot();
-    exemption_used_=false; egress_used_=false; escape_speed_capped_=false;
+    exemption_used_=false; egress_used_=false; escape_speed_capped_=false; trajectory_used_=false;
     scan_elapsed_=pose_elapsed_=grid_elapsed_=0;
     Command cmd; std::string reason;
     try {std::tie(cmd,reason)=evaluate(in);}
@@ -609,6 +674,10 @@ private:
         auto failure=health(inputs_,t);
         if (failure.empty() && in.raw.msg && sourceAge(seconds(in.raw.msg->header.stamp),t)>d("command_timeout_sec")) {failure="command source timeout";}
         if (failure.empty() && elapsed>d("collision_compute_budget_sec")) {failure="collision check deadline exceeded";}
+        if (failure.empty() && trajectory_used_ && in.raw.msg &&
+          sourceAge(seconds(in.raw.msg->header.stamp),t)>d("trajectory_timeout_sec")) {
+          failure="controller trajectory expired during check";
+        }
         const bool checked=b("enabled") && b("collision_check_enabled") && direction(cmd)!=0;
         if (checked && failure.empty()) {failure=mapHealth(in.grid,t);}
         if (checked && failure.empty()) {failure=scanHealth(in.scan,t);}
@@ -630,6 +699,8 @@ private:
     }
     std_msgs::msg::String status; status.data=reason; status_->publish(status);
     if (reason!=last_reason_) {RCLCPP_INFO(get_logger(),"Safety gate state: %s.",reason.c_str()); last_reason_=reason;}
+    if (trajectory_used_) {RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),5000,
+      "Trajectory-aware scan sweep active: physical braking + reference + rate-limited steering");}
     if (elapsed>.05) {RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,
       "Collision timing: total=%.4fs scan=%.4fs pose_tf=%.4fs costmap=%.4fs result=%s",
       elapsed,scan_elapsed_,pose_elapsed_,grid_elapsed_,reason.c_str());}
@@ -645,6 +716,7 @@ private:
   ReleaseState release_;
   std::string last_reason_;
   bool exemption_used_{}, egress_used_{}, escape_speed_capped_{};
+  bool trajectory_used_{};
   double scan_elapsed_{}, pose_elapsed_{}, grid_elapsed_{};
   tf2_ros::Buffer buffer_;
   tf2_ros::TransformListener listener_;

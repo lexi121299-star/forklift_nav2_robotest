@@ -91,6 +91,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     return LaunchDescription([
+        DeclareLaunchArgument('trajectory_sweep_enabled', default_value='true'),
+        DeclareLaunchArgument('trajectory_timeout_sec', default_value='0.25'),
+        DeclareLaunchArgument('trajectory_steering_rate_radps', default_value='0.12'),
         DeclareLaunchArgument('enabled', default_value='true'),
         DeclareLaunchArgument('raw_command_topic', default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument('gated_command_topic', default_value='/forklift/control_cmd'),
@@ -263,6 +266,9 @@ def generate_launch_description():
                 'drive_accel_time_sec': drive_accel_time_sec,
                 'drive_decel_time_sec': drive_decel_time_sec,
                 'wheel_base': wheel_base,
+                'trajectory_sweep_enabled': LaunchConfiguration('trajectory_sweep_enabled'),
+                'trajectory_timeout_sec': LaunchConfiguration('trajectory_timeout_sec'),
+                'trajectory_steering_rate_radps': LaunchConfiguration('trajectory_steering_rate_radps'),
                 'pivot_turn_radius': pivot_turn_radius,
                 'pivot_brake_deceleration_radps2': LaunchConfiguration('pivot_brake_deceleration_radps2'),
                 'pivot_stop_margin_rad': LaunchConfiguration('pivot_stop_margin_rad'),

@@ -3,11 +3,13 @@ project(forklift_msgs)
 
 find_package(ament_cmake REQUIRED)
 find_package(action_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/DetectPalletOffset.action"
+  "action/ExecuteDispatchTask.action"
   "action/ExecuteRoute.action"
   "action/ExecutePalletPickup.action"
   "action/ForkMoveTo.action"
@@ -16,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ForkliftControlCommand.msg"
   "msg/ForkliftControllerDebug.msg"
   "msg/ForkliftVehicleState.msg"
+  "msg/DispatchTaskStatus.msg"
   "msg/ForkliftFaultState.msg"
   "msg/ForkliftIoState.msg"
   "msg/ForkPositionCommand.msg"
@@ -24,7 +27,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GoToStation.srv"
   "srv/SetControlMode.srv"
   "srv/SetEmergencyStop.srv"
-  DEPENDENCIES action_msgs std_msgs
+  DEPENDENCIES action_msgs geometry_msgs std_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)

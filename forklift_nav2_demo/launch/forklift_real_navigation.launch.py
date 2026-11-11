@@ -157,6 +157,7 @@ def generate_launch_description():
             'use_sim_time': 'false',
             'enabled': 'true',
             'collision_check_enabled': 'true',
+            'trajectory_sweep_enabled': LaunchConfiguration('safety_trajectory_sweep_enabled').perform(context),
             'costmap_monitor_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'costmap_collision_check_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'pivot_costmap_collision_check_enabled': LaunchConfiguration(
@@ -220,7 +221,7 @@ def generate_launch_description():
             'pallet_egress_max_speed_mps': '0.15',
             # Cover the pallet and its near scan returns, not the aisle.
             'pallet_exemption_length_m': '1.80',
-            'pallet_exemption_width_m': '1.60',
+            'pallet_exemption_width_m': '2.20',
             'wheel_base': '1.4',
             'rear_axle_x_offset': '0.0',
         }
@@ -382,6 +383,7 @@ def generate_launch_description():
             'odom_topic',
             default_value='/odom',
             description='Vehicle odometry topic used by the localization adapter.'),
+        DeclareLaunchArgument('safety_trajectory_sweep_enabled', default_value='true'),
         DeclareLaunchArgument('map_frame_id', default_value='map'),
         DeclareLaunchArgument('odom_frame_id', default_value='odom'),
         DeclareLaunchArgument(

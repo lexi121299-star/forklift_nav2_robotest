@@ -919,6 +919,49 @@ TEST(OruGlobalPlanner, AStarShortcutKeepsSafeDetourAroundObstacle) {
   }
 }
 
+TEST(OruGlobalPlanner, AStarShortcutPreservesSoftCostDetour) {
+  nav2_costmap_2d::Costmap2D costmap(140, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(planner, 0.10);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 254, 1.25, 45.0);
+  for (unsigned int x = 45u; x <= 95u; ++x) {
+    for (unsigned int y = 37u; y <= 43u; ++y) {
+      // Traversable inflation beside a wall: hard collision checks alone
+      // accept the direct shortcut, but A* chose the wider detour on purpose.
+      costmap.setCost(x, y, 220u);
+    }
+  }
+  const std::vector<OruGlobalPlannerTestAccess::CellPoint> detour = {
+    {20, 40}, {35, 55}, {105, 55}, {120, 40}};
+  ASSERT_TRUE(OruGlobalPlannerTestAccess::aStarShortcutTraversable(
+    planner, detour.front(), detour.back()));
+  const auto result = OruGlobalPlannerTestAccess::simplifyAStarPath(planner, detour);
+  ASSERT_GT(result.size(), 2u);
+  for (std::size_t i = 1u; i < result.size(); ++i) {
+    EXPECT_TRUE(OruGlobalPlannerTestAccess::aStarShortcutTraversable(
+      planner, result[i - 1u], result[i]));
+  }
+}
+
+TEST(OruGlobalPlanner, AStarShortcutStillAllowsOnlyNarrowInflatedCorridor) {
+  nav2_costmap_2d::Costmap2D costmap(140, 100, 0.05, 0.0, 0.0);
+  OruGlobalPlanner planner;
+  OruGlobalPlannerTestAccess::configureForTest(planner, costmap);
+  OruGlobalPlannerTestAccess::enableSquareFootprintCollisionCheck(planner, 0.10);
+  OruGlobalPlannerTestAccess::configureAStarFootprintClearance(
+    planner, 254, 254, 1.25, 45.0);
+  for (unsigned int x = 0u; x < 140u; ++x) {
+    for (unsigned int y = 0u; y < 100u; ++y) {
+      costmap.setCost(x, y, 253u);
+    }
+  }
+  const auto result = OruGlobalPlannerTestAccess::simplifyAStarPath(
+    planner, {{20, 40}, {45, 41}, {80, 40}, {120, 40}});
+  ASSERT_EQ(result.size(), 2u);
+}
+
 TEST(OruGlobalPlanner, AStarShortcutChecksFullFootprintAlongSegment) {
   nav2_costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0);
   OruGlobalPlanner planner;

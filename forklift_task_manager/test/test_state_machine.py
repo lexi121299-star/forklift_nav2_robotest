@@ -106,6 +106,34 @@ def test_pause_resume_and_cancel_preserve_then_clear_current_segment():
     assert action_client.cancel_count == 2
 
 
+def test_manual_restart_replans_only_the_active_segment():
+    action_client = MockActionClient()
+    states = []
+    machine = TaskStateMachine(
+        action_client, status_callback=lambda current: states.append(current.state)
+    )
+    machine.start(make_route())
+    action_client.complete_latest(success=True)
+    stale_callback = action_client.callbacks[-1]
+
+    restarted, message = machine.restart_current('manual obstacle recovery')
+
+    assert restarted is True
+    assert message == 'manual obstacle recovery'
+    assert machine.state == RUNNING
+    assert machine.segment_index == 1
+    assert action_client.cancel_count == 1
+    assert [target.name for target in action_client.sent] == [
+        'first', 'corner', 'corner'
+    ]
+    assert RECOVERING in states
+
+    # A result from the canceled action must not advance the route.
+    stale_callback(True, 'stale result')
+    assert machine.segment_index == 1
+    assert machine.state == RUNNING
+
+
 def test_safety_emergency_stop_pauses_and_requires_explicit_resume():
     action_client = MockActionClient()
     machine = TaskStateMachine(action_client)

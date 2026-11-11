@@ -88,6 +88,8 @@ struct PivotBrakeState
 };
 
 double stoppingSpeedLimit(double distance, double reaction_sec, double deceleration);
+double pivotApproachBrakingDistance(
+  double remaining, double cross_track, double activation_radius);
 double accelerationSpeedLimit(
   double desired, double previous, double measured, double acceleration, double dt,
   double feedback_allowance_sec = 0.0);
