@@ -26,7 +26,7 @@ class PalletManeuverConfig:
     turn_clearance_padding_m: float = 0.10
     pallet_turn_keepout_radius_m: float = 1.50
     pallet_exemption_length_m: float = 1.80
-    pallet_exemption_width_m: float = 1.60
+    pallet_exemption_width_m: float = 2.20
     collision_cost_threshold: int = 254
     footprint: Tuple[Point2D, ...] = (
         (1.709, 0.610),

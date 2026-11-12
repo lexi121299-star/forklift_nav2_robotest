@@ -661,7 +661,8 @@ MpcTrajectory buildTrajectory(
     const double abs_curvature = std::abs(trajectory[i].curvature);
     diagnostics.max_curvature = std::max(diagnostics.max_curvature, abs_curvature);
     if (diagnostics.max_allowed_curvature > 0.0 &&
-      abs_curvature > diagnostics.max_allowed_curvature + 1e-9)
+      abs_curvature > diagnostics.max_allowed_curvature +
+      std::max(1e-4, .001 * diagnostics.max_allowed_curvature))
     {
       diagnostics.curvature_exceeds_limit = true;
     }

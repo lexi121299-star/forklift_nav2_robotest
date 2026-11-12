@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping, Tuple
 
 import yaml
 
@@ -45,6 +45,32 @@ class PalletPickupConfig:
 
     slots: Dict[str, PalletSlot]
     defaults: PickupDefaults
+
+
+def validate_pallet_slot_stations(
+    config: PalletPickupConfig,
+    station_names: Iterable[str],
+) -> None:
+    """Ensure every pickup slot references a configured approach station.
+
+    Slot coordinates deliberately remain in ``stations.yaml`` so the task
+    manager uses the same Nav2 target configuration for route and pickup
+    navigation. Validate this relation at startup rather than accepting a
+    dispatch task that can only fail after it has been assigned.
+    """
+
+    available = set(station_names)
+    missing = sorted(
+        '{} -> {}'.format(slot.name, slot.approach_station)
+        for slot in config.slots.values()
+        if slot.approach_station not in available
+    )
+    if missing:
+        raise PalletConfigError(
+            'pallet slots reference unknown approach stations: {}'.format(
+                ', '.join(missing)
+            )
+        )
 
 
 def _finite_float(value: Any, field: str) -> float:
@@ -120,9 +146,9 @@ def load_pallet_pickup_config(path: str) -> PalletPickupConfig:
         level_index = _int_value(
             raw_slot.get('level_index'), 'slot {} level_index'.format(slot_name)
         )
-        if level_index < 0:
+        if level_index <= 0:
             raise PalletConfigError(
-                'slot {} level_index must be non-negative'.format(slot_name)
+                'slot {} level_index must be greater than zero'.format(slot_name)
             )
         slots[slot_name] = PalletSlot(
             name=slot_name,

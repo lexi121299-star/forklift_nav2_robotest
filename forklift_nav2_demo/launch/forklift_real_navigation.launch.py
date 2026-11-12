@@ -157,6 +157,7 @@ def generate_launch_description():
             'use_sim_time': 'false',
             'enabled': 'true',
             'collision_check_enabled': 'true',
+            'trajectory_sweep_enabled': LaunchConfiguration('safety_trajectory_sweep_enabled').perform(context),
             'costmap_monitor_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'costmap_collision_check_enabled': LaunchConfiguration('safety_costmap_enabled').perform(context),
             'pivot_costmap_collision_check_enabled': LaunchConfiguration(
@@ -201,15 +202,26 @@ def generate_launch_description():
             # Permit only a straight, low-speed reverse that the raw scan
             # predicts will leave an existing front-side footprint overlap.
             'allow_reverse_collision_escape': 'true',
-            'reverse_collision_escape_max_speed_mps': '0.15',
+            # Shared by the forward/reverse collision-escape path. This is
+            # intentionally below normal navigation speed but fast enough to
+            # clear a static rear/front scan overlap without stalling.
+            'reverse_collision_escape_max_speed_mps': '0.25',
             'reverse_collision_escape_max_steering_angle_rad': '0.05',
             'reverse_collision_escape_obstacle_min_x_m': '0.0',
+            # Symmetric case: a rear-edge scan overlap may leave the vehicle
+            # only by a straight, low-speed forward motion that the scan sweep
+            # proves does not add a new collision.
+            'allow_forward_collision_escape': 'true',
+            'forward_collision_escape_obstacle_max_x_m': '0.0',
             'max_forward_velocity_mps': runtime_velocity_limit_mps.perform(context),
             # Only logical reverse motion may ignore the selected pallet cells.
             'pallet_exemption_reverse_only': 'true',
+            'pallet_egress_enabled': 'true',
+            'pallet_egress_active_topic': '/forklift/pallet_approach/egress_active',
+            'pallet_egress_max_speed_mps': '0.15',
             # Cover the pallet and its near scan returns, not the aisle.
             'pallet_exemption_length_m': '1.80',
-            'pallet_exemption_width_m': '1.60',
+            'pallet_exemption_width_m': '2.20',
             'wheel_base': '1.4',
             'rear_axle_x_offset': '0.0',
         }
@@ -371,6 +383,7 @@ def generate_launch_description():
             'odom_topic',
             default_value='/odom',
             description='Vehicle odometry topic used by the localization adapter.'),
+        DeclareLaunchArgument('safety_trajectory_sweep_enabled', default_value='true'),
         DeclareLaunchArgument('map_frame_id', default_value='map'),
         DeclareLaunchArgument('odom_frame_id', default_value='odom'),
         DeclareLaunchArgument(

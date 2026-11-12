@@ -1,0 +1,20 @@
+# Task type selected by the dispatch system.
+uint8 TYPE_NAVIGATE=1
+uint8 TYPE_PICKUP=2
+uint8 TYPE_DROPOFF=3
+
+# task_id must be unique while a task is active. slot_id is required by
+# PICKUP/DROPOFF; target_pose is required by NAVIGATE.
+string task_id
+uint8 task_type
+geometry_msgs/PoseStamped target_pose
+string slot_id
+---
+bool success
+uint8 final_status
+string message
+---
+uint8 status
+string phase
+float32 progress
+string message

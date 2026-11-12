@@ -128,7 +128,7 @@ def generate_launch_description():
             'pallet_final_approach_timeout_sec', default_value='20.0'
         ),
         DeclareLaunchArgument(
-            'pallet_max_start_position_error_m', default_value='0.35'
+            'pallet_max_start_position_error_m', default_value='0.40'
         ),
         DeclareLaunchArgument(
             'pallet_max_start_heading_error_rad', default_value='0.20'

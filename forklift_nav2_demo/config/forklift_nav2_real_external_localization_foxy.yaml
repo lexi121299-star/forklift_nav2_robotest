@@ -188,11 +188,14 @@ controller_server:
       # at pivot_activation_distance rather than this generic clearance.
       primitive_brake_clearance_m: 0.50
       pivot_entry_lateral_tolerance_m: 0.15
+      # A stopped vehicle just outside the activation circle may pivot only
+      # after rechecking its actual-centre full sweep and first 0.50 m exit.
+      pivot_entry_offset_recovery_enabled: true
       pivot_stop_velocity_threshold: 0.02
-      # Capture the planned pivot despite normal real-vehicle lateral tracking
-      # error. In the 2026-08-28 14:29 run the closest approach was 0.315 m, so
-      # the old 0.20 m threshold was missed and the vehicle drove past it.
-      pivot_activation_distance: 0.35
+      # Rotate near the exact centre whose footprint sweep the planner checked.
+      # Starting 0.35 m early shifts that sweep toward nearby racks/pillars.
+      # Approach braking uses this same 2D circle, including lateral error.
+      pivot_activation_distance: 0.10
       # Keep the pivot continuous; predictive braking stops the final rotation.
       pivot_step_enabled: false
       pivot_step_angle: 0.3490658503988659
@@ -471,10 +474,10 @@ local_costmap:
       # 2MKC20M30LV205 envelope in base_link: drive axle at x=0, forks toward
       # -X. Axle-to-fork-tip=0.370+1.220=1.590 m; rear extent=1.709 m.
       footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
-      # The physical footprint already matches the measured vehicle envelope.
-      # Do not add a second geometric expansion in Nav2; raw scan protection
-      # and lethal full-footprint checks remain enabled.
-      footprint_padding: 0.00
+      # Keep a 5 cm static-map clearance beyond the measured vehicle body.
+      # This leaves room for localization/tracking error instead of planning a
+      # route that only becomes unsafe when the live scan reaches a wall.
+      footprint_padding: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -519,7 +522,9 @@ global_costmap:
       # Match the local costmap and safety gate footprint. Do not use the old
       # small global footprint, otherwise the planner may route too close to racks.
       footprint: "[[1.709, 0.610], [1.709, -0.610], [-1.590, -0.610], [-1.590, 0.610]]"
-      footprint_padding: 0.00
+      # Match the local costmap: global planning must reserve the same static
+      # 5 cm clearance as local collision checking.
+      footprint_padding: 0.05
       resolution: 0.05
       track_unknown_space: true
       # Do not mark /scan observations into the global costmap. A global grid
@@ -534,7 +539,10 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
-        inflation_radius: 0.50
+        # Keep a moderate decaying band beyond the 0.66 m padded inscribed
+        # radius. The previous 1.20 m preference made constrained routes detour
+        # too widely; this is a soft cost, not additional collision padding.
+        inflation_radius: 0.90
       always_send_full_costmap: True
   global_costmap_client:
     ros__parameters:
@@ -592,7 +600,7 @@ planner_server:
       pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
       pallet_keepout_timeout_sec: 0.5
       pallet_keepout_length_m: 1.80
-      pallet_keepout_width_m: 1.60
+      pallet_keepout_width_m: 2.20
       pallet_keepout_padding_m: 0.10
       # Keep global topology on the static map, but reject final drive and
       # pivot candidates when the fresh live scan intersects the complete
@@ -603,12 +611,15 @@ planner_server:
       dynamic_scan_topic: /scan
       dynamic_scan_timeout_sec: 0.70
       dynamic_scan_max_range_m: 8.0
-      dynamic_scan_padding_m: 0.05
+      # Dynamic scan returns are the real column/rack surface.  Keep a small
+      # tracking margin beyond the physical footprint so a replan does not
+      # choose a route that the local controller must immediately stop for.
+      dynamic_scan_padding_m: 0.15
       cost_travel_multiplier: 2.0
       # Penalize the highest inflation cost touched by the complete footprint,
       # not only the base_link center cell. This moves A* away from racks while
       # keeping cost 253 traversable when no wider route exists.
-      footprint_cost_travel_multiplier: 30.0
+      footprint_cost_travel_multiplier: 35.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
       goal_tolerance: 1.5
@@ -620,9 +631,8 @@ planner_server:
       # The complete padded footprint is checked at every sample, so cost 253
       # may be used as clearance while lethal cost 254 remains forbidden.
       astar_shortcut_cost_threshold: 254
-      # Prefer clearance during A*, but permit full-footprint shortcuts through
-      # the 253 warning band. Lethal cost 254 and unknown space remain hard
-      # rejections, avoiding unnecessary anchor splits in open diagonal aisles.
+      # The cost-aware shortcut retains A*'s clearance preference. Do not force
+      # repeated curve repairs merely because a safe footprint touches 253.
       astar_preferred_footprint_cost_threshold: 254
       astar_start_clearance_relax_distance: 1.25
       # Convert the sparse A* anchors into a continuous-curvature path. The
@@ -774,7 +784,7 @@ planner_server:
       pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
       pallet_keepout_timeout_sec: 0.5
       pallet_keepout_length_m: 1.80
-      pallet_keepout_width_m: 1.60
+      pallet_keepout_width_m: 2.20
       pallet_keepout_padding_m: 0.10
       cost_travel_multiplier: 2.0
       # Topology-only is never executed directly. A lower soft inflation cost
@@ -818,10 +828,12 @@ planner_server:
       pallet_exemption_active_topic: "/forklift/pallet_approach/exemption_active"
       pallet_keepout_timeout_sec: 0.5
       pallet_keepout_length_m: 1.80
-      pallet_keepout_width_m: 1.60
+      pallet_keepout_width_m: 2.20
       pallet_keepout_padding_m: 0.10
       cost_travel_multiplier: 2.0
-      footprint_cost_travel_multiplier: 10.0
+      # This topology path can be sent directly to FollowPath, unlike
+      # TopologyOnly. Prefer the same larger clearance band as GridBased.
+      footprint_cost_travel_multiplier: 20.0
       unknown_cost_penalty: 5.0
       start_tolerance: 1.2
       goal_tolerance: 1.5
@@ -834,7 +846,9 @@ planner_server:
       astar_pivot_collision_sample_angle: 0.0872664626
       astar_alternate_pivot_enabled: true
       astar_alternate_pivot_max_angle: 4.50
-      astar_goal_endpoint_tolerance: 0.28
+      # Staging is validated against this exact pose by Task Manager.  Do not
+      # remove its terminal approach just to avoid a short A* dogleg.
+      astar_goal_endpoint_tolerance: 0.0
       topology_search_resolution_m: 0.50
       planner_total_timeout_sec: 5.0
       use_final_approach_orientation: false

@@ -50,16 +50,23 @@ def generate_launch_description():
         'scan_require_motion_fov_coverage')
     allow_reverse_collision_escape = LaunchConfiguration(
         'allow_reverse_collision_escape')
+    allow_forward_collision_escape = LaunchConfiguration(
+        'allow_forward_collision_escape')
     reverse_collision_escape_max_speed_mps = LaunchConfiguration(
         'reverse_collision_escape_max_speed_mps')
     reverse_collision_escape_max_steering_angle_rad = LaunchConfiguration(
         'reverse_collision_escape_max_steering_angle_rad')
     reverse_collision_escape_obstacle_min_x_m = LaunchConfiguration(
         'reverse_collision_escape_obstacle_min_x_m')
+    forward_collision_escape_obstacle_max_x_m = LaunchConfiguration(
+        'forward_collision_escape_obstacle_max_x_m')
     pallet_exemption_enabled = LaunchConfiguration('pallet_exemption_enabled')
     pallet_exemption_pose_topic = LaunchConfiguration('pallet_exemption_pose_topic')
     pallet_exemption_active_topic = LaunchConfiguration(
         'pallet_exemption_active_topic')
+    pallet_egress_active_topic = LaunchConfiguration('pallet_egress_active_topic')
+    pallet_egress_enabled = LaunchConfiguration('pallet_egress_enabled')
+    pallet_egress_max_speed_mps = LaunchConfiguration('pallet_egress_max_speed_mps')
     pallet_exemption_timeout_sec = LaunchConfiguration('pallet_exemption_timeout_sec')
     pallet_exemption_length_m = LaunchConfiguration('pallet_exemption_length_m')
     pallet_exemption_width_m = LaunchConfiguration('pallet_exemption_width_m')
@@ -84,6 +91,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     return LaunchDescription([
+        DeclareLaunchArgument('trajectory_sweep_enabled', default_value='true'),
+        DeclareLaunchArgument('trajectory_timeout_sec', default_value='0.25'),
+        DeclareLaunchArgument('trajectory_steering_rate_radps', default_value='0.12'),
         DeclareLaunchArgument('enabled', default_value='true'),
         DeclareLaunchArgument('raw_command_topic', default_value='/forklift/control_cmd_raw'),
         DeclareLaunchArgument('gated_command_topic', default_value='/forklift/control_cmd'),
@@ -130,12 +140,15 @@ def generate_launch_description():
         DeclareLaunchArgument('pivot_costmap_collision_check_enabled', default_value='true'),
         DeclareLaunchArgument('scan_require_motion_fov_coverage', default_value='true'),
         DeclareLaunchArgument('allow_reverse_collision_escape', default_value='true'),
+        DeclareLaunchArgument('allow_forward_collision_escape', default_value='false'),
         DeclareLaunchArgument(
             'reverse_collision_escape_max_speed_mps', default_value='0.15'),
         DeclareLaunchArgument(
             'reverse_collision_escape_max_steering_angle_rad', default_value='0.05'),
         DeclareLaunchArgument(
             'reverse_collision_escape_obstacle_min_x_m', default_value='0.0'),
+        DeclareLaunchArgument(
+            'forward_collision_escape_obstacle_max_x_m', default_value='0.0'),
         DeclareLaunchArgument('pallet_exemption_enabled', default_value='true'),
         DeclareLaunchArgument(
             'pallet_exemption_pose_topic',
@@ -143,6 +156,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'pallet_exemption_active_topic',
             default_value='/forklift/pallet_approach/exemption_active'),
+        DeclareLaunchArgument(
+            'pallet_egress_active_topic',
+            default_value='/forklift/pallet_approach/egress_active'),
+        DeclareLaunchArgument('pallet_egress_enabled', default_value='true'),
+        DeclareLaunchArgument('pallet_egress_max_speed_mps', default_value='0.15'),
         DeclareLaunchArgument('pallet_exemption_timeout_sec', default_value='0.5'),
         DeclareLaunchArgument('pallet_exemption_length_m', default_value='0.50'),
         DeclareLaunchArgument('pallet_exemption_width_m', default_value='1.30'),
@@ -219,15 +237,21 @@ def generate_launch_description():
                     'pivot_costmap_collision_check_enabled'),
                 'scan_require_motion_fov_coverage': scan_require_motion_fov_coverage,
                 'allow_reverse_collision_escape': allow_reverse_collision_escape,
+                'allow_forward_collision_escape': allow_forward_collision_escape,
                 'reverse_collision_escape_max_speed_mps': (
                     reverse_collision_escape_max_speed_mps),
                 'reverse_collision_escape_max_steering_angle_rad': (
                     reverse_collision_escape_max_steering_angle_rad),
                 'reverse_collision_escape_obstacle_min_x_m': (
                     reverse_collision_escape_obstacle_min_x_m),
+                'forward_collision_escape_obstacle_max_x_m': (
+                    forward_collision_escape_obstacle_max_x_m),
                 'pallet_exemption_enabled': pallet_exemption_enabled,
                 'pallet_exemption_pose_topic': pallet_exemption_pose_topic,
                 'pallet_exemption_active_topic': pallet_exemption_active_topic,
+                'pallet_egress_active_topic': pallet_egress_active_topic,
+                'pallet_egress_enabled': pallet_egress_enabled,
+                'pallet_egress_max_speed_mps': pallet_egress_max_speed_mps,
                 'pallet_exemption_timeout_sec': pallet_exemption_timeout_sec,
                 'pallet_exemption_length_m': pallet_exemption_length_m,
                 'pallet_exemption_width_m': pallet_exemption_width_m,
@@ -242,6 +266,9 @@ def generate_launch_description():
                 'drive_accel_time_sec': drive_accel_time_sec,
                 'drive_decel_time_sec': drive_decel_time_sec,
                 'wheel_base': wheel_base,
+                'trajectory_sweep_enabled': LaunchConfiguration('trajectory_sweep_enabled'),
+                'trajectory_timeout_sec': LaunchConfiguration('trajectory_timeout_sec'),
+                'trajectory_steering_rate_radps': LaunchConfiguration('trajectory_steering_rate_radps'),
                 'pivot_turn_radius': pivot_turn_radius,
                 'pivot_brake_deceleration_radps2': LaunchConfiguration('pivot_brake_deceleration_radps2'),
                 'pivot_stop_margin_rad': LaunchConfiguration('pivot_stop_margin_rad'),

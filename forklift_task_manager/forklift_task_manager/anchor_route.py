@@ -24,7 +24,7 @@ class AnchorRouteConfig:
     segment_retry_count: int = 2
     # Nav2 can leave an intermediate action active at the last few decimetres
     # even after the vehicle has stopped inside its configured goal tolerance.
-    # These values are only used to advance a non-final anchor safely.
+    # Final goals also use the stationary guard, capped at 0.30 m tolerance.
     arrival_tolerance_m: float = 0.35
     arrival_speed_mps: float = 0.03
     arrival_settle_sec: float = 0.30

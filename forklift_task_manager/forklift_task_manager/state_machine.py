@@ -94,6 +94,26 @@ class TaskStateMachine:
         self._dispatch_current()
         return True, 'task resumed'
 
+    def restart_current(self, reason: str = 'manual obstacle recovery'):
+        """Cancel and replan only the active navigation segment.
+
+        This is deliberately operator-triggered.  A transient scan stop keeps
+        its existing behaviour: Nav2 and the safety gate continue waiting for
+        the obstacle to clear on the current path.
+        """
+        if self.state not in {RUNNING, RECOVERING}:
+            return False, 'task is not running'
+        if self.current_target is None:
+            return False, 'current segment is unavailable'
+        self._invalidate_navigation()
+        self.navigator.cancel_goal()
+        self._retry_count = 0
+        self.reason = reason
+        self._set_state(RECOVERING)
+        self._set_state(RUNNING)
+        self._dispatch_current()
+        return True, reason
+
     def cancel(self, reason: str = 'canceled by request'):
         if self.state not in _ACTIVE_STATES:
             return False, 'no active task'

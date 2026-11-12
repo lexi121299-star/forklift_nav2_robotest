@@ -148,6 +148,7 @@ private:
   std::vector<Cell> simplifyAStarPath(
     const std::vector<Cell> & cells,
     unsigned int max_lookahead) const;
+  double aStarSegmentTraversalCost(const Cell & start, const Cell & goal) const;
   std::vector<Cell> trimAStarGoalDogleg(
     const std::vector<Cell> & cells,
     const geometry_msgs::msg::PoseStamped & goal) const;

@@ -494,6 +494,8 @@ def scan_sweep_collision(
     reverse_escape_max_speed_mps: float = 0.15,
     reverse_escape_max_steering_angle_rad: float = 0.05,
     reverse_escape_obstacle_min_x_m: float = 0.0,
+    allow_forward_escape: bool = False,
+    forward_escape_obstacle_max_x_m: float = 0.0,
     prediction_poses=None,
 ) -> Tuple[bool, str]:
     travel_direction = direction(command)
@@ -536,29 +538,35 @@ def scan_sweep_collision(
 
     initial_collisions = colliding_indices(poses[0])
     escape_candidate = (
-        allow_reverse_escape
-        and travel_direction < 0
+        ((travel_direction < 0 and allow_reverse_escape)
+         or (travel_direction > 0 and allow_forward_escape))
         and speed <= reverse_escape_max_speed_mps + 1e-9
         and abs(float(command.steering_angle_rad))
         <= reverse_escape_max_steering_angle_rad + 1e-9
         and bool(initial_collisions)
         and all(
-            scan_points[index][0] >= reverse_escape_obstacle_min_x_m
+            (scan_points[index][0] >= reverse_escape_obstacle_min_x_m)
+            if travel_direction < 0 else
+            (scan_points[index][0] <= forward_escape_obstacle_max_x_m)
             for index in initial_collisions
         )
     )
     if escape_candidate:
+        escape_name = (
+            'scan reverse escape' if travel_direction < 0
+            else 'scan forward escape'
+        )
         previous_count = len(initial_collisions)
         for pose in poses[1:]:
             collisions = colliding_indices(pose)
             if not collisions.issubset(initial_collisions):
-                return True, 'scan reverse escape would hit a new obstacle'
+                return True, escape_name + ' would hit a new obstacle'
             if len(collisions) > previous_count:
-                return True, 'scan reverse escape overlap is increasing'
+                return True, escape_name + ' overlap is increasing'
             previous_count = len(collisions)
         if previous_count == 0:
-            return False, 'scan reverse escape clear'
-        return True, 'scan reverse escape does not clear current overlap'
+            return False, escape_name + ' clear'
+        return True, escape_name + ' does not clear current overlap'
 
     if initial_collisions:
         return True, 'scan footprint sweep collision'
@@ -923,11 +931,13 @@ class SafetyCommandGate(Node):
         self.declare_parameter('scan_collision_padding_m', 0.05)
         self.declare_parameter('scan_require_motion_fov_coverage', True)
         self.declare_parameter('allow_reverse_collision_escape', True)
+        self.declare_parameter('allow_forward_collision_escape', False)
         self.declare_parameter('reverse_collision_escape_max_speed_mps', 0.15)
         self.declare_parameter(
             'reverse_collision_escape_max_steering_angle_rad', 0.05
         )
         self.declare_parameter('reverse_collision_escape_obstacle_min_x_m', 0.0)
+        self.declare_parameter('forward_collision_escape_obstacle_max_x_m', 0.0)
         self.declare_parameter('pallet_exemption_enabled', True)
         self.declare_parameter(
             'pallet_exemption_pose_topic',
@@ -941,6 +951,12 @@ class SafetyCommandGate(Node):
         self.declare_parameter('pallet_exemption_length_m', 0.50)
         self.declare_parameter('pallet_exemption_width_m', 1.30)
         self.declare_parameter('pallet_exemption_reverse_only', True)
+        self.declare_parameter('pallet_egress_enabled', True)
+        self.declare_parameter(
+            'pallet_egress_active_topic',
+            '/forklift/pallet_approach/egress_active',
+        )
+        self.declare_parameter('pallet_egress_max_speed_mps', 0.15)
         self.declare_parameter('pallet_exemption_cost_threshold', 254)
         self.declare_parameter('emergency_stop_active', False)
         self.declare_parameter('allow_recovery_twist', True)
@@ -1050,6 +1066,9 @@ class SafetyCommandGate(Node):
         self._allow_reverse_collision_escape = bool(
             self.get_parameter('allow_reverse_collision_escape').value
         )
+        self._allow_forward_collision_escape = bool(
+            self.get_parameter('allow_forward_collision_escape').value
+        )
         self._reverse_collision_escape_max_speed_mps = self._positive_param(
             'reverse_collision_escape_max_speed_mps', 0.15
         )
@@ -1064,6 +1083,11 @@ class SafetyCommandGate(Node):
         self._reverse_collision_escape_obstacle_min_x_m = float(
             self.get_parameter(
                 'reverse_collision_escape_obstacle_min_x_m'
+            ).value
+        )
+        self._forward_collision_escape_obstacle_max_x_m = float(
+            self.get_parameter(
+                'forward_collision_escape_obstacle_max_x_m'
             ).value
         )
         self._pallet_exemption_enabled = bool(
@@ -1086,6 +1110,15 @@ class SafetyCommandGate(Node):
         )
         self._pallet_exemption_reverse_only = bool(
             self.get_parameter('pallet_exemption_reverse_only').value
+        )
+        self._pallet_egress_enabled = bool(
+            self.get_parameter('pallet_egress_enabled').value
+        )
+        self._pallet_egress_active_topic = str(
+            self.get_parameter('pallet_egress_active_topic').value
+        )
+        self._pallet_egress_max_speed_mps = self._positive_param(
+            'pallet_egress_max_speed_mps', 0.15
         )
         self._pallet_exemption_cost_threshold = int(
             self.get_parameter('pallet_exemption_cost_threshold').value
@@ -1146,6 +1179,8 @@ class SafetyCommandGate(Node):
         self._reverse_escape_validated_by_scan = False
         self._last_reason = ''
         self._pallet_exemption_active = False
+        self._pallet_egress_active = False
+        self._last_pallet_egress_time = self.get_clock().now()
         self._last_pallet_exemption_time = self.get_clock().now()
         self._pallet_exemption_pose: Optional[PoseStamped] = None
         self._tf_buffer = Buffer()
@@ -1249,6 +1284,12 @@ class SafetyCommandGate(Node):
                 Bool,
                 self._pallet_exemption_active_topic,
                 self._on_pallet_exemption_active,
+                10,
+            )
+            self.create_subscription(
+                Bool,
+                self._pallet_egress_active_topic,
+                self._on_pallet_egress_active,
                 10,
             )
         self.create_service(
@@ -1429,6 +1470,10 @@ class SafetyCommandGate(Node):
     def _on_pallet_exemption_active(self, msg: Bool) -> None:
         self._pallet_exemption_active = bool(msg.data)
         self._last_pallet_exemption_time = self.get_clock().now()
+
+    def _on_pallet_egress_active(self, msg: Bool) -> None:
+        self._pallet_egress_active = bool(msg.data)
+        self._last_pallet_egress_time = self.get_clock().now()
 
     def _on_set_emergency_stop(
         self,
@@ -1926,10 +1971,14 @@ class SafetyCommandGate(Node):
             self._reverse_collision_escape_max_speed_mps,
             self._reverse_collision_escape_max_steering_angle_rad,
             self._reverse_collision_escape_obstacle_min_x_m,
+            self._allow_forward_collision_escape,
+            self._forward_collision_escape_obstacle_max_x_m,
             prediction_poses=self._pivot_prediction(command),
         )
         self._reverse_escape_validated_by_scan = (
-            not collision and reason == 'scan reverse escape clear'
+            not collision and reason in (
+                'scan reverse escape clear', 'scan forward escape clear'
+            )
         )
         return reason if collision else ''
 
@@ -1942,7 +1991,18 @@ class SafetyCommandGate(Node):
             return None
         if not self._pallet_exemption_active:
             return None
-        if self._pallet_exemption_reverse_only and direction(command) != -1:
+        final_approach = direction(command) == -1
+        egress = (
+            self._pallet_egress_enabled
+            and self._pallet_egress_active
+            and direction(command) == 1
+            and (self.get_clock().now() - self._last_pallet_egress_time).nanoseconds / 1e9
+            <= self._pallet_exemption_timeout_sec
+        )
+        # PALLET_EGRESS is the only forward exception. Keeping this separate
+        # from the legacy reverse-only switch prevents ordinary forward Nav2
+        # motion from inheriting the pallet's exemption rectangle.
+        if not final_approach and not egress:
             return None
         age = (
             self.get_clock().now() - self._last_pallet_exemption_time

@@ -104,6 +104,94 @@ def make_hierarchy(raw):
     )
 
 
+def test_recorded_seventeen_centimetre_final_goal_finishes_without_nav2_result():
+    raw = FakeNavigator(straight_path())
+    hierarchy = make_hierarchy(raw)
+    hierarchy._config = AnchorRouteConfig(arrival_settle_sec=0., arrival_transition_delay_sec=0.)
+    hierarchy.set_anchor_arrival_checker(lambda *args: (True, .172, 'fresh stopped feedback'))
+    result = []
+    hierarchy.send_goal(PoseTarget('goal', 10., 0., 0.), lambda *args: result.append(args))
+    guard = hierarchy._node.timers[-1]
+    guard.callback()
+    guard.callback()
+    assert result and result[0][0]
+    assert not hierarchy._original_goal
+    raw.goal_callbacks[-1](False, 'late canceled result')
+    assert len(result) == 1
+
+
+def test_continuous_follow_path_gets_same_final_arrival_guard():
+    raw = FakeNavigator(straight_path(12, spacing=.05))
+    node = FakeNode()
+    hierarchy = HierarchicalNav2Navigator(
+        node, raw, clear_costmap,
+        AnchorRouteConfig(arrival_settle_sec=0., arrival_transition_delay_sec=0.),
+        'TopologyOnly', 5., continuous_topology_planner_id='TopologyContinuous',
+        continuous_path_enabled=True)
+    hierarchy.set_anchor_arrival_checker(lambda *_: (True, .145, 'fresh stopped feedback'))
+    result = []
+    hierarchy.send_goal(PoseTarget('goal', 12., 0., 0.), lambda *args: result.append(args))
+    raw.goal_callbacks[0](False, 'full route failed')
+    assert raw.follow_paths
+    guard = node.timers[-1]
+    guard.callback()
+    guard.callback()
+    assert result and result[0][0]
+    raw.follow_callbacks[0](False, 'late cancellation')
+    assert len(result) == 1
+
+
+def test_last_anchor_can_finish_when_nav2_keeps_its_goal_active():
+    raw = FakeNavigator(straight_path(12))
+    hierarchy = make_hierarchy(raw)
+    hierarchy._config = AnchorRouteConfig(arrival_settle_sec=0., arrival_transition_delay_sec=0.)
+    hierarchy.set_anchor_arrival_checker(lambda *_: (True, .172, 'fresh stopped feedback'))
+    result = []
+    hierarchy.send_goal(PoseTarget('goal', 12., 0., 0.), lambda *args: result.append(args))
+    raw.goal_callbacks[-1](False, 'full route failed')
+    while hierarchy._anchor_index < len(hierarchy._anchor_queue)-1:
+        raw.goal_callbacks[-1](True, 'anchor reached')
+    guard = hierarchy._node.timers[-1]
+    guard.callback()
+    guard.callback()
+    assert result and result[0][0]
+
+
+def test_final_guard_does_not_accept_a_looser_intermediate_tolerance():
+    raw = FakeNavigator(straight_path())
+    hierarchy = make_hierarchy(raw)
+    hierarchy._config = AnchorRouteConfig(
+        arrival_tolerance_m=.4, arrival_settle_sec=0., arrival_transition_delay_sec=0.)
+    limits = []
+
+    def checker(target, tolerance, speed):
+        limits.append(tolerance)
+        return .31 <= tolerance, .31, 'not yet inside final tolerance'
+
+    hierarchy.set_anchor_arrival_checker(checker)
+    result = []
+    hierarchy.send_goal(PoseTarget('goal', 10., 0., 0.), lambda *args: result.append(args))
+    guard = hierarchy._node.timers[-1]
+    guard.callback()
+    guard.callback()
+    assert not result and limits == [.3, .3]
+
+
+def test_replaced_direct_goal_cannot_be_completed_by_its_old_arrival_timer():
+    raw = FakeNavigator(straight_path())
+    hierarchy = make_hierarchy(raw)
+    hierarchy.set_anchor_arrival_checker(lambda *_: (True, .1, 'stopped'))
+    old_result, new_result = [], []
+    hierarchy.send_goal(PoseTarget('old', 10., 0., 0.), lambda *args: old_result.append(args))
+    old_guard = hierarchy._node.timers[-1]
+    hierarchy.send_goal(PoseTarget('new', 12., 0., 0.), lambda *args: new_result.append(args))
+    cancels = raw.cancel_goal_count
+    old_guard.callback()
+    old_guard.callback()
+    assert raw.cancel_goal_count == cancels
+    assert not old_result and not new_result
+
+
 def test_success_at_old_anchor_is_not_success_at_replacement_goal():
     raw = FakeNavigator(straight_path(12))
     hierarchy = make_hierarchy(raw)

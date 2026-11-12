@@ -169,6 +169,20 @@ double stoppingSpeedLimit(double distance, double reaction_sec, double decelerat
   return std::sqrt(at * at + 2.0 * a * std::max(0.0, distance)) - at;
 }
 
+double pivotApproachBrakingDistance(
+  double remaining, double cross_track, double activation_radius)
+{
+  // Activation uses a 2D circle, while remaining is along the reference line.
+  // A lateral offset shortens the circle's available longitudinal chord.
+  const double radius = std::max(0.0, activation_radius);
+  const double entry_remaining = std::sqrt(std::max(
+    0.0, radius * radius - cross_track * cross_track));
+  // Aim slightly inside the circle so floating point and pose noise do not
+  // park the vehicle just outside the boundary that transfers pivot control.
+  const double inset = std::min(0.01, 0.1 * radius);
+  return std::max(0.0, remaining - std::max(0.0, entry_remaining - inset));
+}
+
 double accelerationSpeedLimit(
   double desired, double previous, double measured, double acceleration, double dt,
   double feedback_allowance_sec)

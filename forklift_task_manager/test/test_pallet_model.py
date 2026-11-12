@@ -5,6 +5,7 @@ from forklift_task_manager.pallet_model import (
     PalletConfigError,
     load_pallet_pickup_config,
     pickup_heights,
+    validate_pallet_slot_stations,
 )
 
 
@@ -65,3 +66,22 @@ def test_load_pallet_pickup_config_rejects_bad_slot(tmp_path):
 
     with pytest.raises(PalletConfigError, match='approach_station'):
         load_pallet_pickup_config(write_yaml(tmp_path / 'bad.yaml', data))
+
+
+def test_load_pallet_pickup_config_rejects_zero_level_index(tmp_path):
+    data = valid_config()
+    data['slots']['slot_001']['level_index'] = 0
+
+    with pytest.raises(PalletConfigError, match='greater than zero'):
+        load_pallet_pickup_config(write_yaml(tmp_path / 'bad.yaml', data))
+
+
+def test_slot_stations_must_exist_in_station_configuration(tmp_path):
+    config = load_pallet_pickup_config(
+        write_yaml(tmp_path / 'pallet_slots.yaml', valid_config())
+    )
+
+    validate_pallet_slot_stations(config, {'slot_001_approach', 'A'})
+
+    with pytest.raises(PalletConfigError, match='slot_001 -> slot_001_approach'):
+        validate_pallet_slot_stations(config, {'A'})

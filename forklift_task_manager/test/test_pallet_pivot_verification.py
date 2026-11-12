@@ -8,10 +8,11 @@ from forklift_msgs.msg import ForkliftVehicleState
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.time import Time
+from std_srvs.srv import Trigger
 
-from forklift_task_manager.route_model import PivotTarget, RelativeMoveTarget, RouteDefinition
-from forklift_task_manager.state_machine import TaskStateMachine, SUCCEEDED
-from forklift_task_manager.task_manager_node import TaskMotionAdapter
+from forklift_task_manager.route_model import PivotTarget, PoseTarget, RelativeMoveTarget, RouteDefinition
+from forklift_task_manager.state_machine import IDLE, TaskStateMachine, SUCCEEDED
+from forklift_task_manager.task_manager_node import ForkliftTaskManager, TaskMotionAdapter
 
 
 YAW_FAILURE = 'pivot stopped outside yaw tolerance; reverse correction disabled'
@@ -42,6 +43,10 @@ def rig(monkeypatch):
     adapter._pivot_yaw_tolerance_rad = 0.05
     adapter._pivot_yaw_rate_tolerance_radps = 0.03
     adapter._pivot_feedback_timeout_sec = 0.5
+    adapter._pivot_map_resume_enabled = False
+    adapter._pivot_map_resume_max_angle_rad = 0.15
+    adapter._pivot_map_heading_error = None
+    adapter._pivot_validation_callback = lambda target: (True, '')
     adapter._pallet_nav_arrival_speed_mps = 0.03
     adapter._pallet_nav_arrival_settle_sec = 0.3
     adapter._pivot_start_is_valid = lambda target: (True, '', -1.88)
@@ -91,6 +96,104 @@ def start_verification(rig, success=False, message=YAW_FAILURE):
     return done
 
 
+def set_map_yaw(rig, yaw):
+    rig.pose.transform.rotation.z = math.sin(yaw/2)
+    rig.pose.transform.rotation.w = math.cos(yaw/2)
+
+
+@pytest.mark.parametrize('sign', [-1., 1.])
+def test_small_stationary_map_undershoot_can_continue_once_in_original_direction(rig, sign):
+    rig.adapter._pivot_map_resume_enabled = True
+    rig.adapter._pivot_start_is_valid = lambda target: (True, '', sign*1.88)
+    set_map_yaw(rig, rig.target.yaw-sign*.0684)
+    done = start_verification(rig, success=True, message='pivot motion completed')
+    for _ in range(33):
+        rig.tick()
+    assert not done and len(rig.pivots) == 2
+    continuation = rig.pivots[-1]
+    assert continuation['angle_rad'] == pytest.approx(sign*.0684)
+    assert continuation['max_speed_mps'] <= .06
+    assert continuation['timeout_sec'] <= 10.
+    assert not rig.moves and not rig.exemptions
+    set_map_yaw(rig, rig.target.yaw)
+    continuation['done_callback'](True, 'pivot motion completed', SimpleNamespace(success=True))
+    for _ in range(5):
+        rig.tick()
+    assert done and done[0][0]
+
+
+@pytest.mark.parametrize('error', [-.0684, .25])
+def test_map_resume_never_reverses_or_exceeds_bounded_angle(rig, error):
+    rig.adapter._pivot_map_resume_enabled = True
+    rig.adapter._pivot_start_is_valid = lambda target: (True, '', 1.88)
+    set_map_yaw(rig, rig.target.yaw-error)
+    done = start_verification(rig, success=True, message='pivot motion completed')
+    for _ in range(33):
+        rig.tick()
+    assert len(rig.pivots) == 1
+    assert done and not done[0][0]
+
+
+def test_map_resume_rechecks_pivot_sweep_without_exemption(rig):
+    rig.adapter._pivot_map_resume_enabled = True
+    set_map_yaw(rig, rig.target.yaw+.0684)
+    rig.adapter._pivot_validation_callback = lambda target: (False, 'pillar in sweep')
+    done = start_verification(rig, success=True, message='pivot motion completed')
+    for _ in range(33):
+        rig.tick()
+    assert len(rig.pivots) == 1
+    assert done and not done[0][0]
+    assert 'pillar in sweep' in done[0][1]
+    assert not rig.exemptions
+
+
+def test_map_resume_has_one_action_budget_and_does_not_accept_persistent_error(rig):
+    rig.adapter._pivot_map_resume_enabled = True
+    set_map_yaw(rig, rig.target.yaw+.0684)
+    done = start_verification(rig, success=True, message='pivot motion completed')
+    for _ in range(33):
+        rig.tick()
+    assert len(rig.pivots) == 2
+    rig.pivots[-1]['done_callback'](True, 'pivot motion completed', SimpleNamespace(success=True))
+    for _ in range(33):
+        rig.tick()
+    assert len(rig.pivots) == 2
+    assert done and not done[0][0]
+
+
+@pytest.mark.parametrize('fault', ['stale', 'moving', 'yaw_rate', 'emergency'])
+def test_map_resume_requires_fresh_stationary_safe_feedback(rig, fault):
+    rig.adapter._pivot_map_resume_enabled = True
+    set_map_yaw(rig, rig.target.yaw+.0684)
+    if fault == 'moving':
+        rig.state.velocity_mps = .1
+    elif fault == 'yaw_rate':
+        rig.odom.twist.twist.angular.z = .1
+    elif fault == 'emergency':
+        rig.state.emergency_stopped = True
+    done = start_verification(rig, success=True, message='pivot motion completed')
+    for _ in range(33):
+        rig.tick(fresh=fault != 'stale')
+    assert len(rig.pivots) == 1
+    assert done and not done[0][0]
+
+
+def test_arrival_guard_uses_fresh_stopped_vehicle_not_only_position(rig):
+    # Move the goal to the recorded map pose so the failure is not positional.
+    target = PoseTarget('goal', rig.pose.transform.translation.x,
+                        rig.pose.transform.translation.y, 0.)
+    accepted, distance, _ = rig.adapter.anchor_arrival_status(target, .3, .03)
+    assert accepted and distance == 0.
+    rig.odom.twist.twist.angular.z = .2
+    assert not rig.adapter.anchor_arrival_status(target, .3, .03)[0]
+    rig.odom.twist.twist.angular.z = 0.
+    rig.state.velocity_mps = float('nan')
+    assert not rig.adapter.anchor_arrival_status(target, .3, .03)[0]
+    rig.state.velocity_mps = 0.
+    rig.tick(1., fresh=False)
+    assert not rig.adapter.anchor_arrival_status(target, .3, .03)[0]
+
+
 def test_recorded_map_pose_recovers_odom_yaw_failure_and_runs_final_approach(rig):
     target = rig.target
     final = RelativeMoveTarget(
@@ -114,6 +217,61 @@ def test_recorded_map_pose_recovers_odom_yaw_failure_and_runs_final_approach(rig
     rig.moves[0]['done_callback'](True, 'relative motion completed', None)
     assert machine.state == SUCCEEDED
     assert rig.exemptions[-1] is None
+
+
+def test_manual_pallet_egress_requires_completed_session_and_clears_after_move():
+    manager = ForkliftTaskManager.__new__(ForkliftTaskManager)
+    moves, publications, clears, logs = [], [], [], []
+    manager._pallet_egress_active = False
+    manager._pallet_egress_session_ready = False
+    manager._pallet_egress_recovery_ready = False
+    manager._pallet_exemption_target = object()
+    manager._pallet_egress_token = 0
+    manager._pallet_egress_distance_m = 1.0
+    manager._pallet_egress_speed_mps = 0.10
+    manager._pallet_egress_timeout_sec = 20.0
+    manager._pallet_exemption_phase_enabled = False
+    manager._pallet_exemption_active = False
+    manager._pallet_work_active = lambda: False
+    manager._machine = SimpleNamespace(state=IDLE)
+    manager._pickup_machine = SimpleNamespace(state=IDLE)
+    manager._pickup_devices = SimpleNamespace(
+        move_relative=lambda **kwargs: moves.append(kwargs),
+        cancel_all=lambda: None,
+    )
+    manager._publish_pallet_exemption = lambda: publications.append(
+        (manager._pallet_exemption_active, manager._pallet_egress_active)
+    )
+    manager._clear_pallet_exemption = lambda: clears.append(True)
+    manager.get_logger = lambda: SimpleNamespace(info=logs.append, warning=logs.append)
+
+    rejected = Trigger.Response()
+    assert not manager._pallet_egress(None, rejected).success
+
+    recovery_rejected = Trigger.Response()
+    assert not manager._pallet_egress_recovery(None, recovery_rejected).success
+
+    manager._pallet_egress_recovery_ready = True
+    recovery = Trigger.Response()
+    assert manager._pallet_egress_recovery(None, recovery).success
+    assert 'recovery started' in recovery.message
+    assert moves[0]['distance_m'] == pytest.approx(1.0)
+    moves[0]['done_callback'](True, 'relative motion completed', None)
+    assert clears
+
+    manager._pallet_egress_active = False
+    manager._pallet_egress_recovery_ready = False
+    manager._pallet_exemption_target = object()
+
+    manager._pallet_egress_session_ready = True
+    accepted = Trigger.Response()
+    assert manager._pallet_egress(None, accepted).success
+    assert moves[-1]['distance_m'] == pytest.approx(1.0)
+    assert moves[-1]['max_speed_mps'] == pytest.approx(0.10)
+    assert publications[-1] == (True, True)
+
+    moves[0]['done_callback'](True, 'relative motion completed', None)
+    assert clears
 
 
 @pytest.mark.parametrize('message', [

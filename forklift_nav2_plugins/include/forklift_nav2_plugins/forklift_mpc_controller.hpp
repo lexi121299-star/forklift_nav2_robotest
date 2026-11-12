@@ -103,7 +103,8 @@ private:
   zeroCommand(const geometry_msgs::msg::PoseStamped & pose) const;
   void publishControlCommand(
     double velocity, double steering,
-    const std::string & frame_id) const;
+    const std::string & frame_id,
+    bool brake_when_stopped = true) const;
   void publishControllerDebug(
     const geometry_msgs::msg::PoseStamped & pose,
     const MpcSegmentProjection & projection,
@@ -142,6 +143,12 @@ private:
   double nearestSafetyObstacleDistance(
     const MpcState & state,
     double motion_sign, double steering_angle) const;
+  double nearestTrajectorySafetyObstacleDistance(
+    const MpcTrajectory & trajectory,
+    const MpcSegmentProjection & projection, std::size_t segment_end) const;
+  nav_msgs::msg::Path makeSafetyReference(
+    const MpcTrajectory & trajectory, const MpcSegmentProjection & projection,
+    const MpcState & current, std::size_t segment_end) const;
   SafetyGateParameters safetyGateParameters() const;
   bool safetyEmergencyStopActive() const;
   bool previewHasReverseMotion(const MpcPreviewWindow & preview_window) const;
@@ -149,6 +156,12 @@ private:
   bool pivotCommandCollisionFree(
     const MpcState & state, double velocity,
     double steering, double target_yaw) const;
+  double plannedPivotDelta(
+    const MpcTrajectory & trajectory, std::size_t target_index,
+    double current_yaw) const;
+  bool offsetPivotEntryCollisionFree(
+    const MpcState & state, const MpcTrajectory & trajectory,
+    std::size_t target_index, double yaw_delta) const;
   void vehicleStateCallback(
     const forklift_msgs::msg::ForkliftVehicleState::SharedPtr message);
   bool currentSteeringAngle(double & steering_angle, double & age_sec) const;
@@ -223,6 +236,7 @@ private:
   double primitive_brake_deceleration_mps2_{0.5};
   double primitive_brake_clearance_m_{0.0};
   double pivot_entry_lateral_tolerance_m_{0.15};
+  bool pivot_entry_offset_recovery_enabled_{true};
   double pivot_stop_velocity_threshold_{0.02};
   double pivot_activation_distance_{0.20};
   bool pivot_step_enabled_{true};
@@ -467,6 +481,7 @@ private:
   double control_cmd_decel_time_{0.3};
   mutable double last_navigation_output_velocity_{0.0};
   mutable int64_t last_navigation_output_ns_{0};
+  nav_msgs::msg::Path safety_reference_;
   bool use_steering_feedback_{false};
   std::string steering_feedback_topic_{"/forklift/vehicle_state"};
   double steering_feedback_timeout_sec_{0.5};
@@ -482,6 +497,7 @@ private:
     forklift_msgs::msg::ForkliftControlCommand>::SharedPtr control_cmd_pub_;
   rclcpp_lifecycle::LifecyclePublisher<
     forklift_msgs::msg::ForkliftControllerDebug>::SharedPtr controller_debug_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr safety_reference_pub_;
 };
 
 } // namespace forklift_nav2_plugins

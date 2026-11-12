@@ -12,13 +12,18 @@ from action_msgs.srv import CancelGoal
 from ament_index_python.packages import get_package_share_directory
 from forklift_msgs.action import (
     DetectPalletOffset,
+    ExecuteDispatchTask,
     ExecutePalletPickup,
     ExecuteRoute,
     ForkMoveTo,
     MoveRelative,
     PivotRelative,
 )
-from forklift_msgs.msg import ForkliftVehicleState, TaskStatus
+from forklift_msgs.msg import (
+    DispatchTaskStatus,
+    ForkliftVehicleState,
+    TaskStatus,
+)
 from forklift_msgs.srv import GoToStation
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, FollowPath, NavigateToPose
@@ -46,6 +51,17 @@ from .anchor_route import (
     select_route_anchors,
     validate_anchor_config,
 )
+from .dispatch_task import (
+    DispatchTaskContext,
+    STATUS_CANCELED,
+    STATUS_FAILED,
+    STATUS_REJECTED,
+    STATUS_SUCCEEDED,
+    TYPE_NAVIGATE,
+    TYPE_PICKUP,
+)
+from .fork_position_client import ForkPositionClient, ForkPositionConfig
+from .pickup_job_state_machine import PickupJobStateMachine
 from .pallet_maneuver import (
     PalletManeuverConfig,
     circular_turn_is_clear,
@@ -60,7 +76,11 @@ from .route_model import (
     RouteDefinition,
 )
 from .route_model import load_routes, load_stations
-from .pallet_model import PalletConfigError, load_pallet_pickup_config
+from .pallet_model import (
+    PalletConfigError,
+    load_pallet_pickup_config,
+    validate_pallet_slot_stations,
+)
 from .pallet_pickup_state_machine import PalletPickupStateMachine
 from .state_machine import FAILED, IDLE, PAUSED, RECOVERING, RUNNING, SUCCEEDED
 from .state_machine import TaskStateMachine
@@ -392,7 +412,8 @@ class Nav2Navigator:
             if hasattr(goal, 'use_start'):
                 goal.use_start = False
             if hasattr(goal, 'planner_id'):
-                goal.planner_id = planner_id
+                # Foxy rejects an empty ID when several planners are loaded.
+                goal.planner_id = str(planner_id).strip() or 'GridBased'
             send_future = self._path_client.send_goal_async(goal)
         except Exception as exc:
             complete(False, 'ComputePathToPose request creation failed: {}'.format(exc))
@@ -564,10 +585,15 @@ class HierarchicalNav2Navigator:
                 target.name
             )
         )
+        segment_token = self._anchor_segment_token
+        segment_completed = {'value': False}
 
         def direct_done(success: bool, message: str) -> None:
-            if token != self._token:
+            if token != self._token or segment_completed['value']:
                 return
+            segment_completed['value'] = True
+            self._clear_anchor_arrival_timer()
+            self._clear_anchor_transition_timer()
             if success:
                 self._finish(True, message)
                 return
@@ -583,6 +609,8 @@ class HierarchicalNav2Navigator:
             else:
                 self._plan_anchor_route(token, message)
 
+        self._start_anchor_arrival_guard(
+            token, segment_token, target, True, segment_completed, direct_done)
         self._navigator.send_goal(target, direct_done)
 
     def cancel_goal(self) -> None:
@@ -756,10 +784,17 @@ class HierarchicalNav2Navigator:
                     len(path.poses), self._continuous_topology_planner_id
                 )
             )
+            self._anchor_segment_token += 1
+            segment_token = self._anchor_segment_token
+            segment_completed = {'value': False}
 
             def continuous_route_done(route_success, route_message) -> None:
-                if token != self._token:
+                if (token != self._token or segment_token != self._anchor_segment_token or
+                        segment_completed['value']):
                     return
+                segment_completed['value'] = True
+                self._clear_anchor_arrival_timer()
+                self._clear_anchor_transition_timer()
                 if route_success:
                     self._finish(True, 'continuous topology route completed')
                     return
@@ -774,6 +809,9 @@ class HierarchicalNav2Navigator:
                     ),
                 )
 
+            self._start_anchor_arrival_guard(
+                token, segment_token, self._original_goal, True,
+                segment_completed, continuous_route_done)
             self._navigator.send_follow_path(path, continuous_route_done)
 
         self._navigator.compute_path_result(
@@ -891,10 +929,10 @@ class HierarchicalNav2Navigator:
         segment_completed,
         segment_done,
     ) -> None:
-        """Advance only a stopped intermediate anchor that Nav2 left active."""
+        """Complete a verified stopped point even if Nav2 leaves its action active."""
 
         self._clear_anchor_arrival_timer()
-        if is_final or self._anchor_arrival_checker is None:
+        if self._anchor_arrival_checker is None:
             return
         stationary_since = {'value': None}
 
@@ -908,6 +946,7 @@ class HierarchicalNav2Navigator:
             try:
                 accepted, distance, reason = self._anchor_arrival_checker(
                     target,
+                    min(0.30, self._config.arrival_tolerance_m) if is_final else
                     self._config.arrival_tolerance_m,
                     self._config.arrival_speed_mps,
                 )
@@ -1006,9 +1045,15 @@ class PickupDeviceActions:
         detect_action_name: str,
         move_relative_action_name: str,
         pivot_relative_action_name: str,
+        fork_position_client: Optional[ForkPositionClient] = None,
     ) -> None:
         self._node = node
-        self._fork_client = ActionClient(node, ForkMoveTo, fork_action_name)
+        self._fork_position_client = fork_position_client
+        self._fork_client = (
+            None
+            if fork_position_client is not None
+            else ActionClient(node, ForkMoveTo, fork_action_name)
+        )
         self._detect_client = ActionClient(node, DetectPalletOffset, detect_action_name)
         self._move_relative_client = ActionClient(
             node, MoveRelative, move_relative_action_name
@@ -1021,6 +1066,8 @@ class PickupDeviceActions:
         self._request_token = 0
 
     def check_ready(self):
+        if self._fork_position_client is not None:
+            return self._fork_position_client.check_ready()
         return True, 'ready'
 
     def move_fork(
@@ -1033,6 +1080,16 @@ class PickupDeviceActions:
         done_callback,
         feedback_callback=None,
     ) -> None:
+        if self._fork_position_client is not None:
+            self._fork_position_client.move_to(
+                target_height_m=target_height_m,
+                side_shift_m=side_shift_m,
+                tilt_rad=tilt_rad,
+                timeout_sec=timeout_sec,
+                done_callback=done_callback,
+                feedback_callback=feedback_callback,
+            )
+            return
         goal = ForkMoveTo.Goal()
         goal.target_height_m = float(target_height_m)
         goal.side_shift_m = float(side_shift_m)
@@ -1110,6 +1167,8 @@ class PickupDeviceActions:
 
     def cancel_all(self) -> None:
         self._request_token += 1
+        if self._fork_position_client is not None:
+            self._fork_position_client.cancel()
         for goal_handle in self._goal_handles:
             goal_handle.cancel_goal_async()
         self._goal_handles = []
@@ -1227,6 +1286,8 @@ class TaskMotionAdapter:
         pivot_yaw_rate_tolerance_radps: float = 0.03,
         pivot_feedback_timeout_sec: float = 0.5,
         pivot_odom_topic: str = '/odom',
+        pivot_map_resume_enabled: bool = True,
+        pivot_map_resume_max_angle_rad: float = 0.15,
     ) -> None:
         self._node = node
         self._navigator = navigator
@@ -1255,6 +1316,12 @@ class TaskMotionAdapter:
         self._pivot_yaw_tolerance_rad = pivot_yaw_tolerance_rad
         self._pivot_yaw_rate_tolerance_radps = pivot_yaw_rate_tolerance_radps
         self._pivot_feedback_timeout_sec = pivot_feedback_timeout_sec
+        self._pivot_map_resume_enabled = bool(pivot_map_resume_enabled)
+        self._pivot_map_resume_max_angle_rad = float(pivot_map_resume_max_angle_rad)
+        if not (math.isfinite(self._pivot_map_resume_max_angle_rad) and
+                pivot_yaw_tolerance_rad < self._pivot_map_resume_max_angle_rad <= 0.20):
+            raise ValueError('pallet map-heading continuation limit must be above yaw tolerance and <= 0.20')
+        self._pivot_map_heading_error = None
         for value in (pivot_verify_timeout_sec, pivot_yaw_tolerance_rad,
                       pivot_yaw_rate_tolerance_radps, pivot_feedback_timeout_sec):
             if not math.isfinite(value) or value <= 0.0:
@@ -1286,28 +1353,7 @@ class TaskMotionAdapter:
                 self._verify_pivot_completion(target, token, done_callback)
                 return
 
-            def pivot_done(success, message, result) -> None:
-                if token != self._motion_token:
-                    return
-                # Only this terminal odom-relative yaw failure is recoverable.
-                # Timeout, cancellation and safety/feedback failures stay failed.
-                odom_yaw_mismatch = (
-                    result is not None and
-                    message == 'pivot stopped outside yaw tolerance; reverse correction disabled'
-                )
-                if not success and not odom_yaw_mismatch:
-                    done_callback(False, message)
-                    return
-                self._verify_pivot_completion(
-                    target, token, done_callback,
-                    odom_yaw_mismatch=odom_yaw_mismatch)
-
-            self._devices.pivot_relative(
-                angle_rad=angle,
-                max_speed_mps=target.max_speed_mps,
-                timeout_sec=target.timeout_sec,
-                done_callback=pivot_done,
-            )
+            self._send_pallet_pivot(target, angle, token, done_callback)
             return
         if isinstance(target, RelativeMoveTarget):
             ready, message = self._relative_start_is_valid(target)
@@ -1333,6 +1379,36 @@ class TaskMotionAdapter:
             return
         self._navigator.send_goal(target, done_callback)
 
+    def _send_pallet_pivot(self, target, angle, token, done_callback, continuation=False):
+        """Keep one optional map-heading continuation within the original turn direction."""
+        if token != self._motion_token:
+            return
+
+        def pivot_done(success, message, result):
+            if token != self._motion_token:
+                return
+            odom_yaw_mismatch = (
+                result is not None and
+                message == 'pivot stopped outside yaw tolerance; reverse correction disabled')
+            if not success and not odom_yaw_mismatch:
+                done_callback(False, message)
+                return
+
+            def resume(signed_error):
+                self._send_pallet_pivot(
+                    target, signed_error, token, done_callback, continuation=True)
+
+            self._verify_pivot_completion(
+                target, token, done_callback, odom_yaw_mismatch=odom_yaw_mismatch,
+                resume_callback=resume if self._pivot_map_resume_enabled and not continuation else None,
+                requested_direction=math.copysign(1.0, angle))
+
+        self._devices.pivot_relative(
+            angle_rad=angle,
+            max_speed_mps=min(target.max_speed_mps, 0.06) if continuation else target.max_speed_mps,
+            timeout_sec=min(target.timeout_sec, 10.0) if continuation else target.timeout_sec,
+            done_callback=pivot_done)
+
     def cancel_goal(self) -> None:
         self._motion_token += 1
         self._clear_pivot_verification()
@@ -1355,9 +1431,10 @@ class TaskMotionAdapter:
         age = (self._node.get_clock().now().nanoseconds - source_ns) / 1e9
         return source_ns > 0 and -0.1 <= age <= self._pivot_feedback_timeout_sec
 
-    def _pivot_completion_status(self, target):
+    def _pivot_completion_status(self, target, yaw_tolerance=None):
         """Verify the absolute pallet heading, not odom's accumulated rotation."""
         now = time.monotonic()
+        self._pivot_map_heading_error = None
         state = self._latest_pivot_vehicle_state
         odom = self._latest_pivot_odom
         if (state is None or
@@ -1393,30 +1470,51 @@ class TaskMotionAdapter:
                 abs(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1.0) > 0.01):
             return False, 'invalid map pose', 0
         yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z))
-        heading_error = abs(math.atan2(math.sin(target.yaw-yaw), math.cos(target.yaw-yaw)))
+        signed_error = math.atan2(math.sin(target.yaw-yaw), math.cos(target.yaw-yaw))
+        heading_error = abs(signed_error)
         position_error = math.hypot(translation.x-target.x, translation.y-target.y)
         detail = 'position_error={:.3f} m heading_error={:.4f} rad'.format(
             position_error, heading_error)
         valid = (position_error <= target.max_start_position_error_m and
-                 heading_error <= self._pivot_yaw_tolerance_rad)
+                 heading_error <= (self._pivot_yaw_tolerance_rad if yaw_tolerance is None else
+                                   yaw_tolerance))
+        if position_error <= target.max_start_position_error_m:
+            self._pivot_map_heading_error = signed_error
         stamp_ns = (int(transform.header.stamp.sec)*1000000000 +
                     int(transform.header.stamp.nanosec))
         return valid, detail, stamp_ns
 
     def _verify_pivot_completion(
         self, target, token, done_callback, odom_yaw_mismatch=False,
+        resume_callback=None, requested_direction=0.0,
     ) -> None:
         self._clear_pivot_verification()
         started = time.monotonic()
         stable_since = None
         first_stamp = None
         finished = False
+        resume_since = None
+        resume_first_stamp = None
 
         def check():
-            nonlocal stable_since, first_stamp, finished
+            nonlocal stable_since, first_stamp, finished, resume_since, resume_first_stamp
             if finished or token != self._motion_token:
                 return
             valid, detail, stamp = self._pivot_completion_status(target)
+            resume_error = None
+            if not valid and resume_callback is not None:
+                eligible, _, resume_stamp = self._pivot_completion_status(
+                    target, yaw_tolerance=self._pivot_map_resume_max_angle_rad)
+                error = self._pivot_map_heading_error
+                if (eligible and error is not None and
+                        error*requested_direction > self._pivot_yaw_tolerance_rad):
+                    resume_error = error
+                    if resume_since is None:
+                        resume_since, resume_first_stamp = time.monotonic(), resume_stamp
+                else:
+                    resume_since = resume_first_stamp = None
+            else:
+                resume_since = resume_first_stamp = None
             if token != self._motion_token:
                 return
             now = time.monotonic()
@@ -1437,6 +1535,22 @@ class TaskMotionAdapter:
                 self._node.get_logger().info(message)
                 done_callback(True, message)
             else:
+                if (resume_error is not None and resume_since is not None and
+                        resume_stamp > resume_first_stamp and
+                        now-resume_since >= max(0.3, self._pallet_nav_arrival_settle_sec)):
+                    # Recheck the complete actual-position pivot sweep. No
+                    # exemption is armed for this continuation.
+                    try:
+                        clear, reason = self._pivot_validation_callback(target)
+                    except Exception as exc:
+                        clear, reason = False, str(exc)
+                    if clear and token == self._motion_token:
+                        self._node.get_logger().warning(
+                            'pallet map-heading continuation: error={:.4f} rad; '
+                            'one same-direction request, no reverse calibration'.format(resume_error))
+                        resume_callback(resume_error)
+                        return
+                    detail += '; map-heading continuation blocked: ' + reason
                 message = 'pallet pivot map verification failed: ' + detail
                 self._node.get_logger().warning(message)
                 done_callback(False, message)
@@ -1457,16 +1571,43 @@ class TaskMotionAdapter:
         tolerance_m: float,
         speed_limit_mps: float,
     ):
-        """Return whether a non-final hierarchy anchor is safely stopped."""
+        """Verify a fresh map pose and valid stationary feedback at a route goal."""
 
-        distance = self.planar_distance_to(target)
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                target.frame_id, self._base_frame_id, Time())
+        except Exception as exc:
+            return False, math.inf, 'arrival TF unavailable: {}'.format(exc)
+        if not self._pivot_stamp_is_fresh(transform.header.stamp):
+            return False, math.inf, 'arrival TF stale'
+        point = transform.transform.translation
+        distance = math.hypot(point.x-target.x, point.y-target.y)
+        if not math.isfinite(distance):
+            return False, math.inf, 'invalid arrival position'
         if distance > tolerance_m:
             return False, distance, 'distance exceeds tolerance'
+        state = self._latest_pivot_vehicle_state
         state_age = time.monotonic() - self._latest_vehicle_state_time
-        if self._latest_vehicle_speed_mps is None or state_age > 0.5:
+        if (state is None or state_age > self._pivot_feedback_timeout_sec or
+                not self._pivot_stamp_is_fresh(state.header.stamp)):
             return False, distance, 'vehicle state is stale'
-        if self._latest_vehicle_speed_mps > speed_limit_mps:
+        if (not state.enabled or not state.auto_mode or state.emergency_stopped or
+                state.soft_emergency_stop or state.parking_brake or not state.interlock):
+            return False, distance, 'vehicle not ready'
+        speed = float(state.velocity_mps)
+        if not math.isfinite(speed):
+            return False, distance, 'non-finite vehicle speed'
+        if abs(speed) > speed_limit_mps:
             return False, distance, 'vehicle is still moving'
+        if math.isfinite(speed_limit_mps):
+            odom = self._latest_pivot_odom
+            if (odom is None or
+                    time.monotonic()-self._latest_pivot_odom_time > self._pivot_feedback_timeout_sec or
+                    not self._pivot_stamp_is_fresh(odom.header.stamp)):
+                return False, distance, 'arrival angular feedback stale'
+            yaw_rate = float(odom.twist.twist.angular.z)
+            if not math.isfinite(yaw_rate) or abs(yaw_rate) > self._pivot_yaw_rate_tolerance_radps:
+                return False, distance, 'vehicle is still rotating'
         return True, distance, 'vehicle stopped inside tolerance'
 
     def _send_pallet_navigation(self, target: PoseTarget, done_callback) -> None:
@@ -1717,10 +1858,27 @@ class ForkliftTaskManager(Node):
         )
         self.declare_parameter('max_retries', 1)
         self.declare_parameter('navigate_to_pose_action', 'navigate_to_pose')
+        self.declare_parameter('dispatch_task_action', 'execute_dispatch_task')
+        self.declare_parameter(
+            'dispatch_task_status_topic', '/forklift/dispatch/task_status'
+        )
         self.declare_parameter(
             'pallet_slots_file', package_share + '/config/pallet_slots.yaml'
         )
         self.declare_parameter('fork_move_to_action', '/forklift/fork/move_to')
+        self.declare_parameter('use_fork_position_topics', False)
+        self.declare_parameter('fork_command_topic', '/forklift/fork/command')
+        self.declare_parameter('fork_state_topic', '/forklift/fork/state')
+        self.declare_parameter('fork_state_timeout_sec', 0.5)
+        self.declare_parameter('fork_height_tolerance_m', 0.01)
+        self.declare_parameter('fork_side_shift_tolerance_m', 0.005)
+        self.declare_parameter('fork_tilt_tolerance_rad', 0.01)
+        self.declare_parameter('fork_height_max_speed_mps', 0.0)
+        self.declare_parameter('fork_side_shift_max_speed_mps', 0.0)
+        self.declare_parameter('fork_tilt_max_speed_radps', 0.0)
+        self.declare_parameter('fork_require_height_feedback', True)
+        self.declare_parameter('fork_require_side_shift_feedback', True)
+        self.declare_parameter('fork_require_tilt_feedback', True)
         self.declare_parameter(
             'detect_pallet_offset_action',
             '/forklift/perception/detect_pallet_offset',
@@ -1756,7 +1914,7 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('anchor_max_count', 20)
         self.declare_parameter('anchor_split_max_depth', 4)
         self.declare_parameter('anchor_segment_retry_count', 2)
-        self.declare_parameter('anchor_arrival_tolerance_m', 0.35)
+        self.declare_parameter('anchor_arrival_tolerance_m', 0.40)
         self.declare_parameter('anchor_arrival_speed_mps', 0.03)
         self.declare_parameter('anchor_arrival_settle_sec', 0.30)
         self.declare_parameter('anchor_arrival_transition_delay_sec', 0.25)
@@ -1791,11 +1949,13 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('pallet_turn_keepout_radius_m', 1.50)
         self.declare_parameter('pallet_turn_collision_cost_threshold', 254)
         self.declare_parameter('pallet_turn_blocked_wait_sec', 5.0)
-        self.declare_parameter('pallet_nav_arrival_tolerance_m', 0.35)
+        self.declare_parameter('pallet_nav_arrival_tolerance_m', 0.40)
         self.declare_parameter('pallet_nav_arrival_speed_mps', 0.03)
         self.declare_parameter('pallet_nav_arrival_settle_sec', 0.30)
         self.declare_parameter('pallet_pivot_verify_timeout_sec', 3.0)
         self.declare_parameter('pallet_pivot_yaw_tolerance_rad', 0.05)
+        self.declare_parameter('pallet_pivot_map_resume_enabled', True)
+        self.declare_parameter('pallet_pivot_map_resume_max_angle_rad', 0.15)
         self.declare_parameter('pallet_pivot_yaw_rate_tolerance_radps', 0.03)
         self.declare_parameter('pallet_pivot_feedback_timeout_sec', 0.5)
         self.declare_parameter('pallet_pivot_odom_topic', '/odom')
@@ -1813,7 +1973,16 @@ class ForkliftTaskManager(Node):
         self.declare_parameter('pallet_exemption_activation_distance_m', 4.0)
         self.declare_parameter('pallet_exemption_deactivation_distance_m', 4.5)
         self.declare_parameter('pallet_exemption_length_m', 1.80)
-        self.declare_parameter('pallet_exemption_width_m', 1.60)
+        self.declare_parameter('pallet_exemption_width_m', 2.20)
+        # Manual egress is intentionally independent from the final approach.
+        # It is only armed after a successful RViz pallet approach and always
+        # uses the selected pallet rectangle as its narrow exemption zone.
+        self.declare_parameter('pallet_egress_distance_m', 1.00)
+        self.declare_parameter('pallet_egress_speed_mps', 0.10)
+        self.declare_parameter('pallet_egress_timeout_sec', 20.0)
+        # This is an explicit operator/dispatcher recovery request.  It does
+        # not alter the normal automatic resume behaviour after a scan clears.
+        self.declare_parameter('manual_obstacle_recovery_enabled', True)
         self.declare_parameter('pallet_reachability_max_candidates', 32)
         self.declare_parameter('pallet_keepout_publish_settle_sec', 0.15)
 
@@ -1823,6 +1992,9 @@ class ForkliftTaskManager(Node):
         action_name = self.get_parameter('navigate_to_pose_action').value
         pallet_slots_file = self.get_parameter('pallet_slots_file').value
         fork_action_name = self.get_parameter('fork_move_to_action').value
+        use_fork_position_topics = bool(
+            self.get_parameter('use_fork_position_topics').value
+        )
         detect_action_name = self.get_parameter('detect_pallet_offset_action').value
         move_relative_action_name = self.get_parameter('move_relative_action').value
         pivot_relative_action_name = self.get_parameter('pivot_relative_action').value
@@ -1910,6 +2082,25 @@ class ForkliftTaskManager(Node):
             or self._pallet_exemption_width_m <= 0.0
         ):
             raise ValueError('pallet exemption dimensions must be positive')
+        self._pallet_egress_distance_m = float(
+            self.get_parameter('pallet_egress_distance_m').value
+        )
+        self._pallet_egress_speed_mps = float(
+            self.get_parameter('pallet_egress_speed_mps').value
+        )
+        self._pallet_egress_timeout_sec = float(
+            self.get_parameter('pallet_egress_timeout_sec').value
+        )
+        for name, value in (
+            ('pallet_egress_distance_m', self._pallet_egress_distance_m),
+            ('pallet_egress_speed_mps', self._pallet_egress_speed_mps),
+            ('pallet_egress_timeout_sec', self._pallet_egress_timeout_sec),
+        ):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError('{} must be finite and positive'.format(name))
+        self._manual_obstacle_recovery_enabled = bool(
+            self.get_parameter('manual_obstacle_recovery_enabled').value
+        )
         self._pallet_reachability_max_candidates = int(
             self.get_parameter('pallet_reachability_max_candidates').value
         )
@@ -2092,6 +2283,10 @@ class ForkliftTaskManager(Node):
             raise
         try:
             self._pallet_config = load_pallet_pickup_config(pallet_slots_file)
+            validate_pallet_slot_stations(
+                self._pallet_config,
+                self._stations.keys(),
+            )
         except PalletConfigError as exc:
             self.get_logger().fatal(
                 'Pallet pickup configuration is invalid: {}'.format(exc)
@@ -2103,6 +2298,11 @@ class ForkliftTaskManager(Node):
         status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self._status_pub = self.create_publisher(
             TaskStatus, '/forklift/task_status', status_qos
+        )
+        self._dispatch_status_pub = self.create_publisher(
+            DispatchTaskStatus,
+            str(self.get_parameter('dispatch_task_status_topic').value),
+            status_qos,
         )
         self._approach_pose_pubs = {
             name: self.create_publisher(
@@ -2124,6 +2324,11 @@ class ForkliftTaskManager(Node):
             '/forklift/pallet_approach/exemption_active',
             status_qos,
         )
+        self._pallet_egress_active_pub = self.create_publisher(
+            Bool,
+            '/forklift/pallet_approach/egress_active',
+            status_qos,
+        )
         self._navigation_anchor_index_pub = self.create_publisher(
             Int32,
             '/forklift/navigation_anchor_index',
@@ -2132,18 +2337,77 @@ class ForkliftTaskManager(Node):
         self._pallet_exemption_target: Optional[PoseTarget] = None
         self._pallet_exemption_active = False
         self._pallet_exemption_phase_enabled = False
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_recovery_ready = False
+        self._pallet_egress_active = False
+        self._pallet_egress_token = 0
         self._pallet_selection_token = 0
         self._pallet_selection_active = False
         self._pallet_selection_deadline = 0.0
+        self._last_safety_gate_reason = ''
         self._latest_global_costmap = None
         self._latest_local_costmap = None
+        self._dispatch_task_context = DispatchTaskContext()
+        self._legacy_task_sequence = 0
 
+        self._fork_position_client = None
+        if use_fork_position_topics:
+            self._fork_position_client = ForkPositionClient(
+                self,
+                ForkPositionConfig(
+                    command_topic=str(
+                        self.get_parameter('fork_command_topic').value
+                    ),
+                    state_topic=str(self.get_parameter('fork_state_topic').value),
+                    state_timeout_sec=float(
+                        self.get_parameter('fork_state_timeout_sec').value
+                    ),
+                    height_tolerance_m=float(
+                        self.get_parameter('fork_height_tolerance_m').value
+                    ),
+                    side_shift_tolerance_m=float(
+                        self.get_parameter('fork_side_shift_tolerance_m').value
+                    ),
+                    tilt_tolerance_rad=float(
+                        self.get_parameter('fork_tilt_tolerance_rad').value
+                    ),
+                    height_max_speed_mps=float(
+                        self.get_parameter('fork_height_max_speed_mps').value
+                    ),
+                    side_shift_max_speed_mps=float(
+                        self.get_parameter(
+                            'fork_side_shift_max_speed_mps'
+                        ).value
+                    ),
+                    tilt_max_speed_radps=float(
+                        self.get_parameter('fork_tilt_max_speed_radps').value
+                    ),
+                    require_height_feedback=bool(
+                        self.get_parameter('fork_require_height_feedback').value
+                    ),
+                    require_side_shift_feedback=bool(
+                        self.get_parameter(
+                            'fork_require_side_shift_feedback'
+                        ).value
+                    ),
+                    require_tilt_feedback=bool(
+                        self.get_parameter('fork_require_tilt_feedback').value
+                    ),
+                ),
+            )
         self._pickup_devices = PickupDeviceActions(
             self,
             fork_action_name,
             detect_action_name,
             move_relative_action_name,
             pivot_relative_action_name,
+            fork_position_client=self._fork_position_client,
+        )
+        self.get_logger().info(
+            'Fork interface mode: {}.'.format(
+                'command/state topics' if use_fork_position_topics
+                else 'ForkMoveTo action'
+            )
         )
         self._nav2_navigator = Nav2Navigator(self, action_name)
         self._hierarchical_navigator = HierarchicalNav2Navigator(
@@ -2182,6 +2446,10 @@ class ForkliftTaskManager(Node):
             pivot_feedback_timeout_sec=float(
                 self.get_parameter('pallet_pivot_feedback_timeout_sec').value),
             pivot_odom_topic=str(self.get_parameter('pallet_pivot_odom_topic').value),
+            pivot_map_resume_enabled=bool(
+                self.get_parameter('pallet_pivot_map_resume_enabled').value),
+            pivot_map_resume_max_angle_rad=float(
+                self.get_parameter('pallet_pivot_map_resume_max_angle_rad').value),
         )
         self._hierarchical_navigator.set_anchor_arrival_checker(
             self._navigator.anchor_arrival_status
@@ -2195,6 +2463,13 @@ class ForkliftTaskManager(Node):
             self._pickup_devices,
             self._pallet_config.defaults,
             status_callback=self._publish_pickup_status,
+        )
+        self._pickup_job_machine = PickupJobStateMachine(
+            self._navigator,
+            self._pickup_devices,
+            self._pallet_config.defaults,
+            max_retries=max_retries,
+            status_callback=self._publish_pickup_job_status,
         )
         self._last_completed_station = ''
 
@@ -2217,10 +2492,32 @@ class ForkliftTaskManager(Node):
             cancel_callback=self._pallet_pickup_cancel,
             callback_group=self._action_cb_group,
         )
+        self._execute_dispatch_task_server = ActionServer(
+            self,
+            ExecuteDispatchTask,
+            str(self.get_parameter('dispatch_task_action').value),
+            execute_callback=self._execute_dispatch_task,
+            goal_callback=self._dispatch_task_goal,
+            cancel_callback=self._dispatch_task_cancel,
+            callback_group=self._action_cb_group,
+        )
         self.create_service(GoToStation, 'go_to_station', self._go_to_station)
         self.create_service(Trigger, 'pause', self._pause)
         self.create_service(Trigger, 'resume', self._resume)
         self.create_service(Trigger, 'cancel', self._cancel)
+        self.create_service(
+            Trigger,
+            '/forklift/navigation/recover_obstacle',
+            self._recover_obstacle,
+        )
+        self.create_service(
+            Trigger, '/forklift/pallet_approach/egress', self._pallet_egress
+        )
+        self.create_service(
+            Trigger,
+            '/forklift/pallet_approach/egress_recovery',
+            self._pallet_egress_recovery,
+        )
         self.create_subscription(
             PoseStamped,
             str(self.get_parameter('navigation_goal_topic').value),
@@ -2253,6 +2550,7 @@ class ForkliftTaskManager(Node):
         self.create_timer(0.1, self._update_pallet_exemption)
         self._publish_pallet_exemption()
         self._publish_navigation_status(self._machine)
+        self._publish_dispatch_status()
         self.get_logger().info(
             'Loaded {} stations, {} routes, and {} pallet slots; RViz goal mode={} '
             'legacy_goal_pose={} hierarchical_navigation={} topology_planner={} '
@@ -2267,6 +2565,313 @@ class ForkliftTaskManager(Node):
             )
         )
 
+    def _dispatch_task_goal(
+        self,
+        goal_request: ExecuteDispatchTask.Goal,
+    ) -> GoalResponse:
+        task_id = goal_request.task_id.strip()
+        if not task_id:
+            self._publish_dispatch_rejection(
+                task_id='',
+                task_type=int(goal_request.task_type),
+                reason='dispatch task_id must not be empty',
+            )
+            return GoalResponse.REJECT
+        if (
+            self._dispatch_task_context.active
+            and self._dispatch_task_context.task_id == task_id
+        ):
+            self._publish_dispatch_rejection(
+                task_id=task_id,
+                task_type=int(goal_request.task_type),
+                reason='dispatch task_id is already active',
+            )
+            return GoalResponse.REJECT
+        if goal_request.task_type not in {TYPE_NAVIGATE, TYPE_PICKUP}:
+            self._publish_dispatch_rejection(
+                task_id=task_id,
+                task_type=int(goal_request.task_type),
+                reason='dispatch task type is not enabled yet',
+            )
+            return GoalResponse.REJECT
+        if goal_request.task_type == TYPE_PICKUP:
+            slot_id = goal_request.slot_id.strip()
+            if not slot_id or slot_id not in self._pallet_config.slots:
+                self._publish_dispatch_rejection(
+                    task_id=task_id,
+                    task_type=TYPE_PICKUP,
+                    reason='PICKUP slot_id is unknown or empty',
+                )
+                return GoalResponse.REJECT
+            if (
+                self._pickup_machine.state in {RUNNING, PAUSED}
+                or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+                or self._pallet_work_active()
+            ):
+                self._publish_dispatch_rejection(
+                    task_id=task_id,
+                    task_type=TYPE_PICKUP,
+                    reason='another pallet task owns motion control',
+                )
+                return GoalResponse.REJECT
+            return GoalResponse.ACCEPT
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+            or self._pallet_work_active()
+        ):
+            self._publish_dispatch_rejection(
+                task_id=task_id,
+                task_type=TYPE_NAVIGATE,
+                reason='pallet task owns motion control',
+            )
+            return GoalResponse.REJECT
+        pose = goal_request.target_pose
+        if not pose.header.frame_id or not all(
+            math.isfinite(value)
+            for value in (
+                pose.pose.position.x,
+                pose.pose.position.y,
+                pose.pose.orientation.x,
+                pose.pose.orientation.y,
+                pose.pose.orientation.z,
+                pose.pose.orientation.w,
+            )
+        ):
+            self._publish_dispatch_rejection(
+                task_id=task_id,
+                task_type=TYPE_NAVIGATE,
+                reason='NAVIGATE target_pose must have a frame and finite pose',
+            )
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    @staticmethod
+    def _dispatch_task_cancel(_goal_handle) -> CancelResponse:
+        return CancelResponse.ACCEPT
+
+    def _execute_dispatch_task(self, goal_handle):
+        request = goal_handle.request
+        task_id = request.task_id.strip()
+        result = ExecuteDispatchTask.Result()
+        if request.task_type == TYPE_PICKUP:
+            accepted, message = self._start_dispatch_pickup(
+                task_id=task_id,
+                slot_id=request.slot_id.strip(),
+            )
+        else:
+            accepted, message = self._start_dispatch_navigation(
+                task_id=task_id,
+                pose=request.target_pose,
+                route_name='dispatch_navigation',
+            )
+        if not accepted:
+            result.success = False
+            result.final_status = self._dispatch_task_context.status
+            result.message = message
+            goal_handle.abort()
+            return result
+
+        rate = self.create_rate(10.0)
+        try:
+            while (
+                self._dispatch_task_context.task_id == task_id
+                and self._dispatch_task_is_active()
+            ):
+                if goal_handle.is_cancel_requested:
+                    self._cancel_active_dispatch_task(
+                        'dispatch action canceled by client'
+                    )
+                    result.success = False
+                    result.final_status = STATUS_CANCELED
+                    result.message = 'dispatch action canceled by client'
+                    goal_handle.canceled()
+                    return result
+                feedback = ExecuteDispatchTask.Feedback()
+                feedback.status = self._dispatch_task_context.status
+                feedback.phase = self._dispatch_task_context.phase
+                feedback.progress = self._dispatch_task_context.progress
+                feedback.message = self._dispatch_task_context.reason
+                goal_handle.publish_feedback(feedback)
+                rate.sleep()
+        finally:
+            self.destroy_rate(rate)
+
+        if self._dispatch_task_context.task_id != task_id:
+            result.success = False
+            result.final_status = STATUS_CANCELED
+            result.message = 'dispatch task replaced by a newer task'
+            goal_handle.canceled()
+            return result
+
+        result.success = self._dispatch_task_context.status == STATUS_SUCCEEDED
+        result.final_status = self._dispatch_task_context.status
+        result.message = self._dispatch_task_context.reason
+        if result.success:
+            goal_handle.succeed()
+        elif self._dispatch_task_context.status == STATUS_CANCELED:
+            goal_handle.canceled()
+        else:
+            goal_handle.abort()
+        return result
+
+    def _start_dispatch_navigation(
+        self,
+        *,
+        task_id: str,
+        pose: PoseStamped,
+        route_name: str,
+    ):
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+            or self._pallet_work_active()
+        ):
+            reason = 'pallet task owns motion control'
+            self._dispatch_task_context.reject(task_id, TYPE_NAVIGATE, reason)
+            self._publish_dispatch_status()
+            return False, reason
+        if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
+            self._cancel_active_dispatch_task('replaced by a newer navigation task')
+        if self._pallet_exemption_target is not None:
+            self._clear_pallet_exemption()
+
+        self._dispatch_task_context.begin(task_id, TYPE_NAVIGATE)
+        self._publish_dispatch_status()
+        target = PoseTarget(
+            name='navigation_goal',
+            x=float(pose.pose.position.x),
+            y=float(pose.pose.position.y),
+            yaw=self._pose_yaw(pose),
+            frame_id=pose.header.frame_id or 'map',
+        )
+        route = RouteDefinition(
+            name=route_name,
+            loop=False,
+            targets=(target,),
+        )
+        accepted, message = self._machine.start(route, loop=False)
+        if not accepted:
+            self._dispatch_task_context.status = STATUS_FAILED
+            self._dispatch_task_context.phase = 'FAILED'
+            self._dispatch_task_context.reason = message
+            self._publish_dispatch_status()
+        return accepted, message
+
+    def _start_dispatch_pickup(self, *, task_id: str, slot_id: str):
+        slot = self._pallet_config.slots.get(slot_id)
+        if slot is None:
+            reason = 'PICKUP slot_id is unknown or empty'
+            self._dispatch_task_context.reject(task_id, TYPE_PICKUP, reason)
+            self._publish_dispatch_status()
+            return False, reason
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+            or self._pallet_work_active()
+        ):
+            reason = 'another pallet task owns motion control'
+            self._dispatch_task_context.reject(task_id, TYPE_PICKUP, reason)
+            self._publish_dispatch_status()
+            return False, reason
+        if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
+            self._cancel_active_dispatch_task('preempted by pickup task')
+        approach_target = self._stations.get(slot.approach_station)
+        if approach_target is None:
+            reason = 'pickup approach station {} is unavailable'.format(
+                slot.approach_station
+            )
+            self._dispatch_task_context.reject(task_id, TYPE_PICKUP, reason)
+            self._publish_dispatch_status()
+            return False, reason
+
+        self._dispatch_task_context.begin(task_id, TYPE_PICKUP, slot_id)
+        self._dispatch_task_context.phase = 'NAVIGATE_TO_APPROACH'
+        self._publish_dispatch_status()
+        accepted, message = self._pickup_job_machine.start(slot, approach_target)
+        if not accepted:
+            self._dispatch_task_context.status = STATUS_FAILED
+            self._dispatch_task_context.phase = 'FAILED'
+            self._dispatch_task_context.reason = message
+            self._publish_dispatch_status()
+        return accepted, message
+
+    def _dispatch_task_is_active(self) -> bool:
+        if self._dispatch_task_context.task_type == TYPE_PICKUP:
+            return self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+        return self._machine.state in {RUNNING, PAUSED, RECOVERING}
+
+    def _cancel_active_dispatch_task(self, reason: str) -> None:
+        if self._dispatch_task_context.active:
+            self._dispatch_task_context.cancel(reason)
+            self._publish_dispatch_status()
+        if self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}:
+            self._pickup_job_machine.cancel(reason)
+        if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
+            self._machine.cancel(reason)
+
+    def _next_legacy_navigation_task_id(self) -> str:
+        self._legacy_task_sequence += 1
+        return 'rviz-navigation-{}'.format(self._legacy_task_sequence)
+
+    def _publish_dispatch_rejection(
+        self,
+        *,
+        task_id: str,
+        task_type: int,
+        reason: str,
+    ) -> None:
+        if self._dispatch_task_context.active:
+            self._publish_dispatch_status_values(
+                task_id=task_id,
+                task_type=task_type,
+                task_status_code=STATUS_REJECTED,
+                phase='REJECTED',
+                progress=0.0,
+                slot_id='',
+                reason=reason,
+            )
+            # The task-status topic is transient-local. Restore the active
+            # snapshot so a late subscriber observes the task that owns motion.
+            self._publish_dispatch_status()
+            return
+        self._dispatch_task_context.reject(task_id, task_type, reason)
+        self._publish_dispatch_status()
+
+    def _publish_dispatch_status(self) -> None:
+        context = self._dispatch_task_context
+        self._publish_dispatch_status_values(
+            task_id=context.task_id,
+            task_type=context.task_type,
+            task_status_code=context.status,
+            phase=context.phase,
+            progress=context.progress,
+            slot_id=context.slot_id,
+            reason=context.reason,
+        )
+
+    def _publish_dispatch_status_values(
+        self,
+        *,
+        task_id: str,
+        task_type: int,
+        task_status_code: int,
+        phase: str,
+        progress: float,
+        slot_id: str,
+        reason: str,
+    ) -> None:
+        message = DispatchTaskStatus()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.task_id = task_id
+        message.task_type = task_type
+        message.status = task_status_code
+        message.phase = phase
+        message.progress = progress
+        message.slot_id = slot_id
+        message.reason = reason
+        self._dispatch_status_pub.publish(message)
+
     def _route_goal(self, goal_request: ExecuteRoute.Goal) -> GoalResponse:
         if goal_request.route_name not in self._routes:
             self.get_logger().warning(
@@ -2276,7 +2881,10 @@ class ForkliftTaskManager(Node):
         if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
             self.get_logger().warning('Rejecting route while another task is active.')
             return GoalResponse.REJECT
-        if self._pickup_machine.state in {RUNNING, PAUSED}:
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+        ):
             self.get_logger().warning(
                 'Rejecting route while pallet pickup is active.'
             )
@@ -2301,7 +2909,10 @@ class ForkliftTaskManager(Node):
                 'Rejecting pallet pickup while navigation task is active.'
             )
             return GoalResponse.REJECT
-        if self._pickup_machine.state in {RUNNING, PAUSED}:
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+        ):
             self.get_logger().warning(
                 'Rejecting pallet pickup while another pickup task is active.'
             )
@@ -2419,7 +3030,10 @@ class ForkliftTaskManager(Node):
         request: GoToStation.Request,
         response: GoToStation.Response,
     ) -> GoToStation.Response:
-        if self._pickup_machine.state in {RUNNING, PAUSED}:
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+        ):
             response.success = False
             response.message = 'pallet pickup task is active'
             return response
@@ -2441,6 +3055,9 @@ class ForkliftTaskManager(Node):
         _request: Trigger.Request,
         response: Trigger.Response,
     ) -> Trigger.Response:
+        if self._pickup_job_machine.state in {RUNNING, RECOVERING}:
+            response.success, response.message = self._pickup_job_machine.pause()
+            return response
         if self._machine.state in {RUNNING, RECOVERING}:
             response.success, response.message = self._machine.pause()
             return response
@@ -2456,6 +3073,9 @@ class ForkliftTaskManager(Node):
         _request: Trigger.Request,
         response: Trigger.Response,
     ) -> Trigger.Response:
+        if self._pickup_job_machine.state == PAUSED:
+            response.success, response.message = self._pickup_job_machine.resume()
+            return response
         if self._machine.state == PAUSED:
             response.success, response.message = self._machine.resume()
             return response
@@ -2479,6 +3099,21 @@ class ForkliftTaskManager(Node):
             response.success = True
             response.message = 'pallet candidate selection canceled'
             return response
+        if self._pallet_egress_active:
+            self._finish_pallet_egress(
+                'pallet egress canceled by operator', cancel_motion=True
+            )
+            response.success = True
+            response.message = 'pallet egress canceled'
+            return response
+        if self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}:
+            if self._dispatch_task_context.task_type == TYPE_PICKUP:
+                self._cancel_active_dispatch_task('canceled by request')
+                response.success = True
+                response.message = 'pickup dispatch task canceled'
+            else:
+                response.success, response.message = self._pickup_job_machine.cancel()
+            return response
         if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
             response.success, response.message = self._machine.cancel()
             return response
@@ -2487,6 +3122,54 @@ class ForkliftTaskManager(Node):
             return response
         response.success = False
         response.message = 'no active task'
+        return response
+
+    def _recover_obstacle(
+        self,
+        _request: Trigger.Request,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        """Manually replan the active navigation segment around a scan stop."""
+        if not self._manual_obstacle_recovery_enabled:
+            response.success = False
+            response.message = 'manual obstacle recovery is disabled'
+            return response
+        if self._pallet_selection_active or self._pallet_egress_active:
+            response.success = False
+            response.message = 'pallet selection or egress currently owns motion'
+            return response
+        if self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}:
+            response.success = False
+            response.message = 'pickup task owns motion; recovery is navigation-only'
+            return response
+        if self._pickup_machine.state in {RUNNING, PAUSED, RECOVERING}:
+            response.success = False
+            response.message = 'pickup motion is active; recovery is navigation-only'
+            return response
+        if self._machine.state not in {RUNNING, RECOVERING}:
+            response.success = False
+            response.message = 'no running navigation segment to recover'
+            return response
+        target = self._machine.current_target
+        if not isinstance(target, PoseTarget):
+            response.success = False
+            response.message = (
+                'recovery only supports PoseTarget navigation; pivot and '
+                'relative pallet motion are intentionally excluded'
+            )
+            return response
+        response.success, response.message = self._machine.restart_current(
+            'manual obstacle recovery requested'
+        )
+        if response.success:
+            self.get_logger().warning(
+                'Manual obstacle recovery accepted for segment {}. '
+                'Replanning from the current pose with the latest /scan; '
+                'latest safety state was {}.'.format(
+                    target.name,
+                    self._last_safety_gate_reason or 'unavailable',
+                )
+            )
         return response
 
     def _goal_pose(self, pose: PoseStamped) -> None:
@@ -2516,6 +3199,91 @@ class ForkliftTaskManager(Node):
             and self._machine.active_route == 'rviz_pallet_approach'
         )
 
+    def _pallet_egress(self, _request, response):
+        """Retreat from a completed pallet approach at a bounded safe speed."""
+        return self._start_pallet_egress(response, recovery=False)
+
+    def _pallet_egress_recovery(self, _request, response):
+        """Retreat after a scan-blocked or timed-out final pallet approach."""
+        return self._start_pallet_egress(response, recovery=True)
+
+    def _start_pallet_egress(self, response, *, recovery: bool):
+        if self._pallet_egress_active:
+            response.success = False
+            response.message = 'pallet egress is already active'
+            return response
+        session_ready = (
+            self._pallet_egress_recovery_ready
+            if recovery else self._pallet_egress_session_ready
+        )
+        if not session_ready:
+            response.success = False
+            response.message = (
+                'no recoverable final pallet approach session; '
+                'enter pallet_final_approach first'
+                if recovery else
+                'no completed pallet approach session; approach a pallet first'
+            )
+            return response
+        if self._pallet_exemption_target is None:
+            response.success = False
+            response.message = 'selected pallet target is unavailable'
+            return response
+        if (
+            self._machine.state in {RUNNING, PAUSED, RECOVERING}
+            or self._pickup_machine.state in {RUNNING, PAUSED}
+        ):
+            response.success = False
+            response.message = 'pallet motion is busy'
+            return response
+
+        self._pallet_egress_token += 1
+        token = self._pallet_egress_token
+        self._pallet_egress_active = True
+        self._pallet_exemption_phase_enabled = True
+        # The target is intentionally close at this point. Do not wait for the
+        # ordinary approach-distance hysteresis before publishing the heartbeat.
+        self._pallet_exemption_active = True
+        self._publish_pallet_exemption()
+
+        def completed(success, message, _result) -> None:
+            if token != self._pallet_egress_token:
+                return
+            self._finish_pallet_egress(message, success=success)
+
+        self._pickup_devices.move_relative(
+            distance_m=self._pallet_egress_distance_m,
+            max_speed_mps=self._pallet_egress_speed_mps,
+            timeout_sec=self._pallet_egress_timeout_sec,
+            done_callback=completed,
+        )
+        response.success = True
+        label = 'pallet egress recovery' if recovery else 'pallet egress'
+        response.message = (
+            '{} started: {:.2f} m at {:.2f} m/s'.format(
+                label, self._pallet_egress_distance_m,
+                self._pallet_egress_speed_mps,
+            )
+        )
+        self.get_logger().info(response.message)
+        return response
+
+    def _finish_pallet_egress(
+        self,
+        message: str,
+        *,
+        success: bool = False,
+        cancel_motion: bool = False,
+    ) -> None:
+        self._pallet_egress_token += 1
+        if cancel_motion:
+            self._pickup_devices.cancel_all()
+        self._pallet_egress_active = False
+        self._pallet_egress_session_ready = False
+        self._clear_pallet_exemption()
+        level = self.get_logger().info if success else self.get_logger().warning
+        level('Pallet egress {}: {}.'.format('completed' if success else 'stopped', message))
+
     def _fail_pallet_selection(self, reason: str) -> None:
         self._pallet_selection_active = False
         self._nav2_navigator.cancel_path_goal()
@@ -2524,35 +3292,19 @@ class ForkliftTaskManager(Node):
         self.get_logger().error(reason)
 
     def _navigation_goal_pose(self, pose: PoseStamped) -> None:
-        if (
-            self._pickup_machine.state in {RUNNING, PAUSED}
-            or self._pallet_work_active()
-        ):
-            self.get_logger().warning(
-                'Rejecting navigation goal while a pallet task owns motion control.'
-            )
-            return
-        if self._machine.state in {RUNNING, PAUSED, RECOVERING}:
-            self._machine.cancel('replaced by a newer navigation goal')
-        yaw = self._pose_yaw(pose)
-        target = PoseTarget(
-            name='navigation_goal',
-            x=float(pose.pose.position.x),
-            y=float(pose.pose.position.y),
-            yaw=yaw,
-            frame_id=pose.header.frame_id or 'map',
+        accepted, message = self._start_dispatch_navigation(
+            task_id=self._next_legacy_navigation_task_id(),
+            pose=pose,
+            route_name='rviz_navigation',
         )
-        route = RouteDefinition(
-            name='rviz_navigation',
-            loop=False,
-            targets=(target,),
-        )
-        accepted, message = self._machine.start(route, loop=False)
         if not accepted:
             self.get_logger().warning(message)
 
     def _pallet_goal_pose(self, pose: PoseStamped) -> None:
-        if self._pickup_machine.state in {RUNNING, PAUSED}:
+        if (
+            self._pickup_machine.state in {RUNNING, PAUSED}
+            or self._pickup_job_machine.state in {RUNNING, PAUSED, RECOVERING}
+        ):
             self.get_logger().warning(
                 'Rejecting pallet goal while pallet pickup is active; cancel it first.'
             )
@@ -2872,6 +3624,9 @@ class ForkliftTaskManager(Node):
         target: Optional[PoseTarget],
     ) -> None:
         self._pallet_exemption_target = target
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_recovery_ready = False
+        self._pallet_egress_active = False
         self._pallet_exemption_phase_enabled = False
         self._pallet_exemption_active = False
         self._publish_pallet_exemption()
@@ -2888,6 +3643,9 @@ class ForkliftTaskManager(Node):
         self._pallet_exemption_target = None
         self._pallet_exemption_phase_enabled = False
         self._pallet_exemption_active = False
+        self._pallet_egress_session_ready = False
+        self._pallet_egress_recovery_ready = False
+        self._pallet_egress_active = False
         self._publish_pallet_exemption()
 
     def _update_pallet_exemption(self) -> None:
@@ -2945,6 +3703,13 @@ class ForkliftTaskManager(Node):
         active = Bool()
         active.data = target is not None and self._pallet_exemption_active
         self._pallet_exemption_active_pub.publish(active)
+        egress = Bool()
+        egress.data = (
+            target is not None
+            and self._pallet_exemption_active
+            and self._pallet_egress_active
+        )
+        self._pallet_egress_active_pub.publish(egress)
 
     def _on_global_costmap(self, msg: Costmap) -> None:
         self._latest_global_costmap = msg
@@ -2995,6 +3760,7 @@ class ForkliftTaskManager(Node):
         return True, ''
 
     def _safety_status(self, status: String) -> None:
+        self._last_safety_gate_reason = status.data.strip()
         if self._machine.observe_safety_status(status.data):
             self.get_logger().warning(
                 'Task paused by safety gate: {}.'.format(status.data)
@@ -3003,17 +3769,51 @@ class ForkliftTaskManager(Node):
             self.get_logger().warning(
                 'Pallet pickup paused by safety gate: {}.'.format(status.data)
             )
+        if self._pickup_job_machine.observe_safety_status(status.data):
+            self.get_logger().warning(
+                'Dispatch pickup paused by safety gate: {}.'.format(status.data)
+            )
 
     def _publish_navigation_status(self, machine: TaskStateMachine) -> None:
         if machine.state == SUCCEEDED and machine.current_segment:
             self._last_completed_station = self._station_name_from_segment(
                 machine.current_segment
             )
-        if (
-            machine.state in {SUCCEEDED, FAILED, IDLE}
-            and self._pallet_exemption_target is not None
-        ):
-            self._clear_pallet_exemption()
+        if machine.state in {SUCCEEDED, FAILED, IDLE}:
+            if (
+                machine.state == SUCCEEDED
+                and machine.active_route == 'rviz_pallet_approach'
+                and self._pallet_exemption_target is not None
+            ):
+                # Preserve only the selected pallet pose for the explicit
+                # PALLET_EGRESS service. The normal exemption remains off.
+                self._pallet_egress_session_ready = True
+                self._pallet_exemption_phase_enabled = False
+                self._pallet_exemption_active = False
+                self._publish_pallet_exemption()
+                self.get_logger().info(
+                    'Pallet approach complete; PALLET_EGRESS is available.'
+                )
+            elif (
+                machine.state == FAILED
+                and machine.active_route == 'rviz_pallet_approach'
+                and machine.current_segment == 'pallet_final_approach'
+                and self._pallet_exemption_target is not None
+                and self._pallet_exemption_phase_enabled
+            ):
+                # The final low-speed motion can be stopped by an obstacle
+                # outside the selected pallet box. Preserve only that box so
+                # an operator can request a bounded, scan-protected retreat.
+                self._pallet_egress_recovery_ready = True
+                self._pallet_exemption_phase_enabled = False
+                self._pallet_exemption_active = False
+                self._publish_pallet_exemption()
+                self.get_logger().warning(
+                    'Pallet final approach failed; PALLET_EGRESS_RECOVERY is '
+                    'available.'
+                )
+            elif self._pallet_exemption_target is not None:
+                self._clear_pallet_exemption()
         status = TaskStatus()
         status.state = machine.state
         status.active_route = machine.active_route
@@ -3022,6 +3822,20 @@ class ForkliftTaskManager(Node):
         status.segment_count = machine.segment_count
         status.reason = machine.reason
         self._status_pub.publish(status)
+        if self._dispatch_task_context.active:
+            if machine.state == SUCCEEDED:
+                progress = 1.0
+            elif machine.segment_count > 0 and machine.segment_index >= 0:
+                progress = float(machine.segment_index) / float(machine.segment_count)
+            else:
+                progress = 0.0
+            self._dispatch_task_context.update_from_navigation(
+                machine.state,
+                machine.current_segment,
+                progress,
+                machine.reason,
+            )
+            self._publish_dispatch_status()
 
     def _publish_pickup_status(self, machine: PalletPickupStateMachine) -> None:
         status = TaskStatus()
@@ -3034,6 +3848,27 @@ class ForkliftTaskManager(Node):
         status.segment_count = machine.phase_count
         status.reason = machine.reason
         self._status_pub.publish(status)
+
+    def _publish_pickup_job_status(self, machine: PickupJobStateMachine) -> None:
+        status = TaskStatus()
+        status.state = machine.state
+        status.active_route = (
+            'dispatch_pickup:{}'.format(machine.active_slot)
+            if machine.active_slot else ''
+        )
+        status.current_segment = machine.current_segment
+        status.segment_index = 0
+        status.segment_count = 1
+        status.reason = machine.reason
+        self._status_pub.publish(status)
+        if self._dispatch_task_context.task_type == TYPE_PICKUP:
+            self._dispatch_task_context.update_from_pickup(
+                machine.state,
+                machine.phase,
+                machine.progress,
+                machine.reason,
+            )
+            self._publish_dispatch_status()
 
     @staticmethod
     def _station_name_from_segment(segment_name: str) -> str:

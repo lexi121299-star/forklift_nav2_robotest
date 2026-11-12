@@ -103,6 +103,9 @@ void ForkliftMpcController::configure(
     node, name_ + ".pivot_reacquire_yaw_tolerance",
     rclcpp::ParameterValue(pivot_reacquire_yaw_tolerance_));
   nav2_util::declare_parameter_if_not_declared(
+    node, name_ + ".pivot_entry_offset_recovery_enabled",
+    rclcpp::ParameterValue(pivot_entry_offset_recovery_enabled_));
+  nav2_util::declare_parameter_if_not_declared(
     node, name_ + ".pivot_max_corrections",
     rclcpp::ParameterValue(pivot_max_corrections_));
   // Motion-response calibration is separate from the motor's CAN ramps.
@@ -623,6 +626,8 @@ void ForkliftMpcController::configure(
     name_ + ".pivot_yaw_settle_duration_sec", pivot_yaw_settle_duration_sec_);
   node->get_parameter(
     name_ + ".pivot_reacquire_yaw_tolerance", pivot_reacquire_yaw_tolerance_);
+  node->get_parameter(
+    name_ + ".pivot_entry_offset_recovery_enabled", pivot_entry_offset_recovery_enabled_);
   node->get_parameter(name_ + ".pivot_max_corrections", pivot_max_corrections_);
   node->get_parameter(
     name_ + ".pivot_stop_velocity_threshold",
@@ -1239,6 +1244,8 @@ void ForkliftMpcController::configure(
   controller_debug_pub_ =
     node->create_publisher<forklift_msgs::msg::ForkliftControllerDebug>(
     "/forklift/controller_debug", rclcpp::QoS(20));
+  safety_reference_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+    "/forklift/controller_safety_trajectory", rclcpp::QoS(10));
   anchor_index_sub_ = node->create_subscription<std_msgs::msg::Int32>(
     "/forklift/navigation_anchor_index",
     rclcpp::QoS(1).reliable().transient_local(),
@@ -1376,6 +1383,8 @@ void ForkliftMpcController::cleanup()
   }
   control_cmd_pub_.reset();
   controller_debug_pub_.reset();
+  safety_reference_pub_.reset();
+  safety_reference_ = nav_msgs::msg::Path();
   footprint_collision_checker_.reset();
   global_plan_.poses.clear();
   global_trajectory_.clear();
@@ -1435,10 +1444,12 @@ void ForkliftMpcController::activate()
   if (controller_debug_pub_) {
     controller_debug_pub_->on_activate();
   }
+  if (safety_reference_pub_) {safety_reference_pub_->on_activate();}
 }
 
 void ForkliftMpcController::deactivate()
 {
+  safety_reference_ = nav_msgs::msg::Path();
   if (control_cmd_pub_) {
     publishControlCommand(0.0, last_steering_angle_, costmap_frame_);
     control_cmd_pub_->on_deactivate();
@@ -1446,11 +1457,20 @@ void ForkliftMpcController::deactivate()
   if (controller_debug_pub_) {
     controller_debug_pub_->on_deactivate();
   }
+  if (safety_reference_pub_) {safety_reference_pub_->on_deactivate();}
 }
 
 void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
 {
+  // Nav2 can deliver the same replacement path twice. Keep a pending steering
+  // handoff, and re-arm it when replanning interrupts a pivot even if the goal
+  // itself did not move. Otherwise an almost-90-degree wheel remains trapped
+  // behind the scan stop while MPC tries to steer and drive simultaneously.
+  const bool steering_handoff_pending =
+    new_goal_steering_settle_active_ || pivot_maneuver_active_ ||
+    post_pivot_transition_active_;
   ++route_token_;
+  safety_reference_ = nav_msgs::msg::Path();
   last_navigation_output_velocity_ = 0.0;
   last_navigation_output_ns_ = 0;
   global_plan_ = path;
@@ -1503,7 +1523,7 @@ void ForkliftMpcController::setPlan(const nav_msgs::msg::Path & path)
   resetPivotHandoffState();
   resetCurveExitHandoffState();
   new_goal_steering_settle_active_ =
-    goal_changed && new_goal_steering_settle_enabled_;
+    (goal_changed || steering_handoff_pending) && new_goal_steering_settle_enabled_;
   new_goal_steering_ready_ns_ = 0;
 
   const auto result = processPathToMpcTrajectory(
@@ -1560,6 +1580,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & pose,
   const geometry_msgs::msg::Twist & velocity)
 {
+  safety_reference_ = nav_msgs::msg::Path();
   if (global_plan_.poses.empty()) {
     throw std::runtime_error("ForkliftMpcController has no global plan");
   }
@@ -1729,9 +1750,51 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
   const double pivot_activation_error = std::hypot(
     pivot_activation_x - current_state.x,
     pivot_activation_y - current_state.y);
+  bool offset_entry_ready = false;
+  if (pivot_entry_offset_recovery_enabled_ && pivot_preview_active &&
+    !pivot_maneuver_active_ && segment_projection.valid &&
+    pivot_target_index != completed_pivot_index_ &&
+    pivot_activation_error > pivot_activation_distance_ &&
+    segment_projection.remaining <= pivot_activation_distance_ &&
+    std::abs(segment_projection.along_track_error) <= pivot_activation_distance_ &&
+    std::abs(segment_projection.cross_track) > pivot_activation_distance_ &&
+    std::abs(segment_projection.cross_track) <= pivot_entry_lateral_tolerance_m_ &&
+    pivot_activation_error <= std::hypot(
+      pivot_activation_distance_, pivot_entry_lateral_tolerance_m_) &&
+    use_collision_check_ && costmap_ && footprint_collision_checker_ &&
+    footprint_.size() >= 3u)
+  {
+    // An offset outside the circle cannot be fixed by another forward-only
+    // centimetre. Stop first, then validate the displaced rotation centre.
+    if (std::hypot(velocity.linear.x, velocity.linear.y) > pivot_stop_velocity_threshold_ ||
+      std::abs(velocity.angular.z) > pivot_yaw_rate_tolerance_)
+    {
+      publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+      RCLCPP_INFO_THROTTLE(
+        logger_, *clock_, 1000,
+        "P6.6 offset pivot entry braking: remaining=%.3f lateral=%.3f",
+        segment_projection.remaining, segment_projection.cross_track);
+      return zeroCommand(pose);
+    }
+    const double yaw_delta = plannedPivotDelta(
+      transformed_trajectory, pivot_target_index, current_state.theta);
+    if (!offsetPivotEntryCollisionFree(
+        current_state, transformed_trajectory, pivot_target_index, yaw_delta))
+    {
+      publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+      throw std::runtime_error(
+              "MPC offset pivot entry blocked by actual-centre sweep or departure; replan");
+    }
+    offset_entry_ready = true;
+    RCLCPP_INFO(
+      logger_, "P6.6 offset pivot entry validated: remaining=%.3f lateral=%.3f "
+      "actual_centre=(%.3f,%.3f) yaw_delta=%.3f",
+      segment_projection.remaining, segment_projection.cross_track,
+      current_state.x, current_state.y, yaw_delta);
+  }
   const bool pivot_activation_ready =
     pivot_preview_active &&
-    pivot_activation_error <= pivot_activation_distance_ &&
+    (pivot_activation_error <= pivot_activation_distance_ || offset_entry_ready) &&
     (!segment_projection.valid ||
     std::abs(segment_projection.cross_track) <= pivot_entry_lateral_tolerance_m_);
   MpcPreviewWindow control_preview_window = last_preview_window_;
@@ -1782,32 +1845,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     active_pivot_x_ = pivot_target_x;
     active_pivot_y_ = pivot_target_y;
     active_pivot_target_yaw_ = pivot_target_yaw;
-    // A same-position yaw chain can intentionally encode the long direction
-    // around an obstacle. Sum the signed per-pose yaw increments instead of
-    // deriving a fresh shortest angular error from the last quaternion.
-    std::size_t pivot_block_start = pivot_target_index;
-    while (pivot_block_start > 0u &&
-      transformed_trajectory[pivot_block_start].pivot_motion &&
-      std::hypot(
-        transformed_trajectory[pivot_block_start].state.x -
-        transformed_trajectory[pivot_block_start - 1u].state.x,
-        transformed_trajectory[pivot_block_start].state.y -
-        transformed_trajectory[pivot_block_start - 1u].state.y) <= 1e-4)
-    {
-      --pivot_block_start;
-    }
-    double planned_pivot_delta = 0.0;
-    for (std::size_t i = pivot_block_start + 1u;
-      i <= pivot_target_index; ++i)
-    {
-      planned_pivot_delta += transformed_trajectory[i].pivot_yaw_delta;
-    }
-    if (std::abs(planned_pivot_delta) <= 1e-6) {
-      planned_pivot_delta = normalizeAngle(
-        pivot_target_yaw - transformed_trajectory[pivot_block_start].state.theta);
-    }
-    active_pivot_target_delta_ = planned_pivot_delta + normalizeAngle(
-      transformed_trajectory[pivot_block_start].state.theta - current_state.theta);
+    active_pivot_target_delta_ = plannedPivotDelta(
+      transformed_trajectory, pivot_target_index, current_state.theta);
     active_pivot_progress_yaw_ = 0.0;
     active_pivot_last_yaw_ = current_state.theta;
     active_pivot_remaining_yaw_ = active_pivot_target_delta_;
@@ -1896,7 +1935,12 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     if (std::abs(steering_error) > new_goal_steering_tolerance_) {
       new_goal_steering_ready_ns_ = 0;
       last_steering_angle_ = steering_target;
-      publishControlCommand(0.0, steering_target, pose.header.frame_id);
+      // The vehicle controller accepts a zero-RPM steering-only command, but
+      // does not move its steering actuator while the brake bit is asserted.
+      // Keep the drivetrain stationary without applying the brake bit while
+      // waiting for the steering feedback to reach the path reference.
+      publishControlCommand(
+        0.0, steering_target, pose.header.frame_id, false);
       RCLCPP_INFO_THROTTLE(
         logger_, *clock_, 1000,
         "P6.5b new-goal pre-steer: holding stop while steering "
@@ -1913,7 +1957,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       static_cast<double>(now_ns - new_goal_steering_ready_ns_) * 1e-9;
     if (ready_elapsed_sec < new_goal_steering_hold_duration_sec_) {
       last_steering_angle_ = steering_target;
-      publishControlCommand(0.0, steering_target, pose.header.frame_id);
+      publishControlCommand(
+        0.0, steering_target, pose.header.frame_id, false);
       return zeroCommand(pose);
     }
     new_goal_steering_settle_active_ = false;
@@ -2576,8 +2621,15 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     return zeroCommand(pose);
   }
 
+  // Near a pivot the nearest sample may already be the final approach point.
+  // Starting Frenet scoring there leaves only its same-position yaw samples,
+  // so all candidates appear unprojectable before the activation circle is
+  // reached. Keep the spatial segment used by the continuous projection.
   const auto nearest_index = std::min(
-    preview_start_index, tracking_plan.poses.size() - 1u);
+    next_pivot_index < tracking_plan.poses.size() && segment_projection.valid ?
+    std::min(preview_start_index, segment_projection.segment_index) :
+    preview_start_index,
+    tracking_plan.poses.size() - 1u);
   // Do not score a candidate against the block beyond an unexecuted pivot.
   if (next_pivot_index < tracking_plan.poses.size()) {
     tracking_plan.poses.resize(next_pivot_index + 1u);
@@ -2854,14 +2906,15 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
       publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
       throw std::runtime_error("MPC pending pivot entry corridor missed; stop before crossing boundary");
     }
-    // The pivot state machine takes ownership once the body is inside
-    // pivot_activation_distance_.  Stopping at primitive_brake_clearance_m_
-    // instead is incorrect when that clearance is larger than the activation
-    // radius: the vehicle reaches a zero-speed dead zone outside the pivot
-    // boundary and can never enter the maneuver.  Brake toward the activation
-    // boundary; the pivot controller then commands zero drive before it turns.
-    const double braking_distance = std::max(
-      0.0, remaining - pivot_activation_distance_);
+    if (pivot_preview_active && remaining <= 1e-3 &&
+      pivot_activation_error > pivot_activation_distance_)
+    {
+      publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
+      throw std::runtime_error(
+              "MPC pivot entry centre missed; replan instead of waiting outside activation circle");
+    }
+    const double braking_distance = pivotApproachBrakingDistance(
+      remaining, segment_projection.cross_track, pivot_activation_distance_);
     const double terminal_limit = stoppingSpeedLimit(
       braking_distance, primitive_brake_reaction_time_sec_,
       primitive_brake_deceleration_mps2_);
@@ -2870,7 +2923,7 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 1000,
       "P6.6 pending pivot approach: remaining=%.3f lateral=%.3f max_v=%.3f "
-      "reaction=%.2f activation=%.2f braking_distance=%.3f",
+      "reaction=%.2f activation=%.2f braking_distance=%.3f entry_geometry=circle",
       remaining, segment_projection.cross_track, terminal_limit,
       primitive_brake_reaction_time_sec_, pivot_activation_distance_, braking_distance);
   }
@@ -2884,20 +2937,26 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     -active_max_reverse_velocity, last_navigation_output_velocity_, velocity.linear.x,
     max_acceleration_, output_dt, command_feedback_allowance_sec_));
   const double safety_motion_sign = reverse_motion_active ? -1.0 : 1.0;
+  safety_reference_ = makeSafetyReference(
+    transformed_trajectory, segment_projection, current_state, segment_end);
+  safety_reference_.header.frame_id = pose.header.frame_id;
   const double requested_safety_speed =
     reverse_motion_active ? active_max_reverse_velocity : active_max_velocity;
-  // Check the footprint along the road arc we are about to follow. Treating
-  // every command as a straight line made the redundant local-costmap gate
-  // stop at a rack that was beside a valid turning trajectory. The independent
-  // raw-scan Safety Gate remains the final stop authority.
+  // Follow the road's changing curvature, preserving the measured Frenet
+  // offset. A constant steering arc can hit a rack after the real road has
+  // already straightened. Candidate scoring still checks actuator dynamics;
+  // the independent raw-scan gate remains the final stop authority.
   const double safety_steering_reference = segment_projection.valid &&
     std::isfinite(segment_projection.steering_reference) ?
     std::clamp(
     segment_projection.steering_reference,
     -max_steering_angle_, max_steering_angle_) : current_steering_angle;
-  const auto safety_limit = safetyGateLimit(
-    current_state, safety_motion_sign,
-    requested_safety_speed, safety_steering_reference);
+  const double safety_obstacle_distance = segment_projection.valid ?
+    nearestTrajectorySafetyObstacleDistance(
+    transformed_trajectory, segment_projection, segment_end) :
+    nearestSafetyObstacleDistance(current_state, safety_motion_sign, safety_steering_reference);
+  const auto safety_limit = safetyGateLimitForObstacleDistance(
+    safety_obstacle_distance, requested_safety_speed, safetyGateParameters());
   if (safety_limit.stop_active) {
     if (post_pivot_recovery_active_) {
       post_pivot_recovery_started_ns_ = clock_->now().nanoseconds();
@@ -2905,10 +2964,11 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::computeVelocityCommands(
     RCLCPP_WARN_THROTTLE(
       logger_, *clock_, 2000,
       "P8.1 safety gate stopping: obstacle at %.3f m in %s protection zone "
-      "along steering_ref=%.3f rad",
+      "along steering_ref=%.3f rad projection=%s",
       safety_limit.nearest_obstacle_distance,
       reverse_motion_active ? "reverse" : "forward",
-      safety_steering_reference);
+      safety_steering_reference,
+      segment_projection.valid ? "trajectory" : "steering_arc");
     publishControlCommand(0.0, last_steering_angle_, pose.header.frame_id);
     return zeroCommand(pose);
   }
@@ -3626,7 +3686,8 @@ geometry_msgs::msg::TwistStamped ForkliftMpcController::zeroCommand(
 }
 
 void ForkliftMpcController::publishControlCommand(
-  double velocity, double steering, const std::string & frame_id) const
+  double velocity, double steering, const std::string & frame_id,
+  bool brake_when_stopped) const
 {
   last_navigation_output_velocity_ = vehicle_model_.isPivotTurnCommand({velocity, steering}) ?
     0.0 : velocity;
@@ -3644,7 +3705,7 @@ void ForkliftMpcController::publishControlCommand(
   command.header.stamp = clock_->now();
   command.header.frame_id = frame_id;
   command.enable = true;
-  command.brake = speed < 1e-4;
+  command.brake = brake_when_stopped && speed < 1e-4;
   command.forward = clamped.velocity > 1e-4;
   command.reverse = clamped.velocity < -1e-4;
   command.velocity_mps = speed;
@@ -3653,6 +3714,14 @@ void ForkliftMpcController::publishControlCommand(
   command.accel_time_sec = control_cmd_accel_time_;
   command.decel_time_sec = control_cmd_decel_time_;
 
+  if (safety_reference_pub_ && safety_reference_pub_->is_activated()) {
+    auto reference = safety_reference_;
+    reference.header.stamp = command.header.stamp;
+    reference.header.frame_id = frame_id;
+    if (!command.forward && !command.reverse) {reference.poses.clear();}
+    if (vehicle_model_.isPivotTurnCommand({velocity, steering})) {reference.poses.clear();}
+    safety_reference_pub_->publish(reference);
+  }
   control_cmd_pub_->publish(command);
 }
 
@@ -3926,6 +3995,160 @@ ForkliftMpcController::safetyGateLimit(
     requested_max_speed, parameters);
 }
 
+nav_msgs::msg::Path ForkliftMpcController::makeSafetyReference(
+  const MpcTrajectory & trajectory, const MpcSegmentProjection & projection,
+  const MpcState & current, std::size_t segment_end) const
+{
+  nav_msgs::msg::Path path;
+  if (!projection.valid || trajectory.size() < 2u ||
+    !std::isfinite(projection.arc_length) || !std::isfinite(projection.cross_track) ||
+    !std::isfinite(projection.heading_error)) {return path;}
+  segment_end = std::min(segment_end, trajectory.size()-1u);
+  if (projection.segment_index >= segment_end) {return path;}
+  for (std::size_t edge = projection.segment_index; edge < segment_end; ++edge) {
+    const auto & a = trajectory[edge];
+    const auto & b = trajectory[edge+1u];
+    if (a.pivot_motion || b.pivot_motion ||
+      (a.reverse_motion || b.reverse_motion) != projection.reverse_motion ||
+      b.distance-a.distance <= 1e-6)
+    {
+      segment_end = edge;
+      break;
+    }
+  }
+  const double length = std::min(8.0,
+    std::max(0.0, trajectory[segment_end].distance-projection.arc_length));
+  if (!std::isfinite(length) || length < .025) {return path;}
+  const auto & first_a=trajectory[projection.segment_index];
+  const auto & first_b=trajectory[projection.segment_index+1u];
+  const double first_ds=first_b.distance-first_a.distance;
+  if (first_ds<=1e-6) {return path;}
+  const double first_u=std::clamp((projection.arc_length-first_a.distance)/first_ds,0.,1.);
+  const double initial_reference=first_a.state.theta+first_u*
+    normalizeAngle(first_b.state.theta-first_a.state.theta);
+  const double heading_offset=normalizeAngle(current.theta-initial_reference);
+  geometry_msgs::msg::PoseStamped pose;
+  pose.pose.position.x = current.x;
+  pose.pose.position.y = current.y;
+  tf2::Quaternion q;
+  q.setRPY(0., 0., current.theta);
+  pose.pose.orientation = tf2::toMsg(q);
+  path.poses.push_back(pose);
+  std::size_t edge = projection.segment_index;
+  const int samples = std::max(1, static_cast<int>(std::ceil(length/.025)));
+  for (int sample = 1; sample <= samples; ++sample) {
+    const double target = projection.arc_length+length*sample/samples;
+    while (edge+1u < segment_end && trajectory[edge+1u].distance < target) {++edge;}
+    const auto & a = trajectory[edge];
+    const auto & b = trajectory[edge+1u];
+    const double ds = b.distance-a.distance;
+    const double dx = b.state.x-a.state.x, dy = b.state.y-a.state.y;
+    if (ds <= 1e-6 || std::hypot(dx,dy) <= 1e-6) {return nav_msgs::msg::Path();}
+    const double u = std::clamp((target-a.distance)/ds, 0., 1.);
+    // Interpolate the continuous body heading. Piecewise chord headings at
+    // 0.05 m vertices alias a smooth curve into alternating zero/double yaw rate.
+    const double body_heading=a.state.theta+u*normalizeAngle(b.state.theta-a.state.theta);
+    const double tangent=body_heading+(projection.reverse_motion ? M_PI : 0.);
+    pose.pose.position.x = a.state.x+u*dx-projection.cross_track*std::sin(tangent);
+    pose.pose.position.y = a.state.y+u*dy+projection.cross_track*std::cos(tangent);
+    q.setRPY(0.,0.,body_heading+heading_offset);
+    pose.pose.orientation = tf2::toMsg(q);
+    path.poses.push_back(pose);
+  }
+  return path;
+}
+
+double ForkliftMpcController::nearestTrajectorySafetyObstacleDistance(
+  const MpcTrajectory & trajectory,
+  const MpcSegmentProjection & projection, std::size_t segment_end) const
+{
+  const auto parameters = safetyGateParameters();
+  if (!parameters.enabled || !use_collision_check_ ||
+    !footprint_collision_checker_ || footprint_.size() < 3u)
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+  if (!projection.valid || trajectory.size() < 2u ||
+    !std::isfinite(projection.arc_length) || !std::isfinite(projection.cross_track) ||
+    !std::isfinite(projection.heading_error) || !std::isfinite(projection.heading) ||
+    !std::isfinite(projection.projected_x) || !std::isfinite(projection.projected_y))
+  {
+    return 0.0;
+  }
+  segment_end = std::min(segment_end, trajectory.size() - 1u);
+  if (projection.segment_index >= segment_end) {
+    return 0.0;
+  }
+  // A cusp ends this protection sweep; it is not an obstacle. Match the
+  // segment direction used by projectMpcSegment, including cusp-adjacent edges.
+  bool direction_boundary = false;
+  for (std::size_t edge = projection.segment_index; edge < segment_end; ++edge) {
+    const auto & a = trajectory[edge];
+    const auto & b = trajectory[edge + 1u];
+    const bool edge_reverse = a.reverse_motion || b.reverse_motion;
+    const bool repeated_cusp = a.reverse_motion != b.reverse_motion &&
+      std::hypot(b.state.x - a.state.x, b.state.y - a.state.y) <= 1e-6;
+    if (edge_reverse != projection.reverse_motion || repeated_cusp) {
+      segment_end = edge;
+      direction_boundary = true;
+      break;
+    }
+  }
+  const double length = std::min(
+    parameters.slowdown_distance,
+    std::max(0.0, trajectory[segment_end].distance - projection.arc_length));
+  if (length <= 1e-6) {
+    if (!direction_boundary) {
+      return 0.0;
+    }
+    // At a repeated-position cusp there may be no incoming arc left to sample.
+    // Check the measured footprint rather than report the cusp as an obstacle.
+    const double tangent = projection.heading - (projection.reverse_motion ? M_PI : 0.0);
+    const double x = projection.projected_x - projection.cross_track * std::sin(tangent);
+    const double y = projection.projected_y + projection.cross_track * std::cos(tangent);
+    const double theta = normalizeAngle(projection.heading + projection.heading_error);
+    const double cost = footprint_collision_checker_->footprintCostAtPose(x, y, theta, footprint_);
+    return cost < 0.0 || (cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
+           cost >= static_cast<double>(safety_collision_cost_threshold_) ?
+           0.0 : std::numeric_limits<double>::infinity();
+  }
+  const double spacing = costmap_ ? std::min(
+    parameters.sample_spacing, 0.5 * costmap_->getResolution()) : parameters.sample_spacing;
+  const int samples = std::max(1, static_cast<int>(std::ceil(length / std::max(0.01, spacing))));
+  std::size_t i = projection.segment_index;
+  for (int sample = 1; sample <= samples; ++sample) {
+    const double distance = length * sample / samples;
+    const double target_s = projection.arc_length + distance;
+    while (i + 1u < segment_end && trajectory[i + 1u].distance < target_s) {
+      ++i;
+    }
+    const auto & a = trajectory[i];
+    const auto & b = trajectory[i + 1u];
+    const double dx = b.state.x - a.state.x;
+    const double dy = b.state.y - a.state.y;
+    const double ds = b.distance - a.distance;
+    if (ds <= 1e-6 || std::hypot(dx, dy) <= 1e-6)
+    {
+      return distance;
+    }
+    const double u = std::clamp((target_s - a.distance) / ds, 0.0, 1.0);
+    const double tangent = std::atan2(dy, dx);
+    const double reference_heading = tangent + (projection.reverse_motion ? M_PI : 0.0);
+    // Transport the real lateral/heading errors along the reference. Do not
+    // assume the vehicle can instantaneously jump back onto the centreline.
+    const double x = a.state.x + u * dx - projection.cross_track * std::sin(tangent);
+    const double y = a.state.y + u * dy + projection.cross_track * std::cos(tangent);
+    const double theta = normalizeAngle(reference_heading + projection.heading_error);
+    const double cost = footprint_collision_checker_->footprintCostAtPose(x, y, theta, footprint_);
+    if (cost < 0.0 || (cost == nav2_costmap_2d::NO_INFORMATION && !allow_unknown_) ||
+      cost >= static_cast<double>(safety_collision_cost_threshold_))
+    {
+      return distance;
+    }
+  }
+  return std::numeric_limits<double>::infinity();
+}
+
 double
 ForkliftMpcController::nearestSafetyObstacleDistance(
   const MpcState & state,
@@ -4011,6 +4234,97 @@ bool ForkliftMpcController::previewHasPivotMotion(
   return std::any_of(
     preview_window.points.begin(), preview_window.points.end(),
     [](const MpcTrajectoryPoint & point) {return point.pivot_motion;});
+}
+
+double ForkliftMpcController::plannedPivotDelta(
+  const MpcTrajectory & trajectory, std::size_t target_index,
+  double current_yaw) const
+{
+  // Preserve the signed yaw chain, including a planned long rotation.
+  std::size_t start = target_index;
+  while (start > 0u && trajectory[start].pivot_motion &&
+    std::hypot(
+      trajectory[start].state.x - trajectory[start - 1u].state.x,
+      trajectory[start].state.y - trajectory[start - 1u].state.y) <= 1e-4)
+  {
+    --start;
+  }
+  double delta = 0.0;
+  for (std::size_t i = start + 1u; i <= target_index; ++i) {
+    delta += trajectory[i].pivot_yaw_delta;
+  }
+  if (std::abs(delta) <= 1e-6) {
+    delta = normalizeAngle(trajectory[target_index].state.theta - trajectory[start].state.theta);
+  }
+  return delta + normalizeAngle(trajectory[start].state.theta - current_yaw);
+}
+
+bool ForkliftMpcController::offsetPivotEntryCollisionFree(
+  const MpcState & state, const MpcTrajectory & trajectory,
+  std::size_t target_index, double yaw_delta) const
+{
+  if (!use_collision_check_ || !costmap_ || !footprint_collision_checker_ ||
+    footprint_.size() < 3u || target_index + 1u >= trajectory.size() ||
+    !std::isfinite(yaw_delta) || std::abs(yaw_delta) > 2.0 * M_PI)
+  {
+    return false;
+  }
+  std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
+  const double axle_offset = vehicle_model_.parameters().rear_axle_x_offset;
+  double radius = 0.0;
+  for (const auto & point : footprint_) {
+    radius = std::max(radius, std::hypot(point.x - axle_offset, point.y));
+  }
+  const double spacing = std::min(0.025, 0.5 * costmap_->getResolution());
+  if (spacing <= 0.0 || radius <= 0.0) {
+    return false;
+  }
+  const double angle_step = std::min(0.05, spacing / radius);
+  const int samples = std::max(1, static_cast<int>(std::ceil(std::abs(yaw_delta) / angle_step)));
+  const double axle_x = state.x + axle_offset * std::cos(state.theta);
+  const double axle_y = state.y + axle_offset * std::sin(state.theta);
+  double cost = 0.0;
+  MpcState sample = state;
+  for (int i = 0; i <= samples; ++i) {
+    sample.theta = normalizeAngle(state.theta + yaw_delta * i / samples);
+    sample.x = axle_x - axle_offset * std::cos(sample.theta);
+    sample.y = axle_y - axle_offset * std::sin(sample.theta);
+    if (!isCollisionFree(sample, cost)) {
+      return false;
+    }
+  }
+
+  // Check the first departure half-metre at the displaced centre as well.
+  // This is only validation: subsequent movement still uses MPC and Safety Gate.
+  double departure_length = 0.0;
+  for (std::size_t i = target_index + 1u; i < trajectory.size(); ++i) {
+    if (trajectory[i].pivot_motion) {
+      break;
+    }
+    departure_length += std::hypot(
+      trajectory[i].state.x - trajectory[i - 1u].state.x,
+      trajectory[i].state.y - trajectory[i - 1u].state.y);
+    if (departure_length >= 0.5) {
+      break;
+    }
+  }
+  departure_length = std::min(0.5, departure_length);
+  if (departure_length <= 1e-4) {
+    return false;
+  }
+  const double direction = trajectory[target_index + 1u].reverse_motion ? -1.0 : 1.0;
+  const MpcState departure_start = sample;
+  const int departure_samples = std::max(
+    1, static_cast<int>(std::ceil(departure_length / spacing)));
+  for (int i = 1; i <= departure_samples; ++i) {
+    const double distance = direction * departure_length * i / departure_samples;
+    sample.x = departure_start.x + distance * std::cos(sample.theta);
+    sample.y = departure_start.y + distance * std::sin(sample.theta);
+    if (!isCollisionFree(sample, cost)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool ForkliftMpcController::pivotCommandCollisionFree(

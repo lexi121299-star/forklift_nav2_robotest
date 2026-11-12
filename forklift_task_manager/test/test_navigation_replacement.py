@@ -79,6 +79,19 @@ def navigator():
     return nav
 
 
+def test_compute_path_uses_explicit_default_with_multiple_planners():
+    for planner_id, expected in [('', 'GridBased'), (' ', 'GridBased'),
+                                 ('TopologyOnly', 'TopologyOnly')]:
+        nav = navigator()
+        nav._path_client = Client()
+        nav._path_request_token = 0
+        nav._path_goal_handle = None
+        nav._path_timeout_timer = None
+        nav.compute_path_result(PoseTarget('goal', 1., 0., 0.), lambda *_: None,
+                                planner_id=planner_id)
+        assert nav._path_client.sent[-1][0].planner_id == expected
+
+
 def test_cancel_ack_does_not_allow_new_goal_until_old_terminal_result():
     nav = navigator()
     done = []

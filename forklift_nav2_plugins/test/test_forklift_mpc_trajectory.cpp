@@ -320,6 +320,20 @@ TEST(ForkliftMpcTrajectory, HighCurvatureReportsTurningRadiusAndSpeedLimit)
   EXPECT_NEAR(result.trajectory[1].speed_limit, 0.08, 1e-9);
 }
 
+TEST(ForkliftMpcTrajectory, CurvatureWarningIgnoresOnlyTinyBoundaryNoise)
+{
+  for (const double radius:{.5999,.59}) {
+    nav_msgs::msg::Path path;
+    for (int i=0;i<=20;++i) {
+      const double angle=i*.04;
+      path.poses.push_back(makePose(radius*std::sin(angle),radius*(1.-std::cos(angle)),angle));
+    }
+    MpcTrajectoryOptions options;options.min_turning_radius=.6;
+    const auto result=processPathToMpcTrajectory(path,testVehicleModel(),options);
+    EXPECT_EQ(result.diagnostics.curvature_exceeds_limit,radius<.599);
+  }
+}
+
 TEST(ForkliftMpcTrajectory, HighCurvatureDoesNotImplyPivotMotion)
 {
   nav_msgs::msg::Path path;
